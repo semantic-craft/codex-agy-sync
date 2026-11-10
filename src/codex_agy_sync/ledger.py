@@ -1,6 +1,6 @@
 """Canonical Indexed Event-Ledger IR and pure companion view projections.
 
-Invariants encoded in this module:
+Invariants encoded in this module.
 1. Branded semantic primitives prevent mixing Antigravity and Codex identifiers,
    indices, and digests across host boundaries (per `principle-type-system-discipline`).
 2. `TrajectoryLedger` is an immutable, append-only indexed event sequence whose
@@ -13,7 +13,7 @@ Invariants encoded in this module:
    and host-specific extension envelopes (`HostExtensionEnvelope`, such as Codex
    `encrypted_content` or `world_state`) for lossless round-trip fidelity (grafted from
    Candidate 1).
-4. Only completed turns appear in `completed_turn_watermarks`; in-flight turns
+4. Only completed turns appear in `completed_turn_watermarks`. In-flight turns
    never advance a sync watermark.
 5. Companion files (`transcript.jsonl`, `annotations/<id>.pbtxt` with 3-tier title
    precedence, `CascadeTrajectorySummary`, `SummariesState` for `agyhub_summaries_proto.pb`,
@@ -23,10 +23,16 @@ Invariants encoded in this module:
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
+import hashlib
+import json
+import os
 from pathlib import Path
 from typing import Literal, Mapping, NewType, Sequence, Tuple, TypeAlias
+from urllib.parse import unquote, urlparse
 
 # ---------------------------------------------------------------------------
 # Branded Semantic Primitives (per principle-type-system-discipline)
@@ -81,14 +87,40 @@ def parse_workspace_identity(raw_path_or_uri: str | Path) -> tuple[WorkspacePath
     Invariants:
     - Expands `~` and environment variables via runtime discovery without hardcoded usernames.
     - Resolves symlinks and strips trailing slashes so Antigravity `folderUri` and
-      Codex `project_roots.path` / `threads.cwd` normalize to the exact same key.
+      Codex `project_roots.path` and `threads.cwd` normalize to the exact same key.
     - Rejects relative paths that cannot be resolved or empty strings.
     """
-    # TODO:
-    # 1. If str starts with "file://", unquote URI path and convert to Path; else Path(raw_path_or_uri).expanduser().
-    # 2. Resolve via path.resolve(strict=False) and reject root/empty anomalies.
-    # 3. Build WorkspacePath(resolved) and WorkspaceRootUri(resolved.as_uri().rstrip("/")).
-    raise NotImplementedError("parse_workspace_identity is a boundary parser stub")
+    if raw_path_or_uri is None:
+        raise ValueError("Workspace path cannot be None.")
+
+    raw_text = str(raw_path_or_uri).strip()
+    if not raw_text:
+        raise ValueError("Workspace path cannot be empty.")
+
+    if raw_text.startswith("file://"):
+        parsed = urlparse(raw_text)
+        if parsed.scheme != "file":
+            raise ValueError(f"Unsupported URI scheme in {raw_path_or_uri!r}.")
+        unquoted_path = unquote(parsed.path)
+        if not unquoted_path or not unquoted_path.startswith("/"):
+            raise ValueError(f"Invalid file URI {raw_path_or_uri!r}.")
+        candidate = Path(unquoted_path)
+    else:
+        if "://" in raw_text:
+            raise ValueError(f"Unsupported URI scheme in {raw_path_or_uri!r}.")
+        expanded = os.path.expanduser(os.path.expandvars(raw_text))
+        if expanded.startswith("~") or "$" in expanded:
+            raise ValueError(f"Unexpanded home or environment variable in {raw_path_or_uri!r}.")
+        if raw_text in (".", ".."):
+            raise ValueError(f"Ambiguous relative workspace specifier {raw_path_or_uri!r}.")
+        candidate = Path(expanded)
+
+    resolved = candidate.resolve(strict=False)
+    if str(resolved) == "/" or len(resolved.parts) <= 1:
+        raise ValueError(f"Workspace path cannot resolve to filesystem root {raw_path_or_uri!r}.")
+
+    uri = resolved.as_uri().rstrip("/")
+    return WorkspacePath(resolved), WorkspaceRootUri(uri)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +138,7 @@ class HostKind(str, Enum):
 class AgyGuiSafeSource(Enum):
     """Antigravity trajectory sources guaranteed to pass the Desktop sidebar filter.
 
-    Invariant: `CORTEX_TRAJECTORY_SOURCE_CLI` (enum `17`) is intentionally omitted
+    Invariant. `CORTEX_TRAJECTORY_SOURCE_CLI` (enum `17`) is intentionally omitted
     so illegal CLI-only provenance cannot be constructed on the write path
     (per `principle-type-system-discipline`).
     """
@@ -120,14 +152,12 @@ class AgyGuiSafeSource(Enum):
     @property
     def proto_enum_value(self) -> int:
         """Numeric value for `CortexTrajectoryMetadata.source`."""
-        # TODO: return self.value[0]
-        raise NotImplementedError("AgyGuiSafeSource.proto_enum_value stub")
+        return self.value[0]
 
     @property
     def summary_column_name(self) -> str:
         """String value stored in `conversation_summaries.source`."""
-        # TODO: return self.value[1]
-        raise NotImplementedError("AgyGuiSafeSource.summary_column_name stub")
+        return self.value[1]
 
 
 @dataclass(frozen=True)
@@ -148,7 +178,7 @@ class HostExtensionEnvelope:
     """Opaque host-specific payload preserved for round-trip fidelity (grafted from Candidate 1).
 
     Used to preserve Codex `encrypted_content`, `world_state`, or Antigravity
-    `gen_metadata` / `executor_metadata` blobs across round-trip conversions.
+    `gen_metadata` and `executor_metadata` blobs across round-trip conversions.
     """
 
     host: HostKind
@@ -201,13 +231,13 @@ class MediaAttachment:
 
 
 # ---------------------------------------------------------------------------
-# Typed Canonical Tool Payloads (10 `exa.cortex.core.tools.*` <-> Codex tools)
+# Typed Canonical Tool Payloads (16 `exa.cortex.core.tools.*` <-> Codex tools)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ReadFilePayload:
-    """Domain payload for `exa.cortex.core.tools.ReadFile` <-> Codex `view_file` / `cat`."""
+    """Domain payload for `exa.cortex.core.tools.ReadFile` <-> Codex `view_file`."""
 
     kind: Literal["read_file"]
     path: str
@@ -227,7 +257,7 @@ class FileEditPayload:
     path: str
     edit_op: Literal["CREATE", "MODIFY", "DELETE"]
     unified_diff: str
-    diff_stats: Tuple[int, int] = (0, 0)  # (lines_added, lines_removed), grafted from Candidate 1
+    diff_stats: Tuple[int, int] = (0, 0)
     is_artifact: bool = False
     artifact_summary: str | None = None
 
@@ -301,7 +331,7 @@ class ManageSubagentsPayload:
 
 @dataclass(frozen=True)
 class ManageTaskPayload:
-    """Domain payload for `exa.cortex.core.tools.ManageTask` <-> Codex `wait` / `send_input`."""
+    """Domain payload for `exa.cortex.core.tools.ManageTask` <-> Codex `wait` and `send_input`."""
 
     kind: Literal["manage_task"]
     action: Literal["list", "status", "send_input", "kill"]
@@ -321,7 +351,7 @@ class SendMessagePayload:
 
 @dataclass(frozen=True)
 class SchedulePayload:
-    """Domain payload for `exa.cortex.core.tools.Schedule` <-> Codex timer/cron tool."""
+    """Domain payload for `exa.cortex.core.tools.Schedule` <-> Codex timer and cron tool."""
 
     kind: Literal["schedule"]
     prompt: str
@@ -445,7 +475,7 @@ CanonicalToolPayload: TypeAlias = (
 
 @dataclass(frozen=True)
 class UserInputEvent:
-    """User prompt event (`step_type=14` / `Step.user_input` tag `19` <-> Codex `message:user`)."""
+    """User prompt event (`step_type=14` / `Step.user_input` tag `19` <-> Codex `message` with role `user`)."""
 
     kind: Literal["user_input"]
     anchor: EventOriginAnchor
@@ -456,7 +486,7 @@ class UserInputEvent:
 
 @dataclass(frozen=True)
 class ThinkingEvent:
-    """Model reasoning summary (`CortexStepPlannerResponse.thinking` <-> Codex `reasoning`/`magpie_reasoning`)."""
+    """Model reasoning summary (`CortexStepPlannerResponse.thinking` <-> Codex `reasoning`)."""
 
     kind: Literal["thinking"]
     anchor: EventOriginAnchor
@@ -468,7 +498,7 @@ class ThinkingEvent:
 
 @dataclass(frozen=True)
 class AssistantTextEvent:
-    """Assistant prose response (`CortexStepPlannerResponse.response` <-> Codex `message:assistant`)."""
+    """Assistant prose response (`CortexStepPlannerResponse.response` <-> Codex `message` with role `assistant`)."""
 
     kind: Literal["assistant_text"]
     anchor: EventOriginAnchor
@@ -507,7 +537,7 @@ class ToolResultEvent:
 
 @dataclass(frozen=True)
 class TaskBoundaryEvent:
-    """Task boundary or user notification (`step_type=81` tag `93` / `step_type=82` tag `94` <-> Codex `event_msg`)."""
+    """Task boundary or user notification (`step_type=81` tag `93` or `step_type=82` tag `94` <-> Codex `event_msg`)."""
 
     kind: Literal["task_boundary"]
     anchor: EventOriginAnchor
@@ -522,7 +552,7 @@ class TaskBoundaryEvent:
 
 @dataclass(frozen=True)
 class CheckpointEvent:
-    """Session checkpoint (`step_type=23` `Step.checkpoint` tag `30` <-> Codex `turn_context`/`world_state`)."""
+    """Session checkpoint (`step_type=23` `Step.checkpoint` tag `30` <-> Codex `turn_context`)."""
 
     kind: Literal["checkpoint"]
     anchor: EventOriginAnchor
@@ -556,6 +586,155 @@ CanonicalEvent: TypeAlias = (
 
 
 # ---------------------------------------------------------------------------
+# Protobuf Wire Helpers for Companion Projections
+# ---------------------------------------------------------------------------
+
+
+def _encode_varint(value: int) -> bytes:
+    if value < 0:
+        value += 1 << 64
+    out = bytearray()
+    while value >= 0x80:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value & 0x7F)
+    return bytes(out)
+
+
+def _encode_varint_field(field_number: int, value: int) -> bytes:
+    tag = (field_number << 3) | 0
+    return _encode_varint(tag) + _encode_varint(value)
+
+
+def _encode_bytes_field(field_number: int, payload: bytes) -> bytes:
+    tag = (field_number << 3) | 2
+    return _encode_varint(tag) + _encode_varint(len(payload)) + payload
+
+
+def _encode_string_field(field_number: int, text: str) -> bytes:
+    if not text:
+        return b""
+    return _encode_bytes_field(field_number, text.encode("utf-8"))
+
+
+def _parse_iso_to_seconds_nanos(iso_str: str) -> tuple[int, int]:
+    cleaned = (iso_str or "").strip()
+    if not cleaned:
+        return (1700000000, 0)
+    try:
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1] + "+00:00"
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        epoch = dt.timestamp()
+        seconds = int(epoch)
+        nanos = int(round((epoch - seconds) * 1_000_000_000))
+        if nanos < 0:
+            nanos = 0
+        return (seconds, nanos)
+    except ValueError:
+        return (1700000000, 0)
+
+
+def _encode_timestamp_proto(iso_str: str) -> bytes:
+    seconds, nanos = _parse_iso_to_seconds_nanos(iso_str)
+    buf = bytearray()
+    if seconds:
+        buf.extend(_encode_varint_field(1, seconds))
+    if nanos:
+        buf.extend(_encode_varint_field(2, nanos))
+    return bytes(buf)
+
+
+def _encode_annotations_proto(proj: AnnotationPbtxtProjection) -> bytes:
+    buf = bytearray()
+    if proj.title:
+        buf.extend(_encode_string_field(1, proj.title))
+    ts_bytes = _encode_timestamp_proto(proj.last_user_view_time_iso)
+    if ts_bytes:
+        buf.extend(_encode_bytes_field(7, ts_bytes))
+    return bytes(buf)
+
+
+def _encode_trajectory_metadata_proto(
+    project_id: AgyProjectId,
+    workspace_uris: Tuple[WorkspaceRootUri, ...],
+    created_at_iso: str,
+    nesting_depth: int = 0,
+    parent_conversation_id: str = "",
+) -> bytes:
+    buf = bytearray()
+    for uri in workspace_uris:
+        ws_meta = _encode_string_field(1, str(uri)) + _encode_string_field(2, str(uri))
+        buf.extend(_encode_bytes_field(1, ws_meta))
+    ts_bytes = _encode_timestamp_proto(created_at_iso)
+    if ts_bytes:
+        buf.extend(_encode_bytes_field(2, ts_bytes))
+    if parent_conversation_id:
+        buf.extend(_encode_string_field(5, parent_conversation_id))
+    for uri in workspace_uris:
+        buf.extend(_encode_string_field(7, str(uri)))
+    if nesting_depth != 0:
+        buf.extend(_encode_varint_field(17, nesting_depth))
+    if project_id:
+        buf.extend(_encode_string_field(18, str(project_id)))
+    return bytes(buf)
+
+
+def _encode_cascade_summary_proto(proj: CascadeSummaryProjection) -> bytes:
+    buf = bytearray()
+    if proj.title:
+        buf.extend(_encode_string_field(1, proj.title))
+    if proj.step_count > 0:
+        buf.extend(_encode_varint_field(2, proj.step_count))
+    mod_ts = _encode_timestamp_proto(proj.updated_at_iso)
+    if mod_ts:
+        buf.extend(_encode_bytes_field(3, mod_ts))
+    buf.extend(_encode_string_field(4, str(proj.cascade_id)))
+    buf.extend(_encode_varint_field(5, 1))
+    created_ts = _encode_timestamp_proto(proj.created_at_iso)
+    if created_ts:
+        buf.extend(_encode_bytes_field(7, created_ts))
+    for uri in proj.workspace_uris:
+        ws_meta = _encode_string_field(1, str(uri)) + _encode_string_field(2, str(uri))
+        buf.extend(_encode_bytes_field(9, ws_meta))
+    if mod_ts:
+        buf.extend(_encode_bytes_field(10, mod_ts))
+    annot_bytes = _encode_annotations_proto(proj.annotations)
+    if annot_bytes:
+        buf.extend(_encode_bytes_field(15, annot_bytes))
+    traj_meta_bytes = _encode_trajectory_metadata_proto(
+        project_id=proj.project_id,
+        workspace_uris=proj.workspace_uris,
+        created_at_iso=proj.created_at_iso,
+        nesting_depth=proj.nesting_depth,
+    )
+    if traj_meta_bytes:
+        buf.extend(_encode_bytes_field(17, traj_meta_bytes))
+    if proj.source.proto_enum_value != 0:
+        buf.extend(_encode_varint_field(20, proj.source.proto_enum_value))
+    buf.extend(_encode_varint_field(22, 1))
+    return bytes(buf)
+
+
+def _encode_summaries_state_proto(state: SummariesStateProjection) -> bytes:
+    buf = bytearray()
+    for cid in sorted(state.summaries.keys()):
+        summary_proj = state.summaries[cid]
+        entry = (
+            _encode_string_field(1, str(cid))
+            + _encode_bytes_field(2, summary_proj.summary_proto_bytes)
+        )
+        buf.extend(_encode_bytes_field(1, entry))
+    for path_key in sorted(state.file_mod_times.keys()):
+        mtime_val = state.file_mod_times[path_key]
+        entry = _encode_string_field(1, path_key) + _encode_varint_field(2, int(mtime_val))
+        buf.extend(_encode_bytes_field(2, entry))
+    return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
 # Completed-Turn Watermark & Companion View Projections
 # ---------------------------------------------------------------------------
 
@@ -564,7 +743,7 @@ CanonicalEvent: TypeAlias = (
 class CompletedTurnWatermark:
     """Immutable boundary record for one completed turn inside `TrajectoryLedger`.
 
-    Invariant: Only turns whose tool calls have all resolved and whose terminal
+    Invariant. Only turns whose tool calls have all resolved and whose terminal
     assistant response or `task_complete` marker has arrived produce a watermark.
     """
 
@@ -593,12 +772,36 @@ class TranscriptRowProjection:
     cache_read_tokens: int
     truncated_fields: Tuple[str, ...] = ()
 
+    def to_json_line(self) -> str:
+        """Render one compact JSONL line matching Antigravity `transcript.jsonl` format."""
+        obj: dict[str, object] = {
+            "step_index": int(self.step_index),
+            "source": self.source,
+            "type": self.step_type_name,
+            "status": self.status_name,
+            "created_at": self.created_at,
+            "content": self.content,
+        }
+        if self.thinking is not None:
+            obj["thinking"] = self.thinking
+        if self.tool_calls_json:
+            obj["tool_calls"] = list(self.tool_calls_json)
+        if self.media_uris:
+            obj["media"] = list(self.media_uris)
+        if self.input_tokens or self.output_tokens or self.cache_read_tokens:
+            obj["input_tokens"] = self.input_tokens
+            obj["cache_read_tokens"] = self.cache_read_tokens
+            obj["output_tokens"] = self.output_tokens
+        if self.truncated_fields:
+            obj["truncated_fields"] = list(self.truncated_fields)
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
 
 @dataclass(frozen=True)
 class AnnotationPbtxtProjection:
     """Pure view projection for `~/.gemini/antigravity/annotations/<cascade_id>.pbtxt`.
 
-    Invariant: Title matches `CascadeSummaryProjection.title` so all three
+    Invariant. Title matches `CascadeSummaryProjection.title` so all three
     Antigravity title precedence slots agree.
     """
 
@@ -608,10 +811,27 @@ class AnnotationPbtxtProjection:
 
     def render_pbtxt(self) -> str:
         """Serialize `exa.jetski_cortex_pb.ConversationAnnotations` textproto."""
-        # TODO:
-        # Format deterministic textproto with field `title: "<escaped>"` and
-        # `last_user_view_time` timestamp.
-        raise NotImplementedError("AnnotationPbtxtProjection.render_pbtxt stub")
+        escaped_title = self.title.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+        seconds, nanos = _parse_iso_to_seconds_nanos(self.last_user_view_time_iso)
+        if nanos > 0:
+            return (
+                f'title: "{escaped_title}"\n'
+                f"last_user_view_time {{\n"
+                f"  seconds: {seconds}\n"
+                f"  nanos: {nanos}\n"
+                f"}}\n"
+            )
+        return (
+            f'title: "{escaped_title}"\n'
+            f"last_user_view_time {{\n"
+            f"  seconds: {seconds}\n"
+            f"}}\n"
+        )
+
+
+_FORBIDDEN_PROJECT_BUCKETS = frozenset(
+    {"", "default-cli-project", "outside-of-project", "null", "none"}
+)
 
 
 @dataclass(frozen=True)
@@ -637,6 +857,19 @@ class CascadeSummaryProjection:
     updated_at_iso: str
     annotations: AnnotationPbtxtProjection
     nesting_depth: Literal[0] = 0
+    summary_proto_bytes: bytes = b""
+
+    def __post_init__(self) -> None:
+        if str(self.project_id).strip() in _FORBIDDEN_PROJECT_BUCKETS:
+            raise ValueError(f"Forbidden Antigravity project_id {self.project_id!r}.")
+        if not self.workspace_uris:
+            raise ValueError("CascadeSummaryProjection requires non-empty workspace_uris.")
+        if self.nesting_depth != 0:
+            raise ValueError("CascadeSummaryProjection requires nesting_depth == 0.")
+        if not isinstance(self.source, AgyGuiSafeSource) or self.source.proto_enum_value == 17:
+            raise ValueError(f"Illegal CLI trajectory source {self.source!r}.")
+        if not self.summary_proto_bytes:
+            object.__setattr__(self, "summary_proto_bytes", _encode_cascade_summary_proto(self))
 
 
 @dataclass(frozen=True)
@@ -648,6 +881,11 @@ class SummariesStateProjection:
 
     summaries: Mapping[CascadeId, CascadeSummaryProjection]
     file_mod_times: Mapping[str, int]
+    proto_bytes: bytes = b""
+
+    def __post_init__(self) -> None:
+        if not self.proto_bytes:
+            object.__setattr__(self, "proto_bytes", _encode_summaries_state_proto(self))
 
 
 @dataclass(frozen=True)
@@ -670,6 +908,25 @@ class CodexThreadSummaryProjection:
     updated_at_ms: int
     archived: Literal[0] = 0
 
+    def __post_init__(self) -> None:
+        if self.archived != 0:
+            raise ValueError("CodexThreadSummaryProjection requires archived == 0.")
+        if not self.preview or not self.preview.strip():
+            raise ValueError("CodexThreadSummaryProjection requires non-empty preview.")
+        if not self.project_id or not str(self.project_id).strip():
+            raise ValueError("CodexThreadSummaryProjection requires non-empty project_id.")
+
+
+def _normalize_single_line_query(query_text: str, limit: int = 80) -> str:
+    lines = []
+    for raw_line in query_text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped in ("<USER_REQUEST>", "</USER_REQUEST>"):
+            continue
+        lines.append(stripped)
+    joined = " ".join(" ".join(lines).split())
+    return joined[:limit].strip()
+
 
 def resolve_canonical_title(
     events: Sequence[CanonicalEvent],
@@ -677,24 +934,124 @@ def resolve_canonical_title(
     annotations_pbtxt_title: str | None = None,
     summary_proto_annotation_title: str | None = None,
     summary_db_or_thread_title: str | None = None,
+    annotation_pbtxt_title: str | None = None,
+    cascade_summary_annotation_title: str | None = None,
+    db_summary_row_title: str | None = None,
+    explicit_title_override: str | None = None,
 ) -> str:
     """Resolve session title enforcing `sidebar_visibility_rules.json` `title_resolution_order`.
 
     Precedence order:
-    1. `annotations_pbtxt_title` (`~/.gemini/antigravity/annotations/<id>.pbtxt`, field 1).
+    1. `explicit_title_override` or `annotations_pbtxt_title` (`~/.gemini/antigravity/annotations/<id>.pbtxt`, field 1).
     2. `summary_proto_annotation_title` (`CascadeTrajectorySummary.annotations.title`, field 15 -> 1).
     3. `summary_db_or_thread_title` (`conversation_summaries.title` or Codex `threads.title`).
     4. Latest `CheckpointEvent.conversation_title` in `events` (`CortexStepCheckpoint.conversation_title`, field 10).
-    5. First `UserInputEvent.query_text` single-line prefix (truncated to 60 chars).
+    5. First `UserInputEvent.query_text` single-line prefix (up to 80 chars).
     6. Fallback `"Untitled Session"`.
     """
-    # TODO:
-    # 1. Return the first non-empty stripped string among (annotations_pbtxt_title,
-    #    summary_proto_annotation_title, summary_db_or_thread_title).
-    # 2. Scan events in reverse for CheckpointEvent with non-empty conversation_title.
-    # 3. Scan events forward for first UserInputEvent with non-empty query_text and truncate to 60 chars.
-    # 4. Return "Untitled Session".
-    raise NotImplementedError("resolve_canonical_title stub")
+    candidates = (
+        explicit_title_override,
+        annotations_pbtxt_title,
+        annotation_pbtxt_title,
+        summary_proto_annotation_title,
+        cascade_summary_annotation_title,
+        summary_db_or_thread_title,
+        db_summary_row_title,
+    )
+    for candidate in candidates:
+        if candidate is not None:
+            cleaned = candidate.strip()
+            if cleaned:
+                return cleaned
+
+    for ev in reversed(events):
+        if isinstance(ev, CheckpointEvent) and ev.conversation_title:
+            cleaned = ev.conversation_title.strip()
+            if cleaned:
+                return cleaned
+
+    for ev in events:
+        if isinstance(ev, UserInputEvent) and ev.query_text:
+            normalized = _normalize_single_line_query(ev.query_text, limit=80)
+            if normalized:
+                return normalized
+
+    return "Untitled Session"
+
+
+def _canonical_event_digest_payload(ev: CanonicalEvent) -> Mapping[str, object]:
+    if isinstance(ev, UserInputEvent):
+        return {
+            "kind": ev.kind,
+            "turn_id": str(ev.anchor.turn_id),
+            "query_text": ev.query_text,
+            "scope_items": list(ev.scope_items),
+        }
+    if isinstance(ev, ThinkingEvent):
+        return {
+            "kind": ev.kind,
+            "turn_id": str(ev.anchor.turn_id),
+            "summary_text": ev.summary_text,
+        }
+    if isinstance(ev, AssistantTextEvent):
+        return {
+            "kind": ev.kind,
+            "turn_id": str(ev.anchor.turn_id),
+            "text": ev.text,
+        }
+    if isinstance(ev, ToolCallEvent):
+        return {
+            "kind": ev.kind,
+            "turn_id": str(ev.anchor.turn_id),
+            "call_id": str(ev.call_id),
+            "tool_name": ev.tool_name,
+            "payload_kind": ev.payload.kind,
+        }
+    if isinstance(ev, ToolResultEvent):
+        return {
+            "kind": ev.kind,
+            "turn_id": str(ev.anchor.turn_id),
+            "call_id": str(ev.call_id),
+            "tool_name": ev.tool_name,
+            "output_text": ev.output_text,
+            "is_error": ev.is_error,
+        }
+    if isinstance(ev, TaskBoundaryEvent):
+        return {
+            "kind": ev.kind,
+            "turn_id": str(ev.anchor.turn_id),
+            "boundary_kind": ev.boundary_kind,
+            "task_name": ev.task_name,
+            "task_status": ev.task_status,
+            "task_summary": ev.task_summary,
+        }
+    if isinstance(ev, CheckpointEvent):
+        return {
+            "kind": ev.kind,
+            "turn_id": str(ev.anchor.turn_id),
+            "checkpoint_index": ev.checkpoint_index,
+            "user_intent": ev.user_intent,
+            "session_summary": ev.session_summary,
+            "conversation_title": ev.conversation_title or "",
+        }
+    if isinstance(ev, SystemEvent):
+        return {
+            "kind": ev.kind,
+            "turn_id": str(ev.anchor.turn_id),
+            "event_type": ev.event_type,
+            "message_text": ev.message_text,
+        }
+    return {"kind": "unknown"}
+
+
+def _serialize_tool_payload_to_arguments_json(payload: CanonicalToolPayload) -> str:
+    if isinstance(payload, OpaqueToolPayload):
+        return payload.raw_arguments_json or "{}"
+    if isinstance(payload, FinishPayload):
+        return payload.arguments_json or "{}"
+    data = dataclasses.asdict(payload)
+    data.pop("kind", None)
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 # ---------------------------------------------------------------------------
@@ -706,16 +1063,16 @@ def resolve_canonical_title(
 class TrajectoryLedger:
     """Append-only canonical event ledger with O(1) secondary lookup indices.
 
-    Dominant access patterns served in O(1) without rescanning `events`:
-    1. `by_step_index`: maps an Antigravity `StepIndex` to all `LedgerSeqNo` entries
+    Dominant access patterns served in O(1) without rescanning `events`.
+    1. `by_step_index` maps an Antigravity `StepIndex` to all `LedgerSeqNo` entries
        produced by that step (resolving the 1-to-N fanout of `step_type = 15` into
        `ThinkingEvent`, `AssistantTextEvent`, and N `ToolCallEvent` nodes, or
        `step_type = 132` into its `ToolResultEvent`).
-    2. `by_call_id`: maps a `ToolCallId` to its `(call_seq_no, result_seq_no | None)`
+    2. `by_call_id` maps a `ToolCallId` to its `(call_seq_no, result_seq_no | None)`
        pair so `CortexStepGeneric` (`step_type = 132`) results join directly to their
        declaring `ChatToolCall` in `step_type = 15`.
-    3. `by_turn_id`: groups all `LedgerSeqNo` entries belonging to one logical turn.
-    4. `completed_turn_watermarks`: ordered watermarks of completed turns used by
+    3. `by_turn_id` groups all `LedgerSeqNo` entries belonging to one logical turn.
+    4. `completed_turn_watermarks` holds ordered watermarks of completed turns used by
        `CursorForkStateMachine` to slice incremental deltas without splitting in-flight turns.
     """
 
@@ -738,89 +1095,431 @@ class TrajectoryLedger:
         *,
         explicit_title_override: str | None = None,
     ) -> TrajectoryLedger:
-        """Build a `TrajectoryLedger`, resolve canonical title, and populate all 4 indices in one pass.
+        """Build a `TrajectoryLedger`, resolve canonical title, and populate all 4 indices in one pass."""
+        resolved_title = resolve_canonical_title(
+            events,
+            explicit_title_override=explicit_title_override,
+        )
 
-        Invariants:
-        - Resolves `title` via `resolve_canonical_title(events, explicit_title_override=...)`.
-        - Every `ToolResultEvent` must reference a `ToolCallId` already declared by an
-          earlier `ToolCallEvent` in the same turn, or synthesize a paired placeholder.
-        - A turn is marked completed and appended to `completed_turn_watermarks` only when
-          every `ToolCallId` opened in that turn has a non-None `result_seq_no` and the
-          turn closes with an `AssistantTextEvent` or completion `TaskBoundaryEvent`.
-        - Synthetic `StepIndex` and `RolloutLineNo` coordinates are deterministically
-          assigned for events originating from the opposite host so watermark slicing is
-          total over both coordinate spaces.
-        """
-        # TODO:
-        # 1. Resolve canonical title via `resolve_canonical_title(events, explicit_title_override=explicit_title_override)`.
-        # 2. Iterate `events` with `LedgerSeqNo(i)`, populating `by_step_index`, `by_call_id`,
-        #    and `by_turn_id`.
-        # 3. For each turn in `by_turn_id`, check whether all `ToolCallEvent` items in that
-        #    turn have matching `ToolResultEvent` items and a terminal assistant/completion event.
-        # 4. Compute deterministic SHA-256 `ContentDigest` over canonical event tuples up to
-        #    the end of each completed turn and append `CompletedTurnWatermark`.
-        # 5. Set `has_inflight_turn = True` if the trailing turn is incomplete.
-        raise NotImplementedError("TrajectoryLedger.from_events stub")
+        normalized_events: list[CanonicalEvent] = []
+        by_step_index_mut: dict[StepIndex, list[LedgerSeqNo]] = {}
+        by_call_id_mut: dict[ToolCallId, tuple[LedgerSeqNo, LedgerSeqNo | None]] = {}
+        by_turn_id_mut: dict[TurnId, list[LedgerSeqNo]] = {}
+
+        next_synthetic_step = 0
+        next_synthetic_line = 1
+        active_planner_step: StepIndex | None = None
+        active_planner_turn: TurnId | None = None
+        active_planner_has_text = False
+        active_planner_has_tools = False
+
+        for idx, ev in enumerate(events):
+            seq_no = LedgerSeqNo(idx)
+            anchor = ev.anchor
+
+            if anchor.agy_step_index is not None:
+                step_idx = anchor.agy_step_index
+                next_synthetic_step = max(next_synthetic_step, int(step_idx) + 1)
+                active_planner_step = None
+            else:
+                if isinstance(ev, (ThinkingEvent, AssistantTextEvent, ToolCallEvent)):
+                    can_reuse = (
+                        active_planner_step is not None
+                        and active_planner_turn == anchor.turn_id
+                        and (
+                            (isinstance(ev, ThinkingEvent) and not active_planner_has_text and not active_planner_has_tools)
+                            or (isinstance(ev, AssistantTextEvent) and not active_planner_has_text and not active_planner_has_tools)
+                            or isinstance(ev, ToolCallEvent)
+                        )
+                    )
+                    if not can_reuse:
+                        active_planner_step = StepIndex(next_synthetic_step)
+                        next_synthetic_step += 1
+                        active_planner_turn = anchor.turn_id
+                        active_planner_has_text = False
+                        active_planner_has_tools = False
+                    if isinstance(ev, AssistantTextEvent):
+                        active_planner_has_text = True
+                    elif isinstance(ev, ToolCallEvent):
+                        active_planner_has_tools = True
+                    step_idx = active_planner_step
+                else:
+                    active_planner_step = None
+                    step_idx = StepIndex(next_synthetic_step)
+                    next_synthetic_step += 1
+
+            if anchor.codex_line_no is not None:
+                line_no = anchor.codex_line_no
+                next_synthetic_line = max(next_synthetic_line, int(line_no) + 1)
+            else:
+                line_no = RolloutLineNo(next_synthetic_line)
+                next_synthetic_line += 1
+
+            if anchor.agy_step_index is None or anchor.codex_line_no is None:
+                new_anchor = dataclasses.replace(
+                    anchor,
+                    agy_step_index=step_idx,
+                    codex_line_no=line_no,
+                )
+                ev = dataclasses.replace(ev, anchor=new_anchor)
+
+            normalized_events.append(ev)
+            by_step_index_mut.setdefault(step_idx, []).append(seq_no)
+            by_turn_id_mut.setdefault(ev.anchor.turn_id, []).append(seq_no)
+
+            if isinstance(ev, ToolCallEvent):
+                by_call_id_mut[ev.call_id] = (seq_no, None)
+            elif isinstance(ev, ToolResultEvent):
+                existing = by_call_id_mut.get(ev.call_id)
+                if existing is not None:
+                    by_call_id_mut[ev.call_id] = (existing[0], seq_no)
+                else:
+                    by_call_id_mut[ev.call_id] = (seq_no, seq_no)
+
+        watermarks: list[CompletedTurnWatermark] = []
+        cumulative_hasher = hashlib.sha256()
+        has_inflight = False
+
+        turn_items = list(by_turn_id_mut.items())
+        for turn_pos, (turn_id, seq_list) in enumerate(turn_items):
+            is_last_turn = turn_pos == len(turn_items) - 1
+            turn_events = [normalized_events[int(s)] for s in seq_list]
+
+            all_calls_resolved = True
+            has_completion_event = False
+            for tev in turn_events:
+                if isinstance(tev, ToolCallEvent):
+                    call_pair = by_call_id_mut.get(tev.call_id)
+                    if call_pair is None or call_pair[1] is None:
+                        all_calls_resolved = False
+                elif isinstance(tev, (AssistantTextEvent, CheckpointEvent, ToolResultEvent, SystemEvent)):
+                    has_completion_event = True
+                elif isinstance(tev, TaskBoundaryEvent):
+                    if tev.task_status.lower() not in ("task_started", "running", "in_progress", "starting"):
+                        has_completion_event = True
+
+            if is_last_turn and turn_events:
+                last_ev = turn_events[-1]
+                if isinstance(last_ev, TaskBoundaryEvent) and last_ev.task_status.lower() == "task_started":
+                    has_completion_event = False
+
+            turn_completed = all_calls_resolved and has_completion_event
+            if not turn_completed:
+                has_inflight = True
+                break
+
+            max_step_idx = StepIndex(0)
+            max_line_no = RolloutLineNo(1)
+            for tev in turn_events:
+                payload_json = json.dumps(
+                    _canonical_event_digest_payload(tev),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                cumulative_hasher.update(payload_json.encode("utf-8"))
+                cumulative_hasher.update(b"\n")
+                if tev.anchor.agy_step_index is not None and int(tev.anchor.agy_step_index) > int(max_step_idx):
+                    max_step_idx = tev.anchor.agy_step_index
+                if tev.anchor.codex_line_no is not None and int(tev.anchor.codex_line_no) > int(max_line_no):
+                    max_line_no = tev.anchor.codex_line_no
+
+            watermarks.append(
+                CompletedTurnWatermark(
+                    turn_id=turn_id,
+                    last_ledger_seq=seq_list[-1],
+                    last_agy_step_index=max_step_idx,
+                    last_codex_line_no=max_line_no,
+                    boundary_digest=ContentDigest(cumulative_hasher.hexdigest()),
+                )
+            )
+
+        return cls(
+            workspace_path=workspace_path,
+            workspace_uri=workspace_uri,
+            title=resolved_title,
+            events=tuple(normalized_events),
+            by_step_index={k: tuple(v) for k, v in by_step_index_mut.items()},
+            by_call_id=dict(by_call_id_mut),
+            by_turn_id={k: tuple(v) for k, v in by_turn_id_mut.items()},
+            completed_turn_watermarks=tuple(watermarks),
+            has_inflight_turn=has_inflight,
+        )
 
     def latest_watermark(self) -> CompletedTurnWatermark | None:
         """Return the watermark of the last completed turn, or `None` if no turn has completed."""
-        # TODO: return self.completed_turn_watermarks[-1] if self.completed_turn_watermarks else None
-        raise NotImplementedError("TrajectoryLedger.latest_watermark stub")
+        return self.completed_turn_watermarks[-1] if self.completed_turn_watermarks else None
 
     def find_watermark(self, turn_id: TurnId) -> CompletedTurnWatermark | None:
         """Look up a specific completed turn's watermark by `TurnId`."""
-        # TODO: Return matching CompletedTurnWatermark or None.
-        raise NotImplementedError("TrajectoryLedger.find_watermark stub")
+        for wm in self.completed_turn_watermarks:
+            if wm.turn_id == turn_id:
+                return wm
+        return None
+
+    def events_for_step(self, step_index: StepIndex) -> Tuple[CanonicalEvent, ...]:
+        """Return all `CanonicalEvent` nodes sharing `step_index` in O(1) via `by_step_index`."""
+        seqs = self.by_step_index.get(step_index, ())
+        return tuple(self.events[int(s)] for s in seqs)
+
+    def call_and_result(self, call_id: ToolCallId) -> Tuple[ToolCallEvent, ToolResultEvent | None]:
+        """Return `(ToolCallEvent, ToolResultEvent | None)` for `call_id` in O(1) via `by_call_id`."""
+        if call_id not in self.by_call_id:
+            raise KeyError(f"ToolCallId {call_id!r} not found in ledger.")
+        call_seq, res_seq = self.by_call_id[call_id]
+        call_ev = self.events[int(call_seq)]
+        if not isinstance(call_ev, ToolCallEvent):
+            raise ValueError(f"Expected ToolCallEvent at seq {call_seq}, found {type(call_ev).__name__}.")
+        res_ev: ToolResultEvent | None = None
+        if res_seq is not None and res_seq != call_seq:
+            candidate = self.events[int(res_seq)]
+            if isinstance(candidate, ToolResultEvent):
+                res_ev = candidate
+        return (call_ev, res_ev)
 
     def slice_after_watermark(
         self,
-        cursor_turn_id: TurnId | None,
+        cursor_turn_id: TurnId | CompletedTurnWatermark | None,
     ) -> Tuple[CanonicalEvent, ...]:
-        """Return the ordered events belonging to completed turns strictly after `cursor_turn_id`.
+        """Return the ordered events belonging to completed turns strictly after `cursor_turn_id`."""
+        if not self.completed_turn_watermarks:
+            if cursor_turn_id is not None:
+                raise KeyError(f"Turn {cursor_turn_id!r} not found in empty watermarks.")
+            return ()
 
-        Invariants:
-        - Events belonging to a trailing in-flight turn (`has_inflight_turn == True`) are
-          excluded so partial turns are never written to the peer host.
-        - Raises `KeyError` if `cursor_turn_id` is not present in `completed_turn_watermarks`.
-        """
-        # TODO:
-        # 1. Locate `cursor_turn_id` in `completed_turn_watermarks` (or start at 0 if None).
-        # 2. Take events from `after_seq` through `latest_watermark().last_ledger_seq`.
-        raise NotImplementedError("TrajectoryLedger.slice_after_watermark stub")
+        last_completed_seq = int(self.completed_turn_watermarks[-1].last_ledger_seq)
+        if cursor_turn_id is None:
+            return self.events[: last_completed_seq + 1]
+
+        target_turn_id = (
+            cursor_turn_id.turn_id
+            if isinstance(cursor_turn_id, CompletedTurnWatermark)
+            else cursor_turn_id
+        )
+        matched_wm = self.find_watermark(target_turn_id)
+        if matched_wm is None:
+            raise KeyError(f"TurnId {target_turn_id!r} not found in completed_turn_watermarks.")
+
+        start_seq = int(matched_wm.last_ledger_seq) + 1
+        if start_seq > last_completed_seq:
+            return ()
+        return self.events[start_seq : last_completed_seq + 1]
 
     def project_transcript_rows(self) -> Tuple[TranscriptRowProjection, ...]:
-        """Project `brain/<id>/.system_generated/logs/transcript.jsonl` rows from the ledger.
+        """Project `brain/<id>/.system_generated/logs/transcript.jsonl` rows from the ledger."""
+        rows: list[TranscriptRowProjection] = []
+        for step_idx in sorted(self.by_step_index.keys(), key=int):
+            step_events = self.events_for_step(step_idx)
+            if not step_events:
+                continue
+            first = step_events[0]
+            created_at = first.anchor.timestamp_iso or "2026-01-01T00:00:00Z"
 
-        Invariant: Coalesces each `(ThinkingEvent, AssistantTextEvent, ToolCallEvent...)`
-        group sharing an `agy_step_index` back into a single `PLANNER_RESPONSE` transcript
-        row so `agy --conversation=<id>` sees a 1-to-1 match with `steps.idx`.
-        """
-        # TODO:
-        # Group events by `agy_step_index` via `self.by_step_index` and emit one
-        # `TranscriptRowProjection` per step index in ascending order.
-        raise NotImplementedError("TrajectoryLedger.project_transcript_rows stub")
+            if isinstance(first, (ThinkingEvent, AssistantTextEvent, ToolCallEvent)):
+                thinking_parts: list[str] = []
+                text_parts: list[str] = []
+                tool_calls: list[Mapping[str, object]] = []
+                in_tokens = 0
+                out_tokens = 0
+                cache_tokens = 0
+
+                for ev in step_events:
+                    if isinstance(ev, ThinkingEvent):
+                        if ev.summary_text:
+                            thinking_parts.append(ev.summary_text)
+                        elif ev.raw_thinking:
+                            thinking_parts.append(ev.raw_thinking)
+                        in_tokens = max(in_tokens, ev.token_usage.input_tokens)
+                        out_tokens = max(out_tokens, ev.token_usage.output_tokens)
+                        cache_tokens = max(cache_tokens, ev.token_usage.cache_read_tokens)
+                    elif isinstance(ev, AssistantTextEvent):
+                        if ev.text:
+                            text_parts.append(ev.text)
+                        in_tokens = max(in_tokens, ev.token_usage.input_tokens)
+                        out_tokens = max(out_tokens, ev.token_usage.output_tokens)
+                        cache_tokens = max(cache_tokens, ev.token_usage.cache_read_tokens)
+                    elif isinstance(ev, ToolCallEvent):
+                        tool_calls.append(
+                            {
+                                "id": str(ev.call_id),
+                                "name": ev.tool_name,
+                                "arguments_json": _serialize_tool_payload_to_arguments_json(ev.payload),
+                            }
+                        )
+
+                rows.append(
+                    TranscriptRowProjection(
+                        step_index=step_idx,
+                        source="MODEL",
+                        step_type_name="PLANNER_RESPONSE",
+                        status_name="DONE",
+                        created_at=created_at,
+                        content="\n".join(text_parts),
+                        thinking="\n".join(thinking_parts) if thinking_parts else None,
+                        tool_calls_json=tuple(tool_calls),
+                        media_uris=(),
+                        input_tokens=in_tokens,
+                        output_tokens=out_tokens,
+                        cache_read_tokens=cache_tokens,
+                    )
+                )
+            elif isinstance(first, UserInputEvent):
+                media_items = tuple(
+                    {"mime_type": m.mime_type, "uri": m.uri} for m in first.media
+                )
+                rows.append(
+                    TranscriptRowProjection(
+                        step_index=step_idx,
+                        source="USER_EXPLICIT",
+                        step_type_name="USER_INPUT",
+                        status_name="DONE",
+                        created_at=created_at,
+                        content=first.query_text,
+                        thinking=None,
+                        tool_calls_json=(),
+                        media_uris=media_items,
+                        input_tokens=0,
+                        output_tokens=0,
+                        cache_read_tokens=0,
+                    )
+                )
+            elif isinstance(first, ToolResultEvent):
+                rows.append(
+                    TranscriptRowProjection(
+                        step_index=step_idx,
+                        source="MODEL",
+                        step_type_name="GENERIC",
+                        status_name="ERROR" if first.is_error else "DONE",
+                        created_at=created_at,
+                        content=first.output_text,
+                        thinking=None,
+                        tool_calls_json=(),
+                        media_uris=(),
+                        input_tokens=0,
+                        output_tokens=0,
+                        cache_read_tokens=0,
+                    )
+                )
+            elif isinstance(first, CheckpointEvent):
+                rows.append(
+                    TranscriptRowProjection(
+                        step_index=step_idx,
+                        source="SYSTEM",
+                        step_type_name="CHECKPOINT",
+                        status_name="DONE",
+                        created_at=created_at,
+                        content=first.session_summary or first.user_intent,
+                        thinking=None,
+                        tool_calls_json=(),
+                        media_uris=(),
+                        input_tokens=0,
+                        output_tokens=0,
+                        cache_read_tokens=0,
+                    )
+                )
+            elif isinstance(first, TaskBoundaryEvent):
+                step_label = "NOTIFY_USER" if first.boundary_kind == "notify_user" else "TASK_BOUNDARY"
+                rows.append(
+                    TranscriptRowProjection(
+                        step_index=step_idx,
+                        source="MODEL",
+                        step_type_name=step_label,
+                        status_name="DONE",
+                        created_at=created_at,
+                        content=first.task_summary or first.task_name,
+                        thinking=None,
+                        tool_calls_json=(),
+                        media_uris=(),
+                        input_tokens=0,
+                        output_tokens=0,
+                        cache_read_tokens=0,
+                    )
+                )
+            elif isinstance(first, SystemEvent):
+                rows.append(
+                    TranscriptRowProjection(
+                        step_index=step_idx,
+                        source="SYSTEM",
+                        step_type_name="SYSTEM_MESSAGE",
+                        status_name="DONE",
+                        created_at=created_at,
+                        content=first.message_text,
+                        thinking=None,
+                        tool_calls_json=(),
+                        media_uris=(),
+                        input_tokens=0,
+                        output_tokens=0,
+                        cache_read_tokens=0,
+                    )
+                )
+        return tuple(rows)
+
+    def project_annotation_pbtxt(
+        self,
+        cascade_id: CascadeId,
+        viewed_at_iso: str | None = None,
+    ) -> AnnotationPbtxtProjection:
+        """Project `~/.gemini/antigravity/annotations/<cascade_id>.pbtxt` from the ledger."""
+        ts = viewed_at_iso or (
+            self.events[-1].anchor.timestamp_iso if self.events else "2026-01-01T00:00:00Z"
+        )
+        return AnnotationPbtxtProjection(
+            cascade_id=cascade_id,
+            title=self.title,
+            last_user_view_time_iso=ts,
+        )
 
     def project_agy_annotations(
         self,
         cascade_id: CascadeId,
-        viewed_at_iso: str,
+        viewed_at_iso: str | None = None,
     ) -> AnnotationPbtxtProjection:
-        """Project `~/.gemini/antigravity/annotations/<cascade_id>.pbtxt` from the ledger."""
-        # TODO: return AnnotationPbtxtProjection(cascade_id=cascade_id, title=self.title, last_user_view_time_iso=viewed_at_iso)
-        raise NotImplementedError("TrajectoryLedger.project_agy_annotations stub")
+        """Alias for `project_annotation_pbtxt`."""
+        return self.project_annotation_pbtxt(cascade_id=cascade_id, viewed_at_iso=viewed_at_iso)
+
+    def project_agy_cascade_summary(
+        self,
+        cascade_id: CascadeId,
+        project_id: AgyProjectId,
+        viewed_at_iso: str | None = None,
+        source: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
+    ) -> CascadeSummaryProjection:
+        """Project `CascadeTrajectorySummary` with 3-way title and sidebar-visibility invariants enforced."""
+        created_iso = self.events[0].anchor.timestamp_iso if self.events else "2026-01-01T00:00:00Z"
+        updated_iso = (
+            viewed_at_iso
+            or (self.events[-1].anchor.timestamp_iso if self.events else created_iso)
+        )
+        annot = self.project_annotation_pbtxt(cascade_id=cascade_id, viewed_at_iso=updated_iso)
+        preview = self._derive_preview_text()
+        return CascadeSummaryProjection(
+            cascade_id=cascade_id,
+            project_id=project_id,
+            workspace_uris=(self.workspace_uri,),
+            source=source,
+            title=self.title,
+            preview=preview,
+            step_count=len(self.by_step_index),
+            created_at_iso=created_iso,
+            updated_at_iso=updated_iso,
+            annotations=annot,
+            nesting_depth=0,
+        )
 
     def project_agy_summary(
         self,
         cascade_id: CascadeId,
         project_id: AgyProjectId,
-        viewed_at_iso: str,
+        viewed_at_iso: str | None = None,
         source: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
     ) -> CascadeSummaryProjection:
-        """Project `CascadeTrajectorySummary` with 3-way title and sidebar-visibility invariants enforced."""
-        # TODO:
-        # Derive `step_count` from `len(self.by_step_index)`, `annotations` via `project_agy_annotations`,
-        # and timestamps from first/last event anchors.
-        raise NotImplementedError("TrajectoryLedger.project_agy_summary stub")
+        """Alias for `project_agy_cascade_summary`."""
+        return self.project_agy_cascade_summary(
+            cascade_id=cascade_id,
+            project_id=project_id,
+            viewed_at_iso=viewed_at_iso,
+            source=source,
+        )
 
     def project_agy_hub_summaries_state(
         self,
@@ -830,9 +1529,17 @@ class TrajectoryLedger:
         conv_db_mtime: int,
     ) -> SummariesStateProjection:
         """Project updated `SummariesStateProjection` for `agyhub_summaries_proto.pb` (grafted from Candidate 1)."""
-        # TODO:
-        # Merge `updated_summary` into `existing_state.summaries` and update `file_mod_times[conv_db_path] = conv_db_mtime`.
-        raise NotImplementedError("TrajectoryLedger.project_agy_hub_summaries_state stub")
+        merged_summaries: dict[CascadeId, CascadeSummaryProjection] = {}
+        merged_mtimes: dict[str, int] = {}
+        if existing_state is not None:
+            merged_summaries.update(existing_state.summaries)
+            merged_mtimes.update(existing_state.file_mod_times)
+        merged_summaries[updated_summary.cascade_id] = updated_summary
+        merged_mtimes[str(conv_db_path)] = int(conv_db_mtime)
+        return SummariesStateProjection(
+            summaries=merged_summaries,
+            file_mod_times=merged_mtimes,
+        )
 
     def project_codex_thread_summary(
         self,
@@ -840,7 +1547,33 @@ class TrajectoryLedger:
         project_id: CodexProjectId,
     ) -> CodexThreadSummaryProjection:
         """Project Codex `threads` row with non-empty `preview` and `archived=0` invariants."""
-        # TODO:
-        # Derive non-empty `preview` from the first `UserInputEvent.query_text` (or fallback to `self.title`)
-        # so `threads.preview <> ''` always holds.
-        raise NotImplementedError("TrajectoryLedger.project_codex_thread_summary stub")
+        created_iso = self.events[0].anchor.timestamp_iso if self.events else "2026-01-01T00:00:00Z"
+        updated_iso = self.events[-1].anchor.timestamp_iso if self.events else created_iso
+        c_sec, c_nanos = _parse_iso_to_seconds_nanos(created_iso)
+        u_sec, u_nanos = _parse_iso_to_seconds_nanos(updated_iso)
+        created_ms = c_sec * 1000 + (c_nanos // 1_000_000)
+        updated_ms = max(created_ms, u_sec * 1000 + (u_nanos // 1_000_000))
+        preview = self._derive_preview_text()
+        return CodexThreadSummaryProjection(
+            thread_id=thread_id,
+            project_id=project_id,
+            cwd=self.workspace_path,
+            title=self.title,
+            preview=preview,
+            created_at_ms=created_ms,
+            updated_at_ms=updated_ms,
+            archived=0,
+        )
+
+    def _derive_preview_text(self) -> str:
+        for ev in self.events:
+            if isinstance(ev, UserInputEvent) and ev.query_text.strip():
+                normalized = _normalize_single_line_query(ev.query_text, limit=160)
+                if normalized:
+                    return normalized
+        for ev in self.events:
+            if isinstance(ev, AssistantTextEvent) and ev.text.strip():
+                normalized = _normalize_single_line_query(ev.text, limit=160)
+                if normalized:
+                    return normalized
+        return self.title if self.title.strip() else "Synchronized Session"

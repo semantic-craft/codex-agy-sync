@@ -89,7 +89,7 @@ for p in repo.rglob("*"):
     if rel.name in ("todo.md", "decisions.tsv"):
         continue
     txt = p.read_text(encoding="utf-8", errors="ignore")
-    if rel.parts[0] in ("scripts", "src", "docs"):
+    if rel.parts[0] in ("scripts", "src", "docs", "tests", "bin"):
         for line_no, line in enumerate(txt.splitlines(), start=1):
             if home_str in line:
                 bad.append(f"{rel}:{line_no}: hardcoded home path {home_str}")
@@ -108,7 +108,9 @@ if bad:
     for b in bad:
         print("SECURITY/HYGIENE FAIL:", b, file=sys.stderr)
     sys.exit(1)
-print("  Hygiene & credential isolation check passed (0 hardcoded user paths in scripts/src/docs, 0 csrfToken leaks).")
+print("  Hygiene & credential isolation check passed (0 hardcoded user paths in scripts/src/docs/tests, 0 csrfToken leaks).")
 '
 
-echo "[5/5] All checks passed."
+echo "[5/5] Running behavioral test suite..."
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+echo "All checks passed."
