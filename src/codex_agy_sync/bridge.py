@@ -66,7 +66,9 @@ from .ledger import (
     _encode_bytes_field,
     _encode_string_field,
     _encode_timestamp_proto,
+    _encode_trajectory_metadata_proto,
     _encode_varint_field,
+    decode_summaries_state_proto,
     parse_workspace_identity,
     resolve_canonical_title,
 )
@@ -603,6 +605,62 @@ class ProjectRegistry:
             codex_legacy_project_id=codex_legacy_pid,
         )
 
+    def resolve_readonly_binding(
+        self,
+        workspace: str | Path,
+    ) -> WorkspaceProjectBinding:
+        """Resolve workspace project IDs in memory without creating or mutating any files on disk."""
+        ws_path, ws_uri = parse_workspace_identity(workspace)
+        ws_name = ws_path.name or "workspace"
+        agy_pid = AgyProjectId(_deterministic_uuid("agy-project", str(ws_uri)))
+        projects_dir = self._paths.gemini_config_dir / "projects"
+        if projects_dir.is_dir():
+            for pfile in sorted(projects_dir.glob("*.json")):
+                try:
+                    data = json.loads(pfile.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                for folder_uri in self._extract_agy_project_folder_uris(data):
+                    try:
+                        _, norm_uri = parse_workspace_identity(folder_uri)
+                    except ValueError:
+                        continue
+                    if norm_uri == ws_uri:
+                        cand_id = str(data.get("id") or pfile.stem).strip()
+                        if cand_id and cand_id not in {"", "default-cli-project", "outside-of-project", "null", "none"}:
+                            agy_pid = AgyProjectId(cand_id)
+                            break
+
+        codex_pid = CodexProjectId(_deterministic_uuid("codex-project", str(ws_uri)))
+        codex_legacy_pid = CodexLegacyProjectId(_deterministic_uuid("codex-legacy-project", str(ws_uri)))
+        state_db = self._paths.codex_home_dir / "state_5.sqlite"
+        if state_db.is_file():
+            try:
+                conn = _open_readonly_sqlite(state_db)
+                try:
+                    rows = conn.execute("SELECT project_id, path FROM project_roots").fetchall()
+                    for pid, rpath in rows:
+                        try:
+                            norm_p, _ = parse_workspace_identity(str(rpath))
+                            if norm_p == ws_path and pid:
+                                codex_pid = CodexProjectId(str(pid))
+                                break
+                        except ValueError:
+                            continue
+                finally:
+                    conn.close()
+            except sqlite3.OperationalError:
+                pass
+
+        return WorkspaceProjectBinding(
+            workspace_path=ws_path,
+            workspace_uri=ws_uri,
+            workspace_name=ws_name,
+            agy_project_id=agy_pid,
+            codex_project_id=codex_pid,
+            codex_legacy_project_id=codex_legacy_pid,
+        )
+
     def list_workspace_sessions(
         self,
         binding: WorkspaceProjectBinding,
@@ -933,7 +991,9 @@ class PresenceWalGuard:
         if not lock_file.exists():
             return False
         try:
-            fd = os.open(str(lock_file), os.O_RDWR)
+            fd = os.open(str(lock_file), os.O_RDONLY)
+        except PermissionError:
+            return True
         except OSError:
             return False
         try:
@@ -959,11 +1019,15 @@ class PresenceWalGuard:
         check `-wal` files and daemon liveness (`hub_<port>.json` PID + loopback ping,
         Codex Unix domain socket).
         """
+        _ = codex_thread_id
         agy_daemon = self._discover_agy_daemon()
         codex_daemon = self._discover_codex_daemon()
 
         agy_presence_locked = False
         agy_wal_active = False
+        sum_wal = self._paths.agy_data_dir / "conversation_summaries.db-wal"
+        if sum_wal.exists() and sum_wal.stat().st_size > 0 and agy_daemon is not None:
+            agy_wal_active = True
         if cascade_id is not None:
             lock_path = self._paths.agy_data_dir / "presence" / f"{cascade_id}.lock"
             agy_presence_locked = self._probe_flock_locked(lock_path)
@@ -972,10 +1036,9 @@ class PresenceWalGuard:
                 agy_wal_active = True
 
         codex_wal_active = False
-        if codex_thread_id is not None:
-            state_wal = self._paths.codex_home_dir / "state_5.sqlite-wal"
-            if state_wal.exists() and state_wal.stat().st_size > 0 and codex_daemon is not None:
-                codex_wal_active = True
+        state_wal = self._paths.codex_home_dir / "state_5.sqlite-wal"
+        if state_wal.exists() and state_wal.stat().st_size > 0 and codex_daemon is not None:
+            codex_wal_active = True
 
         return HostLockSnapshot(
             agy_daemon=agy_daemon,
@@ -1006,6 +1069,7 @@ class PresenceWalGuard:
         backed_up: list[Path] = []
         sha_map: dict[str, str] = {}
         restore_cmds: list[str] = []
+        target_set = {p.resolve(strict=False) for p in target_files if p.is_file()}
 
         for idx, src_path in enumerate(target_files):
             if not src_path.is_file():
@@ -1017,6 +1081,11 @@ class PresenceWalGuard:
             backed_up.append(dst_path)
             sha_map[str(src_path)] = digest
             restore_cmds.append(f"cp -p {dst_path} {src_path}")
+            if src_path.suffix in (".db", ".sqlite"):
+                for suffix in ("-wal", "-shm"):
+                    sidecar = src_path.with_name(f"{src_path.name}{suffix}")
+                    if sidecar.resolve(strict=False) not in target_set:
+                        restore_cmds.append(f"rm -f {sidecar}")
 
         restoration_command = " && ".join(restore_cmds) if restore_cmds else ":"
         created_iso = _now_iso()
@@ -1187,12 +1256,10 @@ class CursorForkStateMachine:
                 return TransportMode.OFFLINE_STORAGE
             if lock_snapshot.can_write_agy_offline():
                 return TransportMode.OFFLINE_STORAGE
-            if lock_snapshot.agy_daemon is not None and not lock_snapshot.agy_presence_locked:
-                return TransportMode.ONLINE_RPC
             return DeferredBusyTransition(
                 kind="deferred_busy",
                 blocking_host=HostKind.ANTIGRAVITY,
-                reason="Antigravity session is locked by an active presence flock.",
+                reason="Antigravity session is locked by an active presence flock or WAL daemon.",
             )
 
         if lock_snapshot.codex_turn_inflight:
@@ -1219,12 +1286,10 @@ class CursorForkStateMachine:
             return TransportMode.OFFLINE_STORAGE
         if lock_snapshot.can_write_codex_offline():
             return TransportMode.OFFLINE_STORAGE
-        if lock_snapshot.codex_daemon is not None:
-            return TransportMode.ONLINE_RPC
         return DeferredBusyTransition(
             kind="deferred_busy",
             blocking_host=HostKind.CODEX,
-            reason="Codex thread cannot be written safely right now.",
+            reason="Codex thread cannot be written safely right now due to active WAL lock.",
         )
 
     @staticmethod
@@ -1417,6 +1482,11 @@ class CursorForkStateMachine:
 
         if agy_advanced and not codex_advanced:
             if direction == SyncDirection.CODEX_TO_AGY:
+                sel = CursorForkStateMachine._select_transport_or_defer(
+                    HostKind.ANTIGRAVITY, lock_snapshot, transport_mode
+                )
+                if isinstance(sel, DeferredBusyTransition):
+                    return sel
                 return DivergedConflictTransition(
                     kind="diverged",
                     source_host=HostKind.CODEX,
@@ -1429,7 +1499,7 @@ class CursorForkStateMachine:
                     resolution_policy=fork_policy,
                     preallocated_fork_session_id=str(uuid.uuid4()),
                     fork_events_to_apply=codex_ledger.slice_after_watermark(None),
-                    selected_transport=TransportMode.OFFLINE_STORAGE,
+                    selected_transport=sel,
                 )
             sel = CursorForkStateMachine._select_transport_or_defer(
                 HostKind.CODEX, lock_snapshot, transport_mode
@@ -1449,6 +1519,11 @@ class CursorForkStateMachine:
 
         if codex_advanced and not agy_advanced:
             if direction == SyncDirection.AGY_TO_CODEX:
+                sel = CursorForkStateMachine._select_transport_or_defer(
+                    HostKind.CODEX, lock_snapshot, transport_mode
+                )
+                if isinstance(sel, DeferredBusyTransition):
+                    return sel
                 return DivergedConflictTransition(
                     kind="diverged",
                     source_host=HostKind.ANTIGRAVITY,
@@ -1461,7 +1536,7 @@ class CursorForkStateMachine:
                     resolution_policy=fork_policy,
                     preallocated_fork_session_id=str(uuid.uuid4()),
                     fork_events_to_apply=agy_ledger.slice_after_watermark(None),
-                    selected_transport=TransportMode.OFFLINE_STORAGE,
+                    selected_transport=sel,
                 )
             sel = CursorForkStateMachine._select_transport_or_defer(
                 HostKind.ANTIGRAVITY, lock_snapshot, transport_mode
@@ -1539,6 +1614,7 @@ class HostTransportPort(Protocol):
         mode: TransportMode,
         parent_cascade_id: CascadeId | None = None,
         source_tag: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
+        incremental: bool = False,
     ) -> CascadeId:
         """Write delta events and companion projections to Antigravity."""
         ...
@@ -1552,6 +1628,7 @@ class HostTransportPort(Protocol):
         lock_snapshot: HostLockSnapshot,
         mode: TransportMode,
         parent_thread_id: CodexThreadId | None = None,
+        incremental: bool = False,
     ) -> CodexThreadId:
         """Write delta events and thread index metadata to Codex."""
         ...
@@ -1595,9 +1672,9 @@ class DefaultHostTransport:
                             db_title = str(row[0]).strip()
                         if row[1]:
                             for fn, wt, _, raw in _iter_wire_fields(bytes(row[1])):
-                                if fn == 16 and wt == 2:
+                                if fn == 15 and wt == 2:
                                     for afn, awt, _, araw in _iter_wire_fields(raw):
-                                        if afn == 4 and awt == 2:
+                                        if afn == 1 and awt == 2:
                                             cand = araw.decode("utf-8", errors="replace").strip()
                                             if cand:
                                                 summary_annot_title = cand
@@ -1735,6 +1812,7 @@ class DefaultHostTransport:
         mode: TransportMode,
         parent_cascade_id: CascadeId | None = None,
         source_tag: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
+        incremental: bool = False,
     ) -> CascadeId:
         _ = (lock_snapshot, mode)
         target_cid = cascade_id or CascadeId(str(uuid.uuid4()))
@@ -1745,8 +1823,8 @@ class DefaultHostTransport:
         conv_db = conv_dir / f"{target_cid}.db"
 
         is_incremental = (
-            conv_db.is_file()
-            and len(events) < len(full_ledger.events)
+            incremental
+            and conv_db.is_file()
             and len(events) > 0
         )
 
@@ -1799,18 +1877,13 @@ class DefaultHostTransport:
                 if full_ledger.events
                 else _now_iso()
             )
-            ws_meta = bytearray()
-            ws_meta.extend(_encode_string_field(1, str(binding.workspace_uri)))
-            ws_meta.extend(_encode_string_field(2, str(binding.workspace_uri)))
-
-            tmeta_blob = bytearray()
-            tmeta_blob.extend(_encode_string_field(1, str(traj_id)))
-            if source_tag.proto_enum_value:
-                tmeta_blob.extend(_encode_varint_field(3, source_tag.proto_enum_value))
-            tmeta_blob.extend(_encode_string_field(7, str(binding.workspace_uri)))
-            tmeta_blob.extend(_encode_bytes_field(9, bytes(ws_meta)))
-            tmeta_blob.extend(_encode_bytes_field(12, _encode_timestamp_proto(created_iso)))
-            tmeta_blob.extend(_encode_string_field(18, str(binding.agy_project_id)))
+            tmeta_blob = _encode_trajectory_metadata_proto(
+                project_id=binding.agy_project_id,
+                workspace_uris=(binding.workspace_uri,),
+                created_at_iso=created_iso,
+                nesting_depth=0,
+                parent_conversation_id=str(parent_cascade_id or ""),
+            )
 
             conn.execute(
                 "INSERT OR REPLACE INTO trajectory_metadata_blob (id, data) VALUES ('main', ?)",
@@ -1891,13 +1964,7 @@ class DefaultHostTransport:
         hub_pb_path = self._paths.agy_data_dir / "agyhub_summaries_proto.pb"
         existing_hub = None
         if hub_pb_path.is_file():
-            from .ledger import SummariesStateProjection
-
-            existing_hub = SummariesStateProjection(
-                summaries={},
-                file_mod_times={},
-                proto_bytes=hub_pb_path.read_bytes(),
-            )
+            existing_hub = decode_summaries_state_proto(hub_pb_path.read_bytes())
         conv_mtime = int(conv_db.stat().st_mtime) if conv_db.is_file() else int(time.time())
         hub_proj = full_ledger.project_agy_hub_summaries_state(
             existing_state=existing_hub,
@@ -1918,6 +1985,7 @@ class DefaultHostTransport:
         lock_snapshot: HostLockSnapshot,
         mode: TransportMode,
         parent_thread_id: CodexThreadId | None = None,
+        incremental: bool = False,
     ) -> CodexThreadId:
         _ = (lock_snapshot, mode)
         target_tid = thread_id or CodexThreadId(str(uuid.uuid4()))
@@ -1953,8 +2021,8 @@ class DefaultHostTransport:
             existing_rollout = day_dir / f"rollout-{ts_str}-{target_tid}.jsonl"
 
         is_incremental = (
-            existing_rollout.is_file()
-            and len(events) < len(full_ledger.events)
+            incremental
+            and existing_rollout.is_file()
             and len(events) > 0
         )
 
@@ -2204,19 +2272,28 @@ class SyncBridge:
                         / "transcript.jsonl",
                     ]
                 )
-            return [p for p in files if p.is_file()]
+        else:
+            files = [
+                self._paths.codex_home_dir / "state_5.sqlite",
+                self._paths.codex_home_dir / ".codex-global-state.json",
+                self._paths.codex_home_dir / "session_index.jsonl",
+            ]
+            if codex_thread_id is not None:
+                for sub in ("sessions", "archived_sessions"):
+                    sroot = self._paths.codex_home_dir / sub
+                    if sroot.is_dir():
+                        files.extend(sroot.rglob(f"*{codex_thread_id}.jsonl"))
 
-        files = [
-            self._paths.codex_home_dir / "state_5.sqlite",
-            self._paths.codex_home_dir / ".codex-global-state.json",
-            self._paths.codex_home_dir / "session_index.jsonl",
-        ]
-        if codex_thread_id is not None:
-            for sub in ("sessions", "archived_sessions"):
-                sroot = self._paths.codex_home_dir / sub
-                if sroot.is_dir():
-                    files.extend(sroot.rglob(f"*{codex_thread_id}.jsonl"))
-        return [p for p in files if p.is_file()]
+        expanded: list[Path] = []
+        for p in files:
+            if p.is_file():
+                expanded.append(p)
+                if p.suffix in (".db", ".sqlite"):
+                    for sidecar_suffix in ("-wal", "-shm"):
+                        sidecar = p.with_name(f"{p.name}{sidecar_suffix}")
+                        if sidecar.is_file():
+                            expanded.append(sidecar)
+        return expanded
 
     def pair_workspace(
         self,
@@ -2236,7 +2313,7 @@ class SyncBridge:
         mode: TransportMode = TransportMode.AUTO,
     ) -> TrajectoryLedger:
         """Read either host's trajectory into an indexed `TrajectoryLedger` without mutating state."""
-        binding = self.pair_workspace(workspace)
+        binding = self._registry.resolve_readonly_binding(workspace)
         locks = self._guard.probe_locks(cascade_id, codex_thread_id)
         if cascade_id is not None:
             return self._transport.read_agy_ledger(binding, cascade_id, locks, mode)
@@ -2264,7 +2341,17 @@ class SyncBridge:
             if codex_thread_id is None:
                 codex_thread_id = cursor.codex_thread_id
 
-        initial_locks = self._guard.probe_locks(cascade_id, codex_thread_id)
+        probe_cid = cascade_id or (
+            CascadeId(_deterministic_uuid("paired-cascade", str(codex_thread_id)))
+            if codex_thread_id is not None
+            else None
+        )
+        probe_tid = codex_thread_id or (
+            CodexThreadId(_deterministic_uuid("paired-codex-thread", str(cascade_id)))
+            if cascade_id is not None
+            else None
+        )
+        initial_locks = self._guard.probe_locks(probe_cid, probe_tid)
 
         agy_ledger: TrajectoryLedger | None = None
         if cascade_id is not None:
@@ -2281,10 +2368,10 @@ class SyncBridge:
                 codex_ledger = None
 
         locks = self._guard.probe_locks(
-            cascade_id,
-            codex_thread_id,
-            agy_turn_inflight=bool(agy_ledger and agy_ledger.has_inflight_turn and direction == SyncDirection.CODEX_TO_AGY),
-            codex_turn_inflight=bool(codex_ledger and codex_ledger.has_inflight_turn and direction == SyncDirection.AGY_TO_CODEX),
+            probe_cid,
+            probe_tid,
+            agy_turn_inflight=bool(agy_ledger and agy_ledger.has_inflight_turn),
+            codex_turn_inflight=bool(codex_ledger and codex_ledger.has_inflight_turn),
         )
 
         transition = CursorForkStateMachine.evaluate(
@@ -2368,6 +2455,7 @@ class SyncBridge:
                     lock_snapshot=locks,
                     mode=transition.selected_transport,
                     source_tag=source_tag,
+                    incremental=isinstance(transition, IncrementalAppendTransition),
                 )
                 refreshed_agy = self._transport.read_agy_ledger(
                     binding, written_cid, locks, transition.selected_transport
@@ -2428,6 +2516,7 @@ class SyncBridge:
                 full_ledger=merged_for_codex,
                 lock_snapshot=locks,
                 mode=transition.selected_transport,
+                incremental=isinstance(transition, IncrementalAppendTransition),
             )
             refreshed_codex = self._transport.read_codex_ledger(
                 binding, written_tid, locks, transition.selected_transport
@@ -2573,14 +2662,21 @@ class SyncBridge:
             assert codex_ledger is not None
             backup_files = self._target_files_for_backup(HostKind.ANTIGRAVITY, orig_cid, orig_tid)
             backup = self._guard.create_offline_backup(HostKind.ANTIGRAVITY, str(orig_cid), backup_files)
+            overwrite_for_agy = TrajectoryLedger.from_events(
+                binding.workspace_path,
+                binding.workspace_uri,
+                transition.fork_events_to_apply,
+                explicit_title_override=codex_ledger.title,
+            )
             written_cid = self._transport.apply_to_agy(
                 binding=binding,
                 cascade_id=orig_cid,
                 events=transition.fork_events_to_apply,
-                full_ledger=codex_ledger,
+                full_ledger=overwrite_for_agy,
                 lock_snapshot=locks,
                 mode=transition.selected_transport,
                 source_tag=source_tag,
+                incremental=False,
             )
             refreshed_agy = self._transport.read_agy_ledger(
                 binding, written_cid, locks, transition.selected_transport
@@ -2614,13 +2710,20 @@ class SyncBridge:
         assert agy_ledger is not None
         backup_files = self._target_files_for_backup(HostKind.CODEX, orig_cid, orig_tid)
         backup = self._guard.create_offline_backup(HostKind.CODEX, str(orig_tid), backup_files)
+        overwrite_for_codex = TrajectoryLedger.from_events(
+            binding.workspace_path,
+            binding.workspace_uri,
+            transition.fork_events_to_apply,
+            explicit_title_override=agy_ledger.title,
+        )
         written_tid = self._transport.apply_to_codex(
             binding=binding,
             thread_id=orig_tid,
             events=transition.fork_events_to_apply,
-            full_ledger=agy_ledger,
+            full_ledger=overwrite_for_codex,
             lock_snapshot=locks,
             mode=transition.selected_transport,
+            incremental=False,
         )
         refreshed_codex = self._transport.read_codex_ledger(
             binding, written_tid, locks, transition.selected_transport

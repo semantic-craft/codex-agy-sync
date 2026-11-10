@@ -734,6 +734,94 @@ def _encode_summaries_state_proto(state: SummariesStateProjection) -> bytes:
     return bytes(buf)
 
 
+def _read_proto_varint(buf: bytes, pos: int) -> tuple[int, int]:
+    result = 0
+    shift = 0
+    while pos < len(buf):
+        b = buf[pos]
+        pos += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, pos
+        shift += 7
+    return result, pos
+
+
+def _iter_proto_fields(buf: bytes) -> list[tuple[int, int, int, bytes]]:
+    fields: list[tuple[int, int, int, bytes]] = []
+    pos = 0
+    n = len(buf)
+    while pos < n:
+        tag, pos = _read_proto_varint(buf, pos)
+        fn = tag >> 3
+        wt = tag & 0x07
+        if wt == 0:
+            val, pos = _read_proto_varint(buf, pos)
+            fields.append((fn, wt, val, b""))
+        elif wt == 1:
+            fields.append((fn, wt, 0, buf[pos : pos + 8]))
+            pos += 8
+        elif wt == 2:
+            ln, pos = _read_proto_varint(buf, pos)
+            fields.append((fn, wt, ln, buf[pos : pos + ln]))
+            pos += ln
+        elif wt == 5:
+            fields.append((fn, wt, 0, buf[pos : pos + 4]))
+            pos += 4
+        else:
+            break
+    return fields
+
+
+def decode_summaries_state_proto(raw_bytes: bytes) -> SummariesStateProjection:
+    summaries: dict[CascadeId, CascadeSummaryProjection] = {}
+    file_mod_times: dict[str, int] = {}
+    for fn, wt, _, payload in _iter_proto_fields(raw_bytes):
+        if fn == 1 and wt == 2:
+            cid_str = ""
+            sum_bytes = b""
+            for efn, ewt, _, epayload in _iter_proto_fields(payload):
+                if efn == 1 and ewt == 2:
+                    cid_str = epayload.decode("utf-8", errors="replace")
+                elif efn == 2 and ewt == 2:
+                    sum_bytes = bytes(epayload)
+            if cid_str:
+                placeholder = CascadeSummaryProjection(
+                    cascade_id=CascadeId(cid_str),
+                    project_id=AgyProjectId("00000000-0000-0000-0000-000000000000"),
+                    workspace_uris=(WorkspaceRootUri("file:///"),),
+                    source=AgyGuiSafeSource.CASCADE_CLIENT,
+                    title="Preserved Session",
+                    preview="Preserved Session",
+                    step_count=1,
+                    created_at_iso="1970-01-01T00:00:00Z",
+                    updated_at_iso="1970-01-01T00:00:00Z",
+                    annotations=AnnotationPbtxtProjection(
+                        cascade_id=CascadeId(cid_str),
+                        title="Preserved Session",
+                        last_user_view_time_iso="1970-01-01T00:00:00Z",
+                    ),
+                    nesting_depth=0,
+                    summary_proto_bytes=sum_bytes,
+                )
+                summaries[CascadeId(cid_str)] = placeholder
+        elif fn == 2 and wt == 2:
+            pkey = ""
+            mval = 0
+            for efn, ewt, eval_int, epayload in _iter_proto_fields(payload):
+                if efn == 1 and ewt == 2:
+                    pkey = epayload.decode("utf-8", errors="replace")
+                elif efn == 2 and ewt == 0:
+                    mval = int(eval_int)
+            if pkey:
+                file_mod_times[pkey] = mval
+    return SummariesStateProjection(
+        summaries=summaries,
+        file_mod_times=file_mod_times,
+        proto_bytes=raw_bytes,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Completed-Turn Watermark & Companion View Projections
 # ---------------------------------------------------------------------------
@@ -1187,13 +1275,24 @@ class TrajectoryLedger:
 
             all_calls_resolved = True
             has_completion_event = False
+            has_user_or_task_start = any(
+                isinstance(tev, UserInputEvent)
+                or (
+                    isinstance(tev, TaskBoundaryEvent)
+                    and tev.task_status.lower() in ("task_started", "running", "in_progress", "starting")
+                )
+                for tev in turn_events
+            )
             for tev in turn_events:
                 if isinstance(tev, ToolCallEvent):
                     call_pair = by_call_id_mut.get(tev.call_id)
                     if call_pair is None or call_pair[1] is None:
                         all_calls_resolved = False
-                elif isinstance(tev, (AssistantTextEvent, CheckpointEvent, ToolResultEvent, SystemEvent)):
+                elif isinstance(tev, (AssistantTextEvent, ToolResultEvent)):
                     has_completion_event = True
+                elif isinstance(tev, (CheckpointEvent, SystemEvent)):
+                    if not has_user_or_task_start:
+                        has_completion_event = True
                 elif isinstance(tev, TaskBoundaryEvent):
                     if tev.task_status.lower() not in ("task_started", "running", "in_progress", "starting"):
                         has_completion_event = True

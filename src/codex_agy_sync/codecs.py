@@ -1390,6 +1390,7 @@ class TrajectoryWireCodec:
         """Parse raw Antigravity `steps` rows into an indexed `TrajectoryLedger`."""
         events: list[CanonicalEvent] = []
         call_index_by_id: dict[ToolCallId, int] = {}
+        unmatched_synthetic_call_ids: list[ToolCallId] = []
 
         turn_num = 1
         current_turn_id = TurnId(f"turn-{turn_num}")
@@ -1399,8 +1400,19 @@ class TrajectoryWireCodec:
             int(t) for t in GeminiStepWireTag
         }
 
+        def _sub_unknown_exts(sub_unknowns: Sequence[UnknownWireField]) -> Tuple[HostExtensionEnvelope, ...]:
+            if not sub_unknowns:
+                return ()
+            return (
+                HostExtensionEnvelope(
+                    host=HostKind.ANTIGRAVITY,
+                    extension_type="agy_submessage_unknowns",
+                    raw_payload=b"".join(_encode_unknown_wire_field(u) for u in sub_unknowns),
+                ),
+            )
+
         for row in raw_steps:
-            meta_dict, meta_unknowns = (
+            meta_dict, _meta_unknowns = (
                 _decode_step_metadata(row.metadata_blob)
                 if row.metadata_blob
                 else (
@@ -1419,7 +1431,7 @@ class TrajectoryWireCodec:
                 )
             )
             step_fields = _iter_wire_fields(row.step_payload_blob) if row.step_payload_blob else []
-            step_unknowns: list[UnknownWireField] = list(meta_unknowns)
+            step_unknowns: list[UnknownWireField] = []
 
             spec: StepWireSpec | None = None
             if row.step_type in STEP_WIRE_TABLE:
@@ -1457,10 +1469,11 @@ class TrajectoryWireCodec:
                 media_list: list[MediaAttachment] = []
                 client_msg_id: str | None = None
                 known_ui_tags = set(range(1, 20))
+                ui_unknowns: list[UnknownWireField] = []
 
                 for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
                     if fn not in known_ui_tags:
-                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                        ui_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
                         query_str = raw.decode("utf-8", errors="replace")
                     elif fn == 2 and wt == 2:
@@ -1491,6 +1504,7 @@ class TrajectoryWireCodec:
                     agy_step_index=row.idx,
                     client_message_id=client_msg_id,
                     unknown_wire_fields=tuple(step_unknowns),
+                    host_extensions=_sub_unknown_exts(ui_unknowns),
                 )
                 events.append(
                     UserInputEvent(
@@ -1515,10 +1529,11 @@ class TrajectoryWireCodec:
                 thinking_dur_ms: int | None = None
                 tool_calls_raw: list[dict[str, Any]] = []
                 known_pr_tags = set(range(1, 21))
+                pr_unknowns: list[UnknownWireField] = []
 
                 for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
                     if fn not in known_pr_tags:
-                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                        pr_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
                         resp_text = raw.decode("utf-8", errors="replace")
                     elif fn == 3 and wt == 2:
@@ -1550,6 +1565,7 @@ class TrajectoryWireCodec:
                     timestamp_iso=created_at_iso,
                     agy_step_index=row.idx,
                     unknown_wire_fields=tuple(step_unknowns),
+                    host_extensions=_sub_unknown_exts(pr_unknowns),
                 )
 
                 emitted_in_step = False
@@ -1581,7 +1597,12 @@ class TrajectoryWireCodec:
                     )
 
                 for tc in tool_calls_raw:
-                    cid = ToolCallId(tc.get("id") or f"call-step-{int(row.idx)}-{len(events)}")
+                    raw_cid_str = str(tc.get("id") or "").strip()
+                    if raw_cid_str:
+                        cid = ToolCallId(raw_cid_str)
+                    else:
+                        cid = ToolCallId(f"call-step-{int(row.idx)}-{len(events)}")
+                        unmatched_synthetic_call_ids.append(cid)
                     tname = tc.get("name") or "unknown_tool"
                     args_json = tc.get("arguments_json") or "{}"
                     args_obj = _safe_json_dict(args_json)
@@ -1607,7 +1628,13 @@ class TrajectoryWireCodec:
             elif spec.step_type == CortexStepTypeCode.GENERIC:
                 turn_has_response = True
                 tc_meta = meta_dict["tool_call"] or {}
-                cid = ToolCallId(tc_meta.get("id") or f"call-generic-{int(row.idx)}")
+                raw_meta_cid = str(tc_meta.get("id") or "").strip()
+                if raw_meta_cid:
+                    cid = ToolCallId(raw_meta_cid)
+                elif unmatched_synthetic_call_ids:
+                    cid = unmatched_synthetic_call_ids.pop(0)
+                else:
+                    cid = ToolCallId(f"call-generic-{int(row.idx)}")
                 tname = tc_meta.get("name") or "unknown_tool"
                 args_json = tc_meta.get("arguments_json") or "{}"
                 tool_summary = str(meta_dict["tool_summary"] or tname)
@@ -1618,10 +1645,11 @@ class TrajectoryWireCodec:
                 any_val: bytes | None = None
                 full_uri: str | None = None
                 known_gen_tags = {1, 2}
+                gen_unknowns: list[UnknownWireField] = []
 
                 for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
                     if fn not in known_gen_tags:
-                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                        gen_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
                         k_str = ""
                         v_str = ""
@@ -1672,6 +1700,7 @@ class TrajectoryWireCodec:
                     timestamp_iso=created_at_iso,
                     agy_step_index=row.idx,
                     unknown_wire_fields=tuple(step_unknowns),
+                    host_extensions=_sub_unknown_exts(gen_unknowns),
                 )
                 events.append(
                     ToolResultEvent(
@@ -1687,17 +1716,17 @@ class TrajectoryWireCodec:
                 )
 
             elif spec.step_type == CortexStepTypeCode.CHECKPOINT:
-                turn_has_response = True
                 cp_idx = 0
                 u_intent = ""
                 s_summary = ""
                 c_summary = ""
                 conv_title: str | None = None
                 known_cp_tags = set(range(1, 32))
+                cp_unknowns: list[UnknownWireField] = []
 
                 for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
                     if fn not in known_cp_tags:
-                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                        cp_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 0:
                         cp_idx = ival
                     elif fn == 4 and wt == 2:
@@ -1715,6 +1744,7 @@ class TrajectoryWireCodec:
                     timestamp_iso=created_at_iso,
                     agy_step_index=row.idx,
                     unknown_wire_fields=tuple(step_unknowns),
+                    host_extensions=_sub_unknown_exts(cp_unknowns),
                 )
                 events.append(
                     CheckpointEvent(
@@ -1729,16 +1759,16 @@ class TrajectoryWireCodec:
                 )
 
             elif spec.step_type == CortexStepTypeCode.TASK_BOUNDARY:
-                turn_has_response = True
                 t_name = ""
                 t_status = ""
                 t_summary = ""
                 t_mode: str | None = None
                 known_tb_tags = set(range(1, 8))
+                tb_unknowns: list[UnknownWireField] = []
 
                 for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
                     if fn not in known_tb_tags:
-                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                        tb_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
                         t_name = raw.decode("utf-8", errors="replace")
                     elif fn == 2 and wt == 2:
@@ -1748,12 +1778,21 @@ class TrajectoryWireCodec:
                     elif fn == 5 and wt == 0:
                         t_mode = str(ival)
 
+                if t_status.lower() in ("task_started", "running", "in_progress", "starting"):
+                    if turn_has_response:
+                        turn_num += 1
+                        current_turn_id = TurnId(f"turn-{turn_num}")
+                        turn_has_response = False
+                else:
+                    turn_has_response = True
+
                 anchor = EventOriginAnchor(
                     origin_host=HostKind.ANTIGRAVITY,
                     turn_id=current_turn_id,
                     timestamp_iso=created_at_iso,
                     agy_step_index=row.idx,
                     unknown_wire_fields=tuple(step_unknowns),
+                    host_extensions=_sub_unknown_exts(tb_unknowns),
                 )
                 events.append(
                     TaskBoundaryEvent(
@@ -1773,10 +1812,11 @@ class TrajectoryWireCodec:
                 notif_content = ""
                 is_blocking = False
                 known_nu_tags = set(range(1, 9))
+                nu_unknowns: list[UnknownWireField] = []
 
                 for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
                     if fn not in known_nu_tags:
-                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                        nu_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
                         review_uris.append(raw.decode("utf-8", errors="replace"))
                     elif fn == 2 and wt == 2:
@@ -1790,6 +1830,7 @@ class TrajectoryWireCodec:
                     timestamp_iso=created_at_iso,
                     agy_step_index=row.idx,
                     unknown_wire_fields=tuple(step_unknowns),
+                    host_extensions=_sub_unknown_exts(nu_unknowns),
                 )
                 events.append(
                     TaskBoundaryEvent(
@@ -1808,10 +1849,11 @@ class TrajectoryWireCodec:
                 msg_text = ""
                 ev_type = ""
                 known_sm_tags = set(range(1, 7))
+                sm_unknowns: list[UnknownWireField] = []
 
                 for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
                     if fn not in known_sm_tags:
-                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                        sm_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
                         msg_text = raw.decode("utf-8", errors="replace")
                     elif fn == 3 and wt == 2:
@@ -1823,6 +1865,7 @@ class TrajectoryWireCodec:
                     timestamp_iso=created_at_iso,
                     agy_step_index=row.idx,
                     unknown_wire_fields=tuple(step_unknowns),
+                    host_extensions=_sub_unknown_exts(sm_unknowns),
                 )
                 events.append(
                     SystemEvent(
@@ -1930,6 +1973,9 @@ class TrajectoryWireCodec:
                     pr_buf.extend(_encode_bytes_field(14, thinking_ev.thinking_signature))
                 if thinking_ev is not None and thinking_ev.raw_thinking:
                     pr_buf.extend(_encode_string_field(16, thinking_ev.raw_thinking))
+                for ext in first_ev.anchor.host_extensions:
+                    if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
+                        pr_buf.extend(ext.raw_payload)
 
                 meta_blob = _encode_step_metadata(
                     created_at_iso=created_iso,
@@ -1969,6 +2015,9 @@ class TrajectoryWireCodec:
                     ui_buf.extend(_encode_bytes_field(9, m_msg))
                 if ev.anchor.client_message_id:
                     ui_buf.extend(_encode_string_field(19, ev.anchor.client_message_id))
+                for ext in ev.anchor.host_extensions:
+                    if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
+                        ui_buf.extend(ext.raw_payload)
 
                 meta_blob = _encode_step_metadata(
                     created_at_iso=ev.anchor.timestamp_iso,
@@ -2020,6 +2069,9 @@ class TrajectoryWireCodec:
                 if ev.full_output_uri:
                     res_buf.extend(_encode_string_field(7, ev.full_output_uri))
                 gen_buf.extend(_encode_bytes_field(2, bytes(res_buf)))
+                for ext in ev.anchor.host_extensions:
+                    if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
+                        gen_buf.extend(ext.raw_payload)
 
                 meta_blob = _encode_step_metadata(
                     created_at_iso=ev.anchor.timestamp_iso,
@@ -2063,6 +2115,9 @@ class TrajectoryWireCodec:
                 cp_buf.extend(_encode_string_field(6, ev.code_change_summary))
                 if ev.conversation_title:
                     cp_buf.extend(_encode_string_field(10, ev.conversation_title))
+                for ext in ev.anchor.host_extensions:
+                    if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
+                        cp_buf.extend(ext.raw_payload)
 
                 meta_blob = _encode_step_metadata(
                     created_at_iso=ev.anchor.timestamp_iso,
@@ -2103,6 +2158,9 @@ class TrajectoryWireCodec:
                     nu_buf.extend(_encode_string_field(2, ev.task_summary))
                     if ev.blocked_on_user:
                         nu_buf.extend(_encode_varint_field(3, 1))
+                    for ext in ev.anchor.host_extensions:
+                        if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
+                            nu_buf.extend(ext.raw_payload)
                     step_type_int = int(CortexStepTypeCode.NOTIFY_USER)
                     step_buf.extend(_encode_varint_field(1, step_type_int))
                     step_buf.extend(_encode_varint_field(4, 3))
@@ -2115,6 +2173,9 @@ class TrajectoryWireCodec:
                     tb_buf.extend(_encode_string_field(3, ev.task_summary))
                     if ev.mode and ev.mode.isdigit():
                         tb_buf.extend(_encode_varint_field(5, int(ev.mode)))
+                    for ext in ev.anchor.host_extensions:
+                        if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
+                            tb_buf.extend(ext.raw_payload)
                     step_type_int = int(CortexStepTypeCode.TASK_BOUNDARY)
                     step_buf.extend(_encode_varint_field(1, step_type_int))
                     step_buf.extend(_encode_varint_field(4, 3))
@@ -2138,7 +2199,10 @@ class TrajectoryWireCodec:
                 continue
 
             if isinstance(ev, SystemEvent):
-                sm_buf = _encode_string_field(1, ev.message_text) + _encode_string_field(3, ev.event_type)
+                sm_buf = bytearray(_encode_string_field(1, ev.message_text) + _encode_string_field(3, ev.event_type))
+                for ext in ev.anchor.host_extensions:
+                    if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
+                        sm_buf.extend(ext.raw_payload)
                 meta_blob = _encode_step_metadata(
                     created_at_iso=ev.anchor.timestamp_iso,
                     source_enum=5,
@@ -2147,7 +2211,7 @@ class TrajectoryWireCodec:
                 step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.SYSTEM_MESSAGE)))
                 step_buf.extend(_encode_varint_field(4, 3))
                 step_buf.extend(_encode_bytes_field(5, meta_blob))
-                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.SYSTEM_MESSAGE_TAG), sm_buf))
+                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.SYSTEM_MESSAGE_TAG), bytes(sm_buf)))
                 for uf in ev.anchor.unknown_wire_fields:
                     step_buf.extend(_encode_unknown_wire_field(uf))
 
@@ -2198,6 +2262,22 @@ class TrajectoryWireCodec:
         current_turn_id = TurnId(f"turn-{turn_num}")
         turn_has_response = False
         checkpoint_counter = 0
+        raw_turn_to_canonical: dict[str, TurnId] = {}
+
+        def _canonical_turn_for_raw(raw_tid: object) -> TurnId:
+            nonlocal turn_num, current_turn_id
+            s = str(raw_tid or "").strip()
+            if not s:
+                return current_turn_id
+            if s not in raw_turn_to_canonical:
+                if len(raw_turn_to_canonical) == 0 and not turn_has_response:
+                    raw_turn_to_canonical[s] = TurnId("turn-1")
+                    turn_num = 1
+                else:
+                    turn_num = max(turn_num, len(raw_turn_to_canonical)) + 1
+                    raw_turn_to_canonical[s] = TurnId(f"turn-{turn_num}")
+            current_turn_id = raw_turn_to_canonical[s]
+            return current_turn_id
 
         for row in raw_lines:
             raw_str = row.raw_json.strip()
@@ -2258,7 +2338,7 @@ class TrajectoryWireCodec:
             elif rtype == "turn_context":
                 tc_turn = pl.get("turn_id")
                 if tc_turn:
-                    current_turn_id = TurnId(str(tc_turn))
+                    _canonical_turn_for_raw(tc_turn)
                 checkpoint_counter += 1
                 ext = HostExtensionEnvelope(
                     host=HostKind.CODEX,
@@ -2291,7 +2371,7 @@ class TrajectoryWireCodec:
                 ev_turn = pl.get("turn_id")
                 if ev_sub == "task_started":
                     if ev_turn:
-                        current_turn_id = TurnId(str(ev_turn))
+                        _canonical_turn_for_raw(ev_turn)
                     elif turn_has_response:
                         turn_num += 1
                         current_turn_id = TurnId(f"turn-{turn_num}")
@@ -2314,7 +2394,7 @@ class TrajectoryWireCodec:
                     )
                 elif ev_sub == "task_complete":
                     if ev_turn:
-                        current_turn_id = TurnId(str(ev_turn))
+                        _canonical_turn_for_raw(ev_turn)
                     turn_has_response = True
                     anchor = EventOriginAnchor(
                         origin_host=HostKind.CODEX,
@@ -2333,12 +2413,12 @@ class TrajectoryWireCodec:
                         )
                     )
                 elif ev_sub == "user_message":
-                    if turn_has_response and not ev_turn:
+                    if ev_turn:
+                        _canonical_turn_for_raw(ev_turn)
+                    elif turn_has_response:
                         turn_num += 1
                         current_turn_id = TurnId(f"turn-{turn_num}")
                         turn_has_response = False
-                    elif ev_turn:
-                        current_turn_id = TurnId(str(ev_turn))
                     anchor = EventOriginAnchor(
                         origin_host=HostKind.CODEX,
                         turn_id=current_turn_id,
@@ -2387,7 +2467,7 @@ class TrajectoryWireCodec:
                 ptype = str(pl.get("type") or "")
                 passthrough = pl.get("internal_chat_message_metadata_passthrough")
                 if isinstance(passthrough, dict) and passthrough.get("turn_id"):
-                    current_turn_id = TurnId(str(passthrough["turn_id"]))
+                    _canonical_turn_for_raw(passthrough["turn_id"])
 
                 if ptype == "message":
                     role = str(pl.get("role") or "user")
@@ -2605,7 +2685,10 @@ class TrajectoryWireCodec:
                                 prior_payload = dataclasses.replace(prior_payload, exit_code=exit_val)
                                 events[call_pos] = dataclasses.replace(prior_ev, payload=prior_payload)
 
-                    is_err = bool(pl.get("is_error", False))
+                    is_err = bool(pl.get("is_error", False)) or str(pl.get("status") or "").lower() in (
+                        "failed",
+                        "error",
+                    )
                     anchor = EventOriginAnchor(
                         origin_host=HostKind.CODEX,
                         turn_id=current_turn_id,
@@ -2806,6 +2889,7 @@ class TrajectoryWireCodec:
                         "call_id": str(ev.call_id),
                         "output": ev.output_text,
                         "is_error": ev.is_error,
+                        "status": "failed" if ev.is_error else "completed",
                         "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
                     },
                 )

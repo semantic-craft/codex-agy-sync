@@ -1169,6 +1169,25 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
         self.assertEqual(receipt_1.transition_kind, "initial_import")
         synced_cid = receipt_1.cascade_id
 
+        receipt_1_noop = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=synced_cid,
+            codex_thread_id=src_tid,
+            direction=SyncDirection.AUTO_INCREMENTAL,
+        )
+        self.assertEqual(receipt_1_noop.transition_kind, "no_op")
+        self.assertEqual(receipt_1_noop.events_applied, 0)
+
+        schema = json.loads((self.repo_root / "schema" / "antigravity_2_30_schema.json").read_text(encoding="utf-8"))
+        conv_conn = sqlite3.connect(str(self.paths.agy_data_dir / "conversations" / f"{synced_cid}.db"))
+        try:
+            tmeta_blob = conv_conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()[0]
+        finally:
+            conv_conn.close()
+        tmeta_unk: list[dict[str, object]] = []
+        decode_protobuf(bytes(tmeta_blob), "exa.cortex_pb.CortexTrajectoryMetadata", schema, tmeta_unk)
+        self.assertEqual(len(tmeta_unk), 0)
+
         agy_ledger = self.bridge.inspect_session_ledger(
             self.workspace_dir,
             cascade_id=synced_cid,
@@ -1510,6 +1529,126 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
         status_json = json.loads(status_res.stdout)
         self.assertEqual(len(status_json["sessions"]), 1)
         self.assertEqual(status_json["sessions"][0]["codex_thread_id"], str(src_tid))
+
+    def test_interrogate_adversarial_regressions(self) -> None:
+        # 1. Read-only inspect_session_ledger must not create host project stores on disk
+        with self.assertRaises(FileNotFoundError):
+            self.bridge.inspect_session_ledger(
+                self.workspace_dir,
+                cascade_id=CascadeId("00000000-0000-0000-0000-000000000000"),
+            )
+        self.assertFalse((self.paths.codex_home_dir / "state_5.sqlite").exists())
+
+        # 2. _target_files_for_backup includes SQLite -wal and -shm sidecars
+        (self.paths.agy_data_dir / "conversations").mkdir(parents=True, exist_ok=True)
+        conv_db = self.paths.agy_data_dir / "conversations" / "wal-c1.db"
+        conv_wal = self.paths.agy_data_dir / "conversations" / "wal-c1.db-wal"
+        conv_db.write_text("db", encoding="utf-8")
+        conv_wal.write_text("wal", encoding="utf-8")
+        bfiles = self.bridge._target_files_for_backup(
+            HostKind.ANTIGRAVITY, CascadeId("wal-c1"), CodexThreadId("wal-t1")
+        )
+        self.assertIn(conv_wal, bfiles)
+
+        # 3. _probe_flock_locked detects active flock even on 0o400 read-only lock file
+        lf = self.paths.agy_data_dir / "ro.lock"
+        lf.write_text("", encoding="utf-8")
+        fd = os.open(str(lf), os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lf.chmod(0o400)
+            self.assertTrue(self.bridge.guard._probe_flock_locked(lf))
+        finally:
+            lf.chmod(0o600)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        # 4. Codex status='failed' tool output maps to is_error=True and AGY status=7
+        failed_line = json.dumps(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "c-err",
+                    "status": "failed",
+                    "output": "error: failed",
+                },
+            }
+        )
+        err_ledger = TrajectoryWireCodec.decode_codex_rollout_to_ledger(
+            self.workspace_dir,
+            "file:///tmp",
+            [CodexRawRolloutLine(RolloutLineNo(1), failed_line)],
+        )
+        err_res = [e for e in err_ledger.events if isinstance(e, ToolResultEvent)][0]
+        self.assertTrue(err_res.is_error)
+        err_steps = TrajectoryWireCodec.encode_ledger_to_agy_steps(err_ledger)
+        self.assertEqual([s for s in err_steps if s.step_type == 132][0].status, 7)
+
+        # 5. Submessage unknown wire fields stay inside inner submessage and do not leak to outer Step
+        from codex_agy_sync.codecs import _iter_wire_fields
+        from codex_agy_sync.ledger import _encode_bytes_field, _encode_string_field, _encode_varint_field
+
+        ui_sub = _encode_string_field(1, "Hello") + _encode_string_field(20, "inner_unknown")
+        outer_step = (
+            _encode_varint_field(1, 14)
+            + _encode_varint_field(4, 3)
+            + _encode_bytes_field(19, ui_sub)
+        )
+        unk_ledger = TrajectoryWireCodec.decode_agy_steps_to_ledger(
+            self.workspace_dir,
+            "file:///tmp",
+            [AgyRawStepRow(StepIndex(0), 14, 3, False, b"", outer_step)],
+        )
+        reencoded = TrajectoryWireCodec.encode_ledger_to_agy_steps(unk_ledger)
+        outer_tags = [fn for fn, _, _, _ in _iter_wire_fields(reencoded[0].step_payload_blob)]
+        self.assertIn(19, outer_tags)
+        self.assertNotIn(20, outer_tags)
+
+        # 6. Multi-session agyhub_summaries_proto.pb preservation
+        binding = self.bridge.pair_workspace(self.workspace_dir)
+        locks = self.bridge.guard.probe_locks(None, None)
+        evs = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T01:00:00Z",
+                ),
+                query_text="Q",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T01:00:01Z",
+                ),
+                text="A",
+            ),
+        ]
+        s_ledger = TrajectoryLedger.from_events(binding.workspace_path, binding.workspace_uri, evs)
+        self.bridge._transport.apply_to_agy(
+            binding,
+            CascadeId("11111111-2222-3333-4444-555555555551"),
+            evs,
+            s_ledger,
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+        )
+        self.bridge._transport.apply_to_agy(
+            binding,
+            CascadeId("11111111-2222-3333-4444-555555555552"),
+            evs,
+            s_ledger,
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+        )
+        hub_bytes = (self.paths.agy_data_dir / "agyhub_summaries_proto.pb").read_bytes()
+        hub_entries = [raw for fn, wt, _, raw in _iter_wire_fields(hub_bytes) if fn == 1 and wt == 2]
+        self.assertEqual(len(hub_entries), 2)
 
 
 if __name__ == "__main__":
