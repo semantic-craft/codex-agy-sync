@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Literal, Mapping, NewType, Sequence, Tuple, TypeAlias
 from urllib.parse import unquote, urlparse
 
@@ -123,20 +124,37 @@ def parse_workspace_identity(raw_path_or_uri: str | Path) -> tuple[WorkspacePath
     return WorkspacePath(resolved), WorkspaceRootUri(uri)
 
 
+def validate_session_id(raw_id: str, label: str = "session_id") -> str:
+    """Validate an untrusted session or thread identifier at the boundary."""
+    if (
+        not isinstance(raw_id, str)
+        or not raw_id
+        or raw_id != raw_id.strip()
+        or len(raw_id) > 128
+        or ".." in raw_id
+        or "/" in raw_id
+        or "\\" in raw_id
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_id)
+    ):
+        raise ValueError(f"Invalid {label}: {raw_id!r}")
+    return raw_id
+
+
 def normalize_tool_file_path(raw_path: str) -> str:
     """Normalize a tool file path or `file://` URI at the codec boundary.
 
     Invariants (per `principle-boundary-discipline`):
     1. Strips surrounding whitespace, raw control characters (`\\n`, `\\r`, `\\x00`),
-       backtick wrappers (e.g., `` `file:///a/b.py` (lines 1-10) ``), and trailing
-       whitespace-separated annotations on `file://` URIs.
+       backtick wrappers, markdown `[label](file://...)` wrappers, and trailing
+       parenthesized line annotations (`(lines 1-10)`, `(L10)`) without splitting on
+       spaces inside path segments.
     2. Strips `file://` / `file://localhost/` scheme prefixes (including Windows
        `file:///C:/...` -> `C:/...`) and percent-decodes (`unquote`) only when a
        `file://` scheme was present so literal `%` characters in plain filenames
        (`100%_coverage.py`) remain intact.
-    3. Rejects percent-decoded strings that introduce `\\n`, `\\r`, or `\\x00`
-       (`%0A`, `%0D`, `%00`) so crafted `file://` URIs can never inject lines into
-       Codex `*** Update File: <path>` patch headers or `transcript.jsonl`.
+    3. Strips `\\r`, `\\n`, and `\\x00` after `unquote` (`%0A`, `%0D`, `%00`) so
+       crafted `file://` URIs can never inject lines into Codex
+       `*** Update File: <path>` patch headers or `transcript.jsonl`.
     """
     if not raw_path:
         return ""
@@ -156,17 +174,30 @@ def normalize_tool_file_path(raw_path: str) -> str:
         else:
             cleaned = cleaned.strip("`").strip()
 
+    cleaned = re.sub(
+        r"\s+\((?:lines?|L)\b[^)]*\)\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    md_match = re.match(r"^\[[^\]]*\]\(\s*(file://.+?)\s*\)$", cleaned, flags=re.IGNORECASE)
+    if md_match:
+        cleaned = md_match.group(1).strip()
+
     if cleaned.lower().startswith("file://"):
-        token = cleaned.split()[0]
-        rest = token[7:]
+        cleaned = re.sub(
+            r"\s+\((?:lines?|L)\b[^)]*\)\s*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        rest = cleaned[7:]
         if rest.lower().startswith("localhost/"):
             rest = rest[9:]
         if len(rest) >= 3 and rest[0] == "/" and rest[1].isalpha() and rest[2] == ":":
             rest = rest[1:]
         decoded = unquote(rest)
-        if any(ctrl in decoded for ctrl in ("\n", "\r", "\x00")):
-            return rest.replace("\n", "").replace("\r", "").replace("\x00", "")
-        return decoded
+        return decoded.replace("\r", "").replace("\n", "").replace("\x00", "").strip()
 
     return cleaned
 
@@ -285,8 +316,9 @@ class SubagentLineage:
 
     Invariants (per `principle-model-the-domain`):
     - `nesting_depth >= 0`.
-    - `is_subagent` is True whenever `nesting_depth > 0`, `parent_cascade_id` is set,
-      or `parent_codex_thread_id` is set.
+    - `is_subagent` is True only for spawned subagents (`nesting_depth > 0`,
+      non-empty `agent_type_name` or `agent_role`, or `spawn_step_index is not None`),
+      keeping top-level forked sessions (`nesting_depth == 0`) visible in sidebars.
     """
 
     parent_cascade_id: CascadeId | None = None
@@ -305,8 +337,9 @@ class SubagentLineage:
     def is_subagent(self) -> bool:
         return (
             self.nesting_depth > 0
-            or self.parent_cascade_id is not None
-            or self.parent_codex_thread_id is not None
+            or bool(self.agent_type_name.strip())
+            or bool(self.agent_role.strip())
+            or self.spawn_step_index is not None
         )
 
 
@@ -992,7 +1025,8 @@ class AnnotationPbtxtProjection:
 
     def render_pbtxt(self) -> str:
         """Serialize `exa.jetski_cortex_pb.ConversationAnnotations` textproto."""
-        escaped_title = self.title.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+        single_line_title = " ".join(self.title.split())
+        escaped_title = single_line_title.replace("\\", "\\\\").replace('"', '\\"')
         seconds, nanos = _parse_iso_to_seconds_nanos(self.last_user_view_time_iso)
         if nanos > 0:
             return (
@@ -1147,13 +1181,13 @@ def resolve_canonical_title(
     )
     for candidate in candidates:
         if candidate is not None:
-            cleaned = candidate.strip()
+            cleaned = " ".join(candidate.split())
             if cleaned:
                 return cleaned
 
     for ev in reversed(events):
         if isinstance(ev, CheckpointEvent) and ev.conversation_title:
-            cleaned = ev.conversation_title.strip()
+            cleaned = " ".join(ev.conversation_title.split())
             if cleaned:
                 return cleaned
 
@@ -1164,6 +1198,22 @@ def resolve_canonical_title(
                 return normalized
 
     return "Untitled Session"
+
+
+def _is_host_framing_event(ev: CanonicalEvent) -> bool:
+    if isinstance(ev, SystemEvent) and ev.event_type in ("session_meta", "world_state"):
+        return True
+    if (
+        isinstance(ev, TaskBoundaryEvent)
+        and not ev.task_name.strip()
+        and ev.task_summary.strip() in ("", "Turn complete")
+        and (
+            ev.boundary_kind in ("task_started", "task_complete")
+            or ev.task_status in ("task_started", "task_complete")
+        )
+    ):
+        return True
+    return False
 
 
 def _canonical_event_digest_payload(ev: CanonicalEvent) -> Mapping[str, object]:
@@ -1187,19 +1237,22 @@ def _canonical_event_digest_payload(ev: CanonicalEvent) -> Mapping[str, object]:
             "text": ev.text,
         }
     if isinstance(ev, ToolCallEvent):
+        canonical_tool_name = ev.payload.kind if ev.payload.kind != "opaque" else ev.tool_name
         return {
             "kind": ev.kind,
             "turn_id": str(ev.anchor.turn_id),
             "call_id": str(ev.call_id),
-            "tool_name": ev.tool_name,
+            "tool_name": canonical_tool_name,
             "payload_kind": ev.payload.kind,
+            "arguments_json": _serialize_tool_payload_to_arguments_json(ev.payload),
         }
     if isinstance(ev, ToolResultEvent):
+        canonical_tool_name = ev.payload.kind if ev.payload.kind != "opaque" else ev.tool_name
         return {
             "kind": ev.kind,
             "turn_id": str(ev.anchor.turn_id),
             "call_id": str(ev.call_id),
-            "tool_name": ev.tool_name,
+            "tool_name": canonical_tool_name,
             "output_text": ev.output_text,
             "is_error": ev.is_error,
         }
@@ -1291,6 +1344,7 @@ class TrajectoryLedger:
         events: Sequence[CanonicalEvent],
         *,
         explicit_title_override: str | None = None,
+        recompute_agy_step_indices: bool = False,
     ) -> TrajectoryLedger:
         """Build a `TrajectoryLedger`, resolve canonical title, and populate all 4 indices in one pass."""
         resolved_title = resolve_canonical_title(
@@ -1307,6 +1361,7 @@ class TrajectoryLedger:
         next_synthetic_line = 1
         active_planner_step: StepIndex | None = None
         active_planner_turn: TurnId | None = None
+        active_planner_has_thinking = False
         active_planner_has_text = False
         active_planner_has_tools = False
 
@@ -1314,18 +1369,30 @@ class TrajectoryLedger:
             seq_no = LedgerSeqNo(idx)
             anchor = ev.anchor
 
-            if anchor.agy_step_index is not None:
+            if not recompute_agy_step_indices and anchor.agy_step_index is not None:
                 step_idx = anchor.agy_step_index
                 next_synthetic_step = max(next_synthetic_step, int(step_idx) + 1)
                 active_planner_step = None
+                active_planner_has_thinking = False
+                active_planner_has_text = False
+                active_planner_has_tools = False
             else:
                 if isinstance(ev, (ThinkingEvent, AssistantTextEvent, ToolCallEvent)):
                     can_reuse = (
                         active_planner_step is not None
                         and active_planner_turn == anchor.turn_id
                         and (
-                            (isinstance(ev, ThinkingEvent) and not active_planner_has_text and not active_planner_has_tools)
-                            or (isinstance(ev, AssistantTextEvent) and not active_planner_has_text and not active_planner_has_tools)
+                            (
+                                isinstance(ev, ThinkingEvent)
+                                and not active_planner_has_thinking
+                                and not active_planner_has_text
+                                and not active_planner_has_tools
+                            )
+                            or (
+                                isinstance(ev, AssistantTextEvent)
+                                and not active_planner_has_text
+                                and not active_planner_has_tools
+                            )
                             or isinstance(ev, ToolCallEvent)
                         )
                     )
@@ -1333,15 +1400,21 @@ class TrajectoryLedger:
                         active_planner_step = StepIndex(next_synthetic_step)
                         next_synthetic_step += 1
                         active_planner_turn = anchor.turn_id
+                        active_planner_has_thinking = False
                         active_planner_has_text = False
                         active_planner_has_tools = False
-                    if isinstance(ev, AssistantTextEvent):
+                    if isinstance(ev, ThinkingEvent):
+                        active_planner_has_thinking = True
+                    elif isinstance(ev, AssistantTextEvent):
                         active_planner_has_text = True
                     elif isinstance(ev, ToolCallEvent):
                         active_planner_has_tools = True
                     step_idx = active_planner_step
                 else:
                     active_planner_step = None
+                    active_planner_has_thinking = False
+                    active_planner_has_text = False
+                    active_planner_has_tools = False
                     step_idx = StepIndex(next_synthetic_step)
                     next_synthetic_step += 1
 
@@ -1352,7 +1425,11 @@ class TrajectoryLedger:
                 line_no = RolloutLineNo(next_synthetic_line)
                 next_synthetic_line += 1
 
-            if anchor.agy_step_index is None or anchor.codex_line_no is None:
+            if (
+                recompute_agy_step_indices
+                or anchor.agy_step_index != step_idx
+                or anchor.codex_line_no != line_no
+            ):
                 new_anchor = dataclasses.replace(
                     anchor,
                     agy_step_index=step_idx,
@@ -1419,14 +1496,15 @@ class TrajectoryLedger:
             max_step_idx = StepIndex(0)
             max_line_no = RolloutLineNo(1)
             for tev in turn_events:
-                payload_json = json.dumps(
-                    _canonical_event_digest_payload(tev),
-                    sort_keys=True,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                cumulative_hasher.update(payload_json.encode("utf-8"))
-                cumulative_hasher.update(b"\n")
+                if not _is_host_framing_event(tev):
+                    payload_json = json.dumps(
+                        _canonical_event_digest_payload(tev),
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    cumulative_hasher.update(payload_json.encode("utf-8"))
+                    cumulative_hasher.update(b"\n")
                 if tev.anchor.agy_step_index is not None and int(tev.anchor.agy_step_index) > int(max_step_idx):
                     max_step_idx = tev.anchor.agy_step_index
                 if tev.anchor.codex_line_no is not None and int(tev.anchor.codex_line_no) > int(max_line_no):

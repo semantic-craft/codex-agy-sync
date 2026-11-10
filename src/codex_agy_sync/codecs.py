@@ -687,9 +687,21 @@ def _decode_tool_any_bytes(
 
     if kind == "read_file":
         path = str(args_dict.get("Path") or args_dict.get("path") or "")
-        start_line = args_dict.get("StartLine") or args_dict.get("start_line")
-        end_line = args_dict.get("EndLine") or args_dict.get("end_line")
-        byte_offset = args_dict.get("ByteOffset") or args_dict.get("byte_offset")
+        start_line = (
+            args_dict.get("StartLine")
+            if args_dict.get("StartLine") is not None
+            else args_dict.get("start_line")
+        )
+        end_line = (
+            args_dict.get("EndLine")
+            if args_dict.get("EndLine") is not None
+            else args_dict.get("end_line")
+        )
+        byte_offset = (
+            args_dict.get("ByteOffset")
+            if args_dict.get("ByteOffset") is not None
+            else args_dict.get("byte_offset")
+        )
         file_num_lines: int | None = args_dict.get("file_num_lines")
         file_num_bytes: int | None = args_dict.get("file_num_bytes")
         for fn, wt, ival, raw in f_items:
@@ -717,9 +729,10 @@ def _decode_tool_any_bytes(
     if kind == "file_edit":
         path = str(args_dict.get("Path") or args_dict.get("path") or "")
         edit_op: Literal["CREATE", "MODIFY", "DELETE"] = "MODIFY"
-        raw_op = str(args_dict.get("edit_op") or "").upper()
-        if raw_op in ("CREATE", "MODIFY", "DELETE"):
-            edit_op = raw_op  # type: ignore[assignment]
+        prior_edit_op = str(args_dict.get("edit_op") or args_dict.get("EditOp") or "").upper()
+        if prior_edit_op in ("CREATE", "MODIFY", "DELETE"):
+            edit_op = prior_edit_op  # type: ignore[assignment]
+        has_canonical_diff = "unified_diff" in args_dict and args_dict.get("unified_diff") is not None
         unified_diff = str(args_dict.get("unified_diff") or "")
         if not unified_diff and ("Target" in args_dict or "Replacement" in args_dict or "Content" in args_dict):
             if "Content" in args_dict and "Target" not in args_dict:
@@ -741,12 +754,12 @@ def _decode_tool_any_bytes(
 
         for fn, wt, ival, raw in f_items:
             if fn == 1 and wt == 0:
-                edit_op = "CREATE" if ival == 1 else "MODIFY"
+                edit_op = "CREATE" if ival == 1 else ("DELETE" if prior_edit_op == "DELETE" else "MODIFY")
             elif fn == 2 and wt == 2:
                 path = raw.decode("utf-8", errors="replace") or path
             elif fn == 3 and wt == 2:
                 decoded_diff = _decode_unified_diff_block(raw)
-                if decoded_diff:
+                if decoded_diff and not has_canonical_diff:
                     unified_diff = decoded_diff
             elif fn == 4 and wt == 2:
                 for sfn, swt, sival, _ in _iter_wire_fields(raw):
@@ -798,7 +811,7 @@ def _decode_tool_any_bytes(
             or args_dict.get("command")
             or ""
         )
-        cwd = str(args_dict.get("cwd") or args_dict.get("workdir") or "")
+        cwd = str(args_dict.get("Cwd") or args_dict.get("cwd") or args_dict.get("workdir") or "")
         exit_code: int | None = args_dict.get("exit_code")
         timed_out = bool(args_dict.get("timed_out", False))
         is_daemon = bool(args_dict.get("IsDaemon") or args_dict.get("is_daemon") or False)
@@ -1359,6 +1372,47 @@ def _encode_tool_payload_to_any(payload: CanonicalToolPayload) -> bytes:
             inner.extend(_encode_varint_field(2, 1))
 
     return _encode_any_envelope(spec.agy_any_type_url, bytes(inner))
+
+
+def _serialize_agy_chat_tool_arguments(payload: CanonicalToolPayload) -> str:
+    if isinstance(payload, OpaqueToolPayload):
+        return payload.raw_arguments_json or "{}"
+    if isinstance(payload, FinishPayload):
+        return payload.arguments_json or "{}"
+    data = _safe_json_dict(_serialize_tool_payload_to_arguments_json(payload))
+    if isinstance(payload, RunCommandPayload):
+        data["CommandLine"] = payload.command_line
+        data["Cwd"] = normalize_tool_file_path(payload.cwd)
+    elif isinstance(payload, FileEditPayload):
+        data["Path"] = normalize_tool_file_path(payload.path)
+        data["EditOp"] = payload.edit_op
+    elif isinstance(payload, ReadFilePayload):
+        data["Path"] = normalize_tool_file_path(payload.path)
+        if payload.start_line is not None:
+            data["StartLine"] = payload.start_line
+        if payload.end_line is not None:
+            data["EndLine"] = payload.end_line
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _synthesize_codex_patch_input(payload: FileEditPayload) -> str:
+    if "*** Begin Patch" in payload.unified_diff:
+        return re.sub(
+            r"^(\*\*\* (?:Add|Update|Delete) File:\s*)(.+)$",
+            lambda m: m.group(1) + normalize_tool_file_path(m.group(2)),
+            payload.unified_diff,
+            flags=re.MULTILINE,
+        )
+    norm_path = normalize_tool_file_path(payload.path) or "patch_target"
+    verb = (
+        "Add"
+        if payload.edit_op == "CREATE"
+        else ("Delete" if payload.edit_op == "DELETE" else "Update")
+    )
+    diff_body = payload.unified_diff.rstrip("\r\n")
+    if diff_body:
+        return f"*** Begin Patch\n*** {verb} File: {norm_path}\n{diff_body}\n*** End Patch"
+    return f"*** Begin Patch\n*** {verb} File: {norm_path}\n*** End Patch"
 
 
 # ---------------------------------------------------------------------------
@@ -1977,7 +2031,7 @@ class TrajectoryWireCodec:
                 for tc_ev in tool_evs:
                     spec_for_call = TOOL_SPEC_BY_PAYLOAD_KIND.get(tc_ev.payload.kind)
                     agy_tname = spec_for_call.agy_tool_name if spec_for_call else tc_ev.tool_name
-                    args_json = _serialize_tool_payload_to_arguments_json(tc_ev.payload)
+                    args_json = _serialize_agy_chat_tool_arguments(tc_ev.payload)
                     pr_buf.extend(
                         _encode_bytes_field(
                             7,
@@ -2069,7 +2123,7 @@ class TrajectoryWireCodec:
             if isinstance(ev, ToolResultEvent):
                 spec_for_res = TOOL_SPEC_BY_PAYLOAD_KIND.get(ev.payload.kind)
                 agy_tname = spec_for_res.agy_tool_name if spec_for_res else ev.tool_name
-                args_json = _serialize_tool_payload_to_arguments_json(ev.payload)
+                args_json = _serialize_agy_chat_tool_arguments(ev.payload)
                 args_dict = _safe_json_dict(args_json)
 
                 gen_buf = bytearray()
@@ -2278,6 +2332,7 @@ class TrajectoryWireCodec:
         """Parse Codex `rollout-*.jsonl` lines into an indexed `TrajectoryLedger`."""
         events: list[CanonicalEvent] = []
         call_index_by_id: dict[ToolCallId, int] = {}
+        call_has_explicit_exit_code: set[ToolCallId] = set()
 
         turn_num = 1
         current_turn_id = TurnId(f"turn-{turn_num}")
@@ -2373,13 +2428,22 @@ class TrajectoryWireCodec:
                     codex_line_no=row.line_no,
                     host_extensions=(ext,),
                 )
-                summary_str = str(pl.get("summary") or pl.get("model") or "turn_context")
+                summary_str = (
+                    str(pl["summary"])
+                    if "summary" in pl and pl["summary"] is not None
+                    else str(pl.get("model") or "turn_context")
+                )
                 conv_title = pl.get("conversation_title") or pl.get("title")
+                cp_idx_val = (
+                    int(pl["checkpoint_index"])
+                    if "checkpoint_index" in pl and pl["checkpoint_index"] is not None
+                    else checkpoint_counter
+                )
                 events.append(
                     CheckpointEvent(
                         kind="checkpoint",
                         anchor=anchor,
-                        checkpoint_index=int(pl.get("checkpoint_index") or checkpoint_counter),
+                        checkpoint_index=cp_idx_val,
                         user_intent=str(pl.get("user_intent") or ""),
                         session_summary=summary_str,
                         code_change_summary=str(pl.get("code_change_summary") or ""),
@@ -2403,14 +2467,17 @@ class TrajectoryWireCodec:
                         timestamp_iso=ts_iso,
                         codex_line_no=row.line_no,
                     )
+                    b_kind_start: Literal["task_boundary", "notify_user"] = (
+                        "notify_user" if pl.get("boundary_kind") == "notify_user" else "task_boundary"
+                    )
                     events.append(
                         TaskBoundaryEvent(
                             kind="task_boundary",
                             anchor=anchor,
-                            boundary_kind="task_boundary",
-                            task_name=str(pl.get("task_name") or "codex_turn"),
-                            task_status="task_started",
-                            task_summary=str(pl.get("task_summary") or "Turn started"),
+                            boundary_kind=b_kind_start,
+                            task_name=str(pl.get("task_name") or ""),
+                            task_status=str(pl.get("task_status") or "task_started"),
+                            task_summary=str(pl.get("task_summary") or ""),
                         )
                     )
                 elif ev_sub == "task_complete":
@@ -2423,14 +2490,22 @@ class TrajectoryWireCodec:
                         timestamp_iso=ts_iso,
                         codex_line_no=row.line_no,
                     )
+                    b_kind_done: Literal["task_boundary", "notify_user"] = (
+                        "notify_user" if pl.get("boundary_kind") == "notify_user" else "task_boundary"
+                    )
+                    t_summary_done = (
+                        str(pl["task_summary"])
+                        if "task_summary" in pl and pl["task_summary"] is not None
+                        else str(pl.get("last_agent_message") or "Turn complete")
+                    )
                     events.append(
                         TaskBoundaryEvent(
                             kind="task_boundary",
                             anchor=anchor,
-                            boundary_kind="task_boundary",
-                            task_name=str(pl.get("task_name") or "codex_turn"),
-                            task_status="task_complete",
-                            task_summary=str(pl.get("last_agent_message") or pl.get("task_summary") or "Turn complete"),
+                            boundary_kind=b_kind_done,
+                            task_name=str(pl.get("task_name") or ""),
+                            task_status=str(pl.get("task_status") or "task_complete"),
+                            task_summary=t_summary_done,
                         )
                     )
                 elif ev_sub == "user_message":
@@ -2515,6 +2590,9 @@ class TrajectoryWireCodec:
                             turn_num += 1
                             current_turn_id = TurnId(f"turn-{turn_num}")
                             turn_has_response = False
+                        scope_items_out: Tuple[str, ...] = ()
+                        if isinstance(passthrough, dict) and isinstance(passthrough.get("scope_items"), list):
+                            scope_items_out = tuple(str(s) for s in passthrough["scope_items"])
                         anchor = EventOriginAnchor(
                             origin_host=HostKind.CODEX,
                             turn_id=current_turn_id,
@@ -2527,6 +2605,7 @@ class TrajectoryWireCodec:
                                 kind="user_input",
                                 anchor=anchor,
                                 query_text=full_text,
+                                scope_items=scope_items_out,
                                 media=tuple(media_items),
                             )
                         )
@@ -2624,21 +2703,30 @@ class TrajectoryWireCodec:
                     turn_has_response = True
                     cid = ToolCallId(str(pl.get("call_id") or pl.get("id") or f"call-line-{int(row.line_no)}"))
                     tname = str(pl.get("name") or ("tool_search" if ptype == "tool_search_call" else "unknown_tool"))
-                    raw_args = pl.get("arguments") if "arguments" in pl else pl.get("input", "{}")
+                    raw_args = (
+                        pl.get("arguments")
+                        if pl.get("arguments") not in (None, "")
+                        else pl.get("input", "{}")
+                    )
                     if isinstance(raw_args, (dict, list)):
                         args_json = json.dumps(raw_args, ensure_ascii=False, sort_keys=True)
                     elif isinstance(raw_args, str):
                         if ptype == "custom_tool_call" and tname == "apply_patch" and not raw_args.strip().startswith("{"):
                             path_match = re.search(
-                                r"^\*\*\* (?:Update|Add|Delete) File:\s*(.+)$",
+                                r"^\*\*\* (Update|Add|Delete) File:\s*(.+)$",
                                 raw_args,
                                 flags=re.MULTILINE,
                             )
-                            inferred_path = (
-                                normalize_tool_file_path(path_match.group(1))
-                                if path_match
-                                else "patch_target"
-                            )
+                            inferred_op = "MODIFY"
+                            if path_match:
+                                verb = path_match.group(1)
+                                if verb == "Add":
+                                    inferred_op = "CREATE"
+                                elif verb == "Delete":
+                                    inferred_op = "DELETE"
+                                inferred_path = normalize_tool_file_path(path_match.group(2))
+                            else:
+                                inferred_path = "patch_target"
                             normalized_patch = re.sub(
                                 r"^(\*\*\* (?:Update|Add|Delete) File:\s*)(.+)$",
                                 lambda m: m.group(1) + normalize_tool_file_path(m.group(2)),
@@ -2646,7 +2734,11 @@ class TrajectoryWireCodec:
                                 flags=re.MULTILINE,
                             )
                             args_json = json.dumps(
-                                {"path": inferred_path, "unified_diff": normalized_patch},
+                                {
+                                    "path": inferred_path,
+                                    "edit_op": inferred_op,
+                                    "unified_diff": normalized_patch,
+                                },
                                 ensure_ascii=False,
                                 sort_keys=True,
                             )
@@ -2654,6 +2746,10 @@ class TrajectoryWireCodec:
                             args_json = raw_args
                     else:
                         args_json = "{}"
+
+                    parsed_call_args = _safe_json_dict(args_json)
+                    if "exit_code" in parsed_call_args:
+                        call_has_explicit_exit_code.add(cid)
 
                     payload = TrajectoryWireCodec.decode_tool_payload(tname, args_json)
                     exts = []
@@ -2714,7 +2810,11 @@ class TrajectoryWireCodec:
                         if isinstance(prior_ev, ToolCallEvent):
                             prior_tname = prior_ev.tool_name
                             prior_payload = prior_ev.payload
-                            if isinstance(prior_payload, RunCommandPayload) and prior_payload.exit_code is None:
+                            if (
+                                isinstance(prior_payload, RunCommandPayload)
+                                and prior_payload.exit_code is None
+                                and cid not in call_has_explicit_exit_code
+                            ):
                                 m_exit = re.search(r"Process exited with code (-?\d+)", out_text)
                                 exit_val = int(m_exit.group(1)) if m_exit else 0
                                 prior_payload = dataclasses.replace(prior_payload, exit_code=exit_val)
@@ -2753,6 +2853,8 @@ class TrajectoryWireCodec:
     def encode_events_to_codex_rollout(
         events: Sequence[CanonicalEvent],
         starting_line_no: RolloutLineNo = RolloutLineNo(1),
+        session_id: str | None = None,
+        cwd: str | None = None,
     ) -> Tuple[CodexRawRolloutLine, ...]:
         """Serialize a slice of `CanonicalEvent` nodes into Codex `rollout-*.jsonl` lines."""
         lines: list[CodexRawRolloutLine] = []
@@ -2779,18 +2881,18 @@ class TrajectoryWireCodec:
         )
         if not has_session_meta and events and int(starting_line_no) == 1:
             first_ts = events[0].anchor.timestamp_iso or "2026-01-01T00:00:00Z"
-            _append_record(
-                first_ts,
-                "session_meta",
-                {
-                    "id": "codex-synced-session",
-                    "session_id": "codex-synced-session",
-                    "timestamp": first_ts,
-                    "originator": "codex_agy_sync",
-                    "source": "desktop",
-                    "model_provider": "openai",
-                },
-            )
+            effective_sid = session_id or "codex-synced-session"
+            meta_payload: dict[str, Any] = {
+                "id": effective_sid,
+                "session_id": effective_sid,
+                "timestamp": first_ts,
+                "originator": "codex_agy_sync",
+                "source": "desktop",
+                "model_provider": "openai",
+            }
+            if cwd is not None:
+                meta_payload["cwd"] = cwd
+            _append_record(first_ts, "session_meta", meta_payload)
 
         active_turn: TurnId | None = None
         active_turn_closed = True
@@ -2839,6 +2941,9 @@ class TrajectoryWireCodec:
                 content_list: list[dict[str, Any]] = [{"type": "input_text", "text": ev.query_text}]
                 for m in ev.media:
                     content_list.append({"type": "input_image", "mime_type": m.mime_type, "uri": m.uri})
+                user_passthrough: dict[str, Any] = {"turn_id": str(ev.anchor.turn_id)}
+                if ev.scope_items:
+                    user_passthrough["scope_items"] = list(ev.scope_items)
                 _append_record(
                     ts,
                     "response_item",
@@ -2847,7 +2952,7 @@ class TrajectoryWireCodec:
                         "id": ev.anchor.client_message_id or f"msg_user_{next_line}",
                         "role": "user",
                         "content": content_list,
-                        "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
+                        "internal_chat_message_metadata_passthrough": user_passthrough,
                     },
                 )
 
@@ -2893,7 +2998,15 @@ class TrajectoryWireCodec:
                     c_kind = "tool_search_call" if ev.tool_name == "tool_search" else "function_call"
                     c_name = ev.tool_name
 
-                args_json = _serialize_tool_payload_to_arguments_json(ev.payload)
+                if isinstance(ev.payload, RunCommandPayload):
+                    norm_cwd = normalize_tool_file_path(ev.payload.cwd)
+                    cmd_args = _safe_json_dict(_serialize_tool_payload_to_arguments_json(ev.payload))
+                    cmd_args["cmd"] = ev.payload.command_line
+                    cmd_args["workdir"] = norm_cwd
+                    args_json = json.dumps(cmd_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                else:
+                    args_json = _serialize_tool_payload_to_arguments_json(ev.payload)
+
                 call_pl: dict[str, Any] = {
                     "type": c_kind,
                     "status": "completed",
@@ -2902,6 +3015,8 @@ class TrajectoryWireCodec:
                     "arguments": args_json,
                     "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
                 }
+                if c_kind == "custom_tool_call" and isinstance(ev.payload, FileEditPayload):
+                    call_pl["input"] = _synthesize_codex_patch_input(ev.payload)
                 for ext in ev.anchor.host_extensions:
                     if ext.extension_type == "tool_namespace" and ext.raw_payload:
                         call_pl["namespace"] = ext.raw_payload.decode("utf-8", errors="replace")
@@ -2960,6 +3075,8 @@ class TrajectoryWireCodec:
                         "task_name": ev.task_name,
                         "task_summary": ev.task_summary,
                         "last_agent_message": ev.task_summary,
+                        "boundary_kind": ev.boundary_kind,
+                        "task_status": ev.task_status,
                     },
                 )
 
@@ -3006,11 +3123,19 @@ class TrajectoryWireCodec:
     def encode_ledger_to_codex_rollout(
         ledger_or_events: TrajectoryLedger | Sequence[CanonicalEvent],
         starting_line_no: RolloutLineNo = RolloutLineNo(1),
+        session_id: str | None = None,
+        cwd: str | None = None,
     ) -> Tuple[CodexRawRolloutLine, ...]:
         """Encode a `TrajectoryLedger` or event sequence into Codex `rollout-*.jsonl` lines."""
-        events = (
-            ledger_or_events.events
-            if isinstance(ledger_or_events, TrajectoryLedger)
-            else ledger_or_events
+        if isinstance(ledger_or_events, TrajectoryLedger):
+            events: Sequence[CanonicalEvent] = ledger_or_events.events
+            effective_cwd = cwd if cwd is not None else str(ledger_or_events.workspace_path)
+        else:
+            events = ledger_or_events
+            effective_cwd = cwd
+        return TrajectoryWireCodec.encode_events_to_codex_rollout(
+            events,
+            starting_line_no,
+            session_id=session_id,
+            cwd=effective_cwd,
         )
-        return TrajectoryWireCodec.encode_events_to_codex_rollout(events, starting_line_no)

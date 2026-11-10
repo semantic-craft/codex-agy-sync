@@ -105,6 +105,7 @@ from .ledger import (
     normalize_tool_file_path,
     parse_workspace_identity,
     resolve_canonical_title,
+    validate_session_id,
 )
 
 __all__ = [
@@ -203,4 +204,5 @@ __all__ = [
     "normalize_tool_file_path",
     "parse_workspace_identity",
     "resolve_canonical_title",
+    "validate_session_id",
 ]
