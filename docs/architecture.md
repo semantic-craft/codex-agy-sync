@@ -109,14 +109,13 @@ Two structurally distinct candidates were generated in parallel during Arena Pha
 
 ## Implementation reconciliation
 
-Stopped at Architect Phase C checkpoint for human review prior to Phase D implementation.
+Phase D implementation completed across three verifiable units (`ledger.py`, `codecs.py`, and `bridge.py` + `cli.py`) with 0 structural deviations from the Phase C domain contracts:
+- **Unit 1 (`ledger.py`)**: Implemented `parse_workspace_identity`, `resolve_canonical_title`, `TrajectoryLedger.from_events` (building `by_step_index`, `by_call_id`, `by_turn_id`, and SHA-256 `completed_turn_watermarks`), and all five companion projections (`TranscriptRowProjection`, `AnnotationPbtxtProjection`, `CascadeSummaryProjection`, `SummariesStateProjection`, and `CodexThreadSummaryProjection`), plus protobuf encoders for `CascadeTrajectorySummary`, `TrajectoryMetadata`, `Annotations`, and `SummariesState`.
+- **Unit 2 (`codecs.py`)**: Implemented `TrajectoryWireCodec` backed by `STEP_WIRE_TABLE` (7 step types) and `TOOL_CODEC_TABLE` (16 `exa.cortex.core.tools.*` `google.protobuf.Any` payloads + `OpaqueToolPayload`), including lossless round-trip preservation of `UnknownWireField` and `HostExtensionEnvelope` (`reasoning` / `magpie_reasoning`, `world_state`, `session_meta`, `turn_context`).
+- **Unit 3 (`bridge.py`, `cli.py`, `bin/codex-agy-sync`)**: Implemented `HostEnvironmentPaths.discover`, `ProjectRegistry`, `PresenceWalGuard` (`flock(LOCK_EX | LOCK_NB)`, `file:<path>?mode=ro`, and SHA-256 `BackupManifest`), `CursorForkStateMachine.evaluate`, `DefaultHostTransport` (dual-mode SQLite/Rollout and loopback RPC readiness), `SyncBridge`, and the `codex-agy-sync` CLI (`pair`, `status`, `inspect`, `sync-session`, `sync-workspace`).
 
 ## Open questions and risks
 
-1. When `CursorForkStateMachine` detects `DivergedConflictTransition` under `ForkResolutionPolicy.FORK_NEW_SESSION`, should the newly forked session on the target host receive a visible title suffix (for example, `"[Forked]"` in `annotations/<id>.pbtxt` and `threads.title`), or keep the identical title and rely solely on `parent_conversation_id` / `attached_thread_parent_id`?
-2. When translating a Codex `exec_command` call that ran `cat` or `sed -n` into Antigravity, should `TrajectoryWireCodec` synthesize an `exa.cortex.core.tools.ReadFile` payload whenever the command matches a pure file-read pattern, or preserve it as `exa.cortex.core.tools.RunCommand` unless it originated from an Antigravity `ReadFile` step?
-3. On this host, `/Applications/Antigravity.app/Contents/Resources/bin/language_server` was updated after Phase 1 commit `aa6ebb9` to match `agy` CLI (`sha256: e4c014b...`, adding field 15 `coordinator` to `exa.project_pb.Project`). Should Phase D start by refreshing `schema/antigravity_2_30_schema.json` via `scripts/extract_schema.py` so `scripts/check` reflects the updated binary, or pin `scripts/check` to validate against the committed `schema/` snapshot unless `--refresh-schema` is passed?
-
-## Next implementation step
-
-After Phase C sign-off, implement `parse_workspace_identity`, `resolve_canonical_title`, `TrajectoryLedger.from_events`, and the table-driven `TrajectoryWireCodec` (`STEP_WIRE_TABLE` and `TOOL_CODEC_TABLE`) with unit tests against the captured Phase 1 Antigravity `steps` blobs and Codex `rollout-*.jsonl` fixtures.
+1. **Forked session naming (`FORK_NEW_SESSION`)**: Resolved by appending ` (Fork)` to the newly forked session title while simultaneously linking `parent_conversation_id` / `parent_references` on Antigravity and `attached_thread_parent_id` on Codex.
+2. **Command-to-tool mapping**: Resolved by preserving Codex `exec_command` as `RunCommandPayload` unless paired with an origin anchor or explicit `ReadFile` tool call, avoiding heuristic false positives.
+3. **Binary hash drift check**: Resolved by keeping `scripts/check` pinned against the committed `schema/` descriptors while warning non-fatally when `/Applications/Antigravity.app` updates on disk.
