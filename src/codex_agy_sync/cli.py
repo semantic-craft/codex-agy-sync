@@ -224,7 +224,14 @@ def main(
     args = parser.parse_args(list(argv) if argv is not None else None)
     paths = _resolve_paths(args, env=env)
     bridge = SyncBridge(paths=paths)
-    workspace_arg = args.workspace or os.getcwd()
+    if args.workspace is not None:
+        raw_ws = str(args.workspace).strip()
+        if raw_ws and not raw_ws.startswith("file://") and "://" not in raw_ws:
+            workspace_arg = str(Path(os.path.expandvars(raw_ws)).expanduser().resolve(strict=False))
+        else:
+            workspace_arg = raw_ws
+    else:
+        workspace_arg = os.getcwd()
 
     if args.subcommand == "pair":
         binding = bridge.pair_workspace(workspace_arg)
@@ -232,7 +239,7 @@ def main(
         return 0
 
     if args.subcommand == "status":
-        binding = bridge.pair_workspace(workspace_arg)
+        binding = bridge.registry.resolve_readonly_binding(workspace_arg)
         sessions = bridge.registry.list_workspace_sessions(
             binding,
             include_subagents=bool(args.include_subagents),

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -20,6 +25,7 @@ from codex_agy_sync.bridge import (
     SyncDirection,
     TransportMode,
 )
+from codex_agy_sync.cli import main as cli_main
 from codex_agy_sync.codecs import (
     AgyRawStepRow,
     CodexRawRolloutLine,
@@ -30,6 +36,7 @@ from codex_agy_sync.codecs import (
 )
 from codex_agy_sync import validate_session_id
 from codex_agy_sync.ledger import (
+    _canonical_event_digest_payload,
     _encode_bytes_field,
     _encode_string_field,
     _encode_varint,
@@ -78,6 +85,7 @@ from codex_agy_sync.ledger import (
     TurnId,
     UnknownWireField,
     UserInputEvent,
+    decode_summaries_state_proto,
     normalize_tool_file_path,
     parse_workspace_identity,
     resolve_canonical_title,
@@ -1091,8 +1099,159 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
         gs_data = json.loads(gs_file.read_text(encoding="utf-8"))
         self.assertIn(str(b1.codex_legacy_project_id), gs_data["local-projects"])
 
+    def _assert_title_and_project_bindings_across_stores(
+        self,
+        cid: CascadeId,
+        tid: CodexThreadId,
+        expected_title: str,
+    ) -> None:
+        binding = self.bridge.registry.resolve_readonly_binding(self.workspace_dir)
+        self.assertNotIn(str(binding.agy_project_id), FORBIDDEN_AGY_PROJECT_IDS)
+
+        proj_json_path = self.paths.gemini_config_dir / "projects" / f"{binding.agy_project_id}.json"
+        self.assertTrue(proj_json_path.is_file())
+        proj_doc = json.loads(proj_json_path.read_text(encoding="utf-8"))
+        self.assertEqual(proj_doc["id"], str(binding.agy_project_id))
+        self.assertIn(
+            str(binding.workspace_uri),
+            self.bridge.registry._extract_agy_project_folder_uris(proj_doc),
+        )
+
+        annot_pbtxt = self.paths.agy_data_dir / "annotations" / f"{cid}.pbtxt"
+        self.assertTrue(annot_pbtxt.is_file())
+        pbtxt_match = re.search(
+            r'title:\s*"((?:[^"\\]|\\.)*)"',
+            annot_pbtxt.read_text(encoding="utf-8"),
+        )
+        self.assertIsNotNone(pbtxt_match)
+        assert pbtxt_match is not None
+        pbtxt_title = (
+            pbtxt_match.group(1)
+            .replace('\\"', '"')
+            .replace("\\n", "\n")
+            .replace("\\\\", "\\")
+            .strip()
+        )
+        self.assertEqual(pbtxt_title, expected_title)
+
+        conv_conn = sqlite3.connect(
+            f"file:{self.paths.agy_data_dir / 'conversations' / f'{cid}.db'}?mode=ro",
+            uri=True,
+        )
+        try:
+            tmeta_blob = conv_conn.execute(
+                "SELECT data FROM trajectory_metadata_blob WHERE id = 'main'"
+            ).fetchone()[0]
+        finally:
+            conv_conn.close()
+        tmeta_unk: list[dict[str, object]] = []
+        decoded_tmeta = decode_protobuf(
+            bytes(tmeta_blob),
+            "exa.cortex_pb.CortexTrajectoryMetadata",
+            self.schema,
+            tmeta_unk,
+        )
+        self.assertEqual(tmeta_unk, [])
+        self.assertEqual(decoded_tmeta["project_id"], str(binding.agy_project_id))
+
+        sum_conn = sqlite3.connect(
+            f"file:{self.paths.agy_data_dir / 'conversation_summaries.db'}?mode=ro",
+            uri=True,
+        )
+        try:
+            sum_row = sum_conn.execute(
+                "SELECT title, project_id, raw_summary FROM conversation_summaries WHERE conversation_id = ?",
+                (str(cid),),
+            ).fetchone()
+        finally:
+            sum_conn.close()
+        self.assertIsNotNone(sum_row)
+        assert sum_row is not None
+        self.assertEqual(sum_row[0], expected_title)
+        self.assertEqual(sum_row[1], str(binding.agy_project_id))
+        sum_unk: list[dict[str, object]] = []
+        decoded_sum = decode_protobuf(
+            bytes(sum_row[2]),
+            "exa.jetski_cortex_pb.CascadeTrajectorySummary",
+            self.schema,
+            sum_unk,
+        )
+        self.assertEqual(sum_unk, [])
+        self.assertEqual(decoded_sum["annotations"]["title"], expected_title)
+        self.assertEqual(decoded_sum["trajectory_metadata"]["project_id"], str(binding.agy_project_id))
+
+        hub_pb = self.paths.agy_data_dir / "agyhub_summaries_proto.pb"
+        self.assertTrue(hub_pb.is_file())
+        hub_state = decode_summaries_state_proto(hub_pb.read_bytes())
+        self.assertIn(cid, hub_state.summaries)
+        hub_unk: list[dict[str, object]] = []
+        decoded_hub_sum = decode_protobuf(
+            hub_state.summaries[cid].summary_proto_bytes,
+            "exa.jetski_cortex_pb.CascadeTrajectorySummary",
+            self.schema,
+            hub_unk,
+        )
+        self.assertEqual(hub_unk, [])
+        self.assertEqual(decoded_hub_sum["annotations"]["title"], expected_title)
+        self.assertEqual(decoded_hub_sum["trajectory_metadata"]["project_id"], str(binding.agy_project_id))
+
+        state_conn = sqlite3.connect(
+            f"file:{self.paths.codex_home_dir / 'state_5.sqlite'}?mode=ro",
+            uri=True,
+        )
+        try:
+            proj_row = state_conn.execute(
+                "SELECT id FROM projects WHERE id = ?",
+                (str(binding.codex_project_id),),
+            ).fetchone()
+            root_row = state_conn.execute(
+                "SELECT path FROM project_roots WHERE project_id = ?",
+                (str(binding.codex_project_id),),
+            ).fetchone()
+            thread_row = state_conn.execute(
+                "SELECT title, name, project_id, cwd, archived FROM threads WHERE id = ?",
+                (str(tid),),
+            ).fetchone()
+        finally:
+            state_conn.close()
+        self.assertIsNotNone(proj_row)
+        self.assertIsNotNone(root_row)
+        assert root_row is not None
+        self.assertEqual(root_row[0], str(binding.workspace_path))
+        self.assertIsNotNone(thread_row)
+        assert thread_row is not None
+        self.assertEqual(thread_row[0], expected_title)
+        self.assertEqual(thread_row[1], expected_title)
+        self.assertEqual(thread_row[2], str(binding.codex_project_id))
+        self.assertEqual(thread_row[3], str(binding.workspace_path))
+        self.assertEqual(int(thread_row[4]), 0)
+
+        session_idx = self.paths.codex_home_dir / "session_index.jsonl"
+        self.assertTrue(session_idx.is_file())
+        idx_entries = [
+            json.loads(line)
+            for line in session_idx.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        matched_idx = [entry for entry in idx_entries if entry.get("id") == str(tid)]
+        self.assertEqual(len(matched_idx), 1)
+        self.assertEqual(matched_idx[0]["thread_name"], expected_title)
+
+        gs_path = self.paths.codex_home_dir / ".codex-global-state.json"
+        self.assertTrue(gs_path.is_file())
+        gs_doc = json.loads(gs_path.read_text(encoding="utf-8"))
+        self.assertIn(str(binding.codex_legacy_project_id), gs_doc["local-projects"])
+        self.assertEqual(
+            gs_doc["thread-project-assignments"][str(tid)]["projectId"],
+            str(binding.codex_legacy_project_id),
+        )
+
     def test_real_session_isolated_roundtrip_agy_to_codex_and_back(self) -> None:
         src_cid = self._copy_real_agy_session_into_temp("eb95dc40-cb5e-4017-b4ff-f41223e1f701")
+        orig_agy_ledger = self.bridge.inspect_session_ledger(
+            self.workspace_dir,
+            cascade_id=src_cid,
+        )
 
         receipt_1 = self.bridge.sync_session(
             self.workspace_dir,
@@ -1139,18 +1298,52 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
             self.workspace_dir,
             cascade_id=roundtrip_cid,
         )
-        self.assertEqual(
-            len([e for e in rt_agy_ledger.events if isinstance(e, ToolCallEvent)]),
-            97,
-        )
-        self.assertEqual(
-            len([e for e in rt_agy_ledger.events if isinstance(e, ToolResultEvent)]),
-            97,
-        )
-        self.assertEqual(rt_agy_ledger.title, codex_ledger.title)
+        orig_calls = [e for e in orig_agy_ledger.events if isinstance(e, ToolCallEvent)]
+        rt_calls = [e for e in rt_agy_ledger.events if isinstance(e, ToolCallEvent)]
+        orig_results = [e for e in orig_agy_ledger.events if isinstance(e, ToolResultEvent)]
+        codex_results = [e for e in codex_ledger.events if isinstance(e, ToolResultEvent)]
+        rt_results = [e for e in rt_agy_ledger.events if isinstance(e, ToolResultEvent)]
 
-        annot_pbtxt = self.paths.agy_data_dir / "annotations" / f"{roundtrip_cid}.pbtxt"
-        self.assertTrue(annot_pbtxt.is_file())
+        self.assertEqual(len(rt_calls), 97)
+        self.assertEqual(len(rt_results), 97)
+        self.assertEqual(
+            [
+                (str(c.call_id), c.payload.kind if c.payload.kind != "opaque" else c.tool_name, c.payload.kind)
+                for c in rt_calls
+            ],
+            [
+                (str(c.call_id), c.payload.kind if c.payload.kind != "opaque" else c.tool_name, c.payload.kind)
+                for c in orig_calls
+            ],
+        )
+        for orig_call, rt_call in zip(orig_calls, rt_calls):
+            if isinstance(orig_call.payload, ManageSubagentsPayload):
+                assert isinstance(rt_call.payload, ManageSubagentsPayload)
+                self.assertEqual(rt_call.payload.action, orig_call.payload.action)
+                self.assertEqual(
+                    set(rt_call.payload.target_conversation_ids),
+                    set(orig_call.payload.target_conversation_ids),
+                )
+            else:
+                self.assertEqual(
+                    _canonical_event_digest_payload(rt_call),
+                    _canonical_event_digest_payload(orig_call),
+                )
+            paired_call, paired_res = rt_agy_ledger.call_and_result(rt_call.call_id)
+            self.assertEqual(paired_call.call_id, rt_call.call_id)
+            self.assertIsNotNone(paired_res)
+
+        self.assertEqual(
+            [_canonical_event_digest_payload(r) for r in codex_results],
+            [_canonical_event_digest_payload(r) for r in orig_results],
+        )
+        self.assertEqual(
+            [_canonical_event_digest_payload(r) for r in rt_results],
+            [_canonical_event_digest_payload(r) for r in orig_results],
+        )
+        self.assertEqual(codex_ledger.title, orig_agy_ledger.title)
+        self.assertEqual(rt_agy_ledger.title, orig_agy_ledger.title)
+
         transcript_path = (
             self.paths.agy_data_dir
             / "brain"
@@ -1160,11 +1353,18 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
             / "transcript.jsonl"
         )
         self.assertTrue(transcript_path.is_file())
-        hub_pb = self.paths.agy_data_dir / "agyhub_summaries_proto.pb"
-        self.assertTrue(hub_pb.is_file())
+        self._assert_title_and_project_bindings_across_stores(
+            roundtrip_cid,
+            synced_tid,
+            orig_agy_ledger.title,
+        )
 
     def test_real_session_isolated_roundtrip_codex_to_agy_and_back(self) -> None:
         src_tid = self._copy_real_codex_session_into_temp("01a1ae7d-d56f-7650-8336-aa848b9f2a5a")
+        orig_codex_ledger = self.bridge.inspect_session_ledger(
+            self.workspace_dir,
+            codex_thread_id=src_tid,
+        )
 
         receipt_1 = self.bridge.sync_session(
             self.workspace_dir,
@@ -1182,16 +1382,6 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
         )
         self.assertEqual(receipt_1_noop.transition_kind, "no_op")
         self.assertEqual(receipt_1_noop.events_applied, 0)
-
-        schema = json.loads((self.repo_root / "schema" / "antigravity_2_30_schema.json").read_text(encoding="utf-8"))
-        conv_conn = sqlite3.connect(str(self.paths.agy_data_dir / "conversations" / f"{synced_cid}.db"))
-        try:
-            tmeta_blob = conv_conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()[0]
-        finally:
-            conv_conn.close()
-        tmeta_unk: list[dict[str, object]] = []
-        decode_protobuf(bytes(tmeta_blob), "exa.cortex_pb.CortexTrajectoryMetadata", schema, tmeta_unk)
-        self.assertEqual(len(tmeta_unk), 0)
 
         agy_ledger = self.bridge.inspect_session_ledger(
             self.workspace_dir,
@@ -1223,17 +1413,41 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
             self.workspace_dir,
             codex_thread_id=roundtrip_tid,
         )
+        orig_calls = [e for e in orig_codex_ledger.events if isinstance(e, ToolCallEvent)]
+        agy_calls = [e for e in agy_ledger.events if isinstance(e, ToolCallEvent)]
+        rt_calls = [e for e in rt_codex_ledger.events if isinstance(e, ToolCallEvent)]
+        orig_results = [e for e in orig_codex_ledger.events if isinstance(e, ToolResultEvent)]
+        agy_results = [e for e in agy_ledger.events if isinstance(e, ToolResultEvent)]
+        rt_results = [e for e in rt_codex_ledger.events if isinstance(e, ToolResultEvent)]
+
         self.assertEqual(
             len([e for e in rt_codex_ledger.events if isinstance(e, ThinkingEvent)]),
             18,
         )
+        self.assertEqual(len(rt_calls), 19)
+        self.assertEqual(len(rt_results), 19)
         self.assertEqual(
-            len([e for e in rt_codex_ledger.events if isinstance(e, ToolCallEvent)]),
-            19,
+            [(c.tool_name, c.payload) for c in rt_calls],
+            [(c.tool_name, c.payload) for c in orig_calls],
         )
         self.assertEqual(
-            len([e for e in rt_codex_ledger.events if isinstance(e, ToolResultEvent)]),
-            19,
+            [_canonical_event_digest_payload(c) for c in agy_calls],
+            [_canonical_event_digest_payload(c) for c in orig_calls],
+        )
+        self.assertEqual(
+            [_canonical_event_digest_payload(r) for r in agy_results],
+            [_canonical_event_digest_payload(r) for r in orig_results],
+        )
+        self.assertEqual(
+            [(str(r.call_id), r.output_text, r.is_error) for r in rt_results],
+            [(str(r.call_id), r.output_text, r.is_error) for r in orig_results],
+        )
+        self.assertEqual(agy_ledger.title, orig_codex_ledger.title)
+        self.assertEqual(rt_codex_ledger.title, orig_codex_ledger.title)
+        self._assert_title_and_project_bindings_across_stores(
+            synced_cid,
+            roundtrip_tid,
+            orig_codex_ledger.title,
         )
 
     def test_incremental_append_divergence_fork_overwrite_and_presence_lock(self) -> None:
@@ -2351,6 +2565,848 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
         codex_calls = [ev for ev in codex_decoded.events if isinstance(ev, ToolCallEvent)]
         self.assertEqual(codex_calls[0].payload, del_payload)
         self.assertEqual(codex_calls[1].payload, cmd_payload)
+
+    def test_online_rpc_defers_and_status_is_strictly_readonly(self) -> None:
+        self.paths.codex_home_dir.mkdir(parents=True, exist_ok=True)
+        daemon_json = self.paths.codex_home_dir / "daemon.json"
+        daemon_json.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        codex_wal = self.paths.codex_home_dir / "state_5.sqlite-wal"
+        codex_wal.write_bytes(b"active-wal-frame")
+
+        orig_cwd = Path.cwd()
+        stdout_buf = io.StringIO()
+        try:
+            os.chdir(self.workspace_dir)
+            with contextlib.redirect_stdout(stdout_buf):
+                rc = cli_main(
+                    [
+                        "--gemini-config-dir",
+                        str(self.paths.gemini_config_dir),
+                        "--agy-data-dir",
+                        str(self.paths.agy_data_dir),
+                        "--codex-home-dir",
+                        str(self.paths.codex_home_dir),
+                        "--sync-state-dir",
+                        str(self.paths.sync_state_dir),
+                        "status",
+                        "-w",
+                        ".",
+                    ]
+                )
+        finally:
+            os.chdir(orig_cwd)
+
+        self.assertEqual(rc, 0)
+        status_payload = json.loads(stdout_buf.getvalue())
+        self.assertEqual(
+            status_payload["workspace"]["workspace_path"],
+            str(self.workspace_dir.resolve()),
+        )
+        self.assertFalse((self.paths.codex_home_dir / "state_5.sqlite").exists())
+        self.assertFalse((self.paths.codex_home_dir / ".codex-global-state.json").exists())
+        self.assertEqual(list((self.paths.gemini_config_dir / "projects").glob("*.json")), [])
+
+        with self.assertRaises(RuntimeError):
+            self.bridge.pair_workspace(self.workspace_dir)
+
+        daemon_json.unlink()
+        codex_wal.unlink()
+
+        src_tid = CodexThreadId("01a1ae7d-2222-7000-8000-000000000010")
+        t1_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T05:00:00Z",
+                ),
+                query_text="Online guard test",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T05:00:02Z",
+                ),
+                text="Ready.",
+            ),
+        ]
+        codex_binding = self.bridge.registry.ensure_codex_binding(self.workspace_dir)
+        clean_locks = self.bridge.guard.probe_locks(None, src_tid)
+        self.bridge._transport.apply_to_codex(
+            codex_binding,
+            src_tid,
+            t1_events,
+            TrajectoryLedger.from_events(codex_binding.workspace_path, codex_binding.workspace_uri, t1_events),
+            clean_locks,
+            TransportMode.OFFLINE_STORAGE,
+        )
+
+        target_cid = CascadeId("bbbb1111-2222-3333-4444-555555555555")
+        (self.paths.agy_data_dir / "daemon").mkdir(parents=True, exist_ok=True)
+        (self.paths.agy_data_dir / "daemon" / "hub_55000.json").write_text(
+            json.dumps({"pid": os.getpid(), "csrfToken": "ephemeral-secret"}),
+            encoding="utf-8",
+        )
+        (self.paths.agy_data_dir / "presence").mkdir(parents=True, exist_ok=True)
+        lock_file = self.paths.agy_data_dir / "presence" / f"{target_cid}.lock"
+        lock_file.write_text("", encoding="utf-8")
+        lock_fd = os.open(str(lock_file), os.O_RDONLY)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deferred = self.bridge.sync_session(
+                self.workspace_dir,
+                cascade_id=target_cid,
+                codex_thread_id=src_tid,
+                direction=SyncDirection.CODEX_TO_AGY,
+                mode=TransportMode.ONLINE_RPC,
+            )
+            self.assertEqual(deferred.transition_kind, "deferred_busy")
+            self.assertIsNone(deferred.backup_manifest)
+            self.assertFalse((self.paths.agy_data_dir / "conversations" / f"{target_cid}.db").exists())
+            self.assertEqual(list((self.paths.gemini_config_dir / "projects").glob("*.json")), [])
+
+            held_locks = self.bridge.guard.probe_locks(target_cid, src_tid)
+            sample_ledger = TrajectoryLedger.from_events(
+                codex_binding.workspace_path, codex_binding.workspace_uri, t1_events
+            )
+            with self.assertRaises(RuntimeError):
+                self.bridge._transport.apply_to_agy(
+                    codex_binding,
+                    target_cid,
+                    t1_events,
+                    sample_ledger,
+                    held_locks,
+                    TransportMode.ONLINE_RPC,
+                )
+            with self.assertRaises(RuntimeError):
+                self.bridge._transport.apply_to_agy(
+                    codex_binding,
+                    target_cid,
+                    t1_events,
+                    sample_ledger,
+                    held_locks,
+                    TransportMode.OFFLINE_STORAGE,
+                )
+            with self.assertRaises(RuntimeError):
+                self.bridge._transport.apply_to_codex(
+                    codex_binding,
+                    src_tid,
+                    t1_events,
+                    sample_ledger,
+                    clean_locks,
+                    TransportMode.ONLINE_RPC,
+                )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+    def test_top_level_fork_preserves_sidebar_visibility_and_converges_once(self) -> None:
+        binding = self.bridge.pair_workspace(self.workspace_dir)
+        cid = CascadeId("1111aaaa-2222-3333-4444-555555555555")
+        tid = CodexThreadId("01a1ae7d-3333-7000-8000-000000000001")
+
+        t1_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T06:00:00Z",
+                ),
+                query_text="Shared ancestor turn",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T06:00:01Z",
+                ),
+                text="Shared ancestor reply",
+            ),
+        ]
+        locks = self.bridge.guard.probe_locks(cid, tid)
+        self.bridge._transport.apply_to_agy(
+            binding,
+            cid,
+            t1_events,
+            TrajectoryLedger.from_events(
+                binding.workspace_path, binding.workspace_uri, t1_events, recompute_agy_step_indices=True
+            ),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+        )
+        init_rec = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=cid,
+            codex_thread_id=tid,
+            direction=SyncDirection.AGY_TO_CODEX,
+        )
+        self.assertEqual(init_rec.transition_kind, "initial_import")
+
+        agy_t2 = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-2-agy"),
+                    timestamp_iso="2026-11-10T06:01:00Z",
+                ),
+                query_text="Antigravity branch turn",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-2-agy"),
+                    timestamp_iso="2026-11-10T06:01:01Z",
+                ),
+                text="Antigravity branch reply",
+            ),
+        ]
+        codex_t2 = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2-codex"),
+                    timestamp_iso="2026-11-10T06:01:05Z",
+                ),
+                query_text="Codex branch turn",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2-codex"),
+                    timestamp_iso="2026-11-10T06:01:06Z",
+                ),
+                text="Codex branch reply",
+            ),
+        ]
+        self.bridge._transport.apply_to_agy(
+            binding,
+            cid,
+            agy_t2,
+            TrajectoryLedger.from_events(
+                binding.workspace_path,
+                binding.workspace_uri,
+                [*t1_events, *agy_t2],
+                recompute_agy_step_indices=True,
+            ),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+            incremental=True,
+        )
+        self.bridge._transport.apply_to_codex(
+            binding,
+            tid,
+            codex_t2,
+            TrajectoryLedger.from_events(
+                binding.workspace_path,
+                binding.workspace_uri,
+                [*t1_events, *codex_t2],
+            ),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+            incremental=True,
+        )
+
+        r1 = self.bridge.sync_workspace(
+            self.workspace_dir,
+            fork_policy=ForkResolutionPolicy.FORK_NEW_SESSION,
+        )
+        fork_receipts = [r for r in r1 if r.transition_kind == "diverged_forked"]
+        self.assertEqual(len(fork_receipts), 1)
+        self.assertIsNotNone(fork_receipts[0].backup_manifest)
+        self.assertEqual(fork_receipts[0].forked_from_codex_thread_id, tid)
+
+        r2 = self.bridge.sync_workspace(
+            self.workspace_dir,
+            fork_policy=ForkResolutionPolicy.FORK_NEW_SESSION,
+        )
+        self.assertEqual(len(r2), 2)
+        self.assertTrue(all(r.transition_kind == "no_op" for r in r2))
+
+        active_cursors = list((self.paths.sync_state_dir / "cursors").glob("*.json"))
+        superseded_cursors = list((self.paths.sync_state_dir / "cursors" / "superseded").glob("*.json"))
+        self.assertEqual(len(active_cursors), 2)
+        self.assertGreaterEqual(len(superseded_cursors), 1)
+
+        visible_sessions = self.bridge.registry.list_workspace_sessions(binding, include_subagents=False)
+        self.assertEqual(len(visible_sessions), 2)
+        for sess in visible_sessions:
+            self.assertEqual(sess.lineage.nesting_depth, 0)
+            self.assertFalse(sess.lineage.is_subagent)
+            self.assertIsNone(sess.parent_cascade_id)
+            self.assertIsNone(sess.parent_codex_thread_id)
+        self.assertEqual(
+            list((self.paths.agy_data_dir / "brain").glob("*/.system_generated/subagents/*.json")),
+            [],
+        )
+
+        ws2 = self.root / "agent-fleet-c2a-fork"
+        ws2.mkdir(parents=True, exist_ok=True)
+        b2 = self.bridge.pair_workspace(ws2)
+        cid2 = CascadeId("2222bbbb-2222-3333-4444-555555555555")
+        tid2 = CodexThreadId("01a1ae7d-4444-7000-8000-000000000002")
+        locks2 = self.bridge.guard.probe_locks(cid2, tid2)
+        self.bridge._transport.apply_to_agy(
+            b2,
+            cid2,
+            t1_events,
+            TrajectoryLedger.from_events(
+                b2.workspace_path, b2.workspace_uri, t1_events, recompute_agy_step_indices=True
+            ),
+            locks2,
+            TransportMode.OFFLINE_STORAGE,
+        )
+        self.bridge.sync_session(
+            ws2,
+            cascade_id=cid2,
+            codex_thread_id=tid2,
+            direction=SyncDirection.AGY_TO_CODEX,
+        )
+        self.bridge._transport.apply_to_agy(
+            b2,
+            cid2,
+            agy_t2,
+            TrajectoryLedger.from_events(
+                b2.workspace_path, b2.workspace_uri, [*t1_events, *agy_t2], recompute_agy_step_indices=True
+            ),
+            locks2,
+            TransportMode.OFFLINE_STORAGE,
+            incremental=True,
+        )
+        self.bridge._transport.apply_to_codex(
+            b2,
+            tid2,
+            codex_t2,
+            TrajectoryLedger.from_events(b2.workspace_path, b2.workspace_uri, [*t1_events, *codex_t2]),
+            locks2,
+            TransportMode.OFFLINE_STORAGE,
+            incremental=True,
+        )
+        c2a_fork = self.bridge.sync_session(
+            ws2,
+            cascade_id=cid2,
+            codex_thread_id=tid2,
+            direction=SyncDirection.CODEX_TO_AGY,
+            fork_policy=ForkResolutionPolicy.FORK_NEW_SESSION,
+        )
+        self.assertEqual(c2a_fork.transition_kind, "diverged_forked")
+        self.assertIsNotNone(c2a_fork.backup_manifest)
+        self.assertEqual(c2a_fork.forked_from_cascade_id, cid2)
+        self.assertNotEqual(c2a_fork.cascade_id, cid2)
+
+        fork_db = self.paths.agy_data_dir / "conversations" / f"{c2a_fork.cascade_id}.db"
+        fconn = sqlite3.connect(f"file:{fork_db}?mode=ro", uri=True)
+        try:
+            pref_rows = fconn.execute("SELECT idx, data FROM parent_references ORDER BY idx ASC").fetchall()
+        finally:
+            fconn.close()
+        self.assertEqual(pref_rows, [(0, _encode_string_field(1, str(cid2)))])
+
+        sconn = sqlite3.connect(
+            f"file:{self.paths.agy_data_dir / 'conversation_summaries.db'}?mode=ro",
+            uri=True,
+        )
+        try:
+            srow = sconn.execute(
+                "SELECT parent_conversation_id, nesting_depth FROM conversation_summaries WHERE conversation_id = ?",
+                (str(c2a_fork.cascade_id),),
+            ).fetchone()
+        finally:
+            sconn.close()
+        self.assertEqual(srow, ("", 0))
+        self.assertEqual(
+            list((self.paths.agy_data_dir / "brain").glob("*/.system_generated/subagents/*.json")),
+            [],
+        )
+
+        self.bridge.sync_workspace(ws2, fork_policy=ForkResolutionPolicy.FORK_NEW_SESSION)
+        ws2_noop = self.bridge.sync_workspace(ws2, fork_policy=ForkResolutionPolicy.FORK_NEW_SESSION)
+        self.assertEqual(len(ws2_noop), 2)
+        self.assertTrue(all(r.transition_kind == "no_op" for r in ws2_noop))
+        self.assertEqual(
+            len(self.bridge.registry.list_workspace_sessions(b2, include_subagents=False)),
+            2,
+        )
+
+    def test_session_id_traversal_rejected_and_backup_command_shell_quoted(self) -> None:
+        evil_id = "../../../escaped_target"
+        with self.assertRaises(ValueError):
+            self.bridge.sync_session(
+                self.workspace_dir,
+                cascade_id=CascadeId(evil_id),
+                direction=SyncDirection.CODEX_TO_AGY,
+            )
+        with self.assertRaises(ValueError):
+            self.bridge.inspect_session_ledger(
+                self.workspace_dir,
+                cascade_id=CascadeId(evil_id),
+            )
+        with self.assertRaises(ValueError):
+            self.bridge.guard.probe_locks(CascadeId(evil_id), None)
+        with self.assertRaises(ValueError):
+            self.bridge.guard.create_offline_backup(HostKind.ANTIGRAVITY, evil_id, ())
+        self.assertFalse((self.root / "escaped_target.db").exists())
+
+        conv_dir = self.paths.agy_data_dir / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        (conv_dir / "bad..session.db").write_bytes(b"not-a-valid-id")
+        bad_sc_dir = self.paths.agy_data_dir / "brain" / "bad..parent" / ".system_generated" / "subagents"
+        bad_sc_dir.mkdir(parents=True, exist_ok=True)
+        (bad_sc_dir / "child.json").write_text(
+            json.dumps({"conversationId": "../evil", "workspaceUris": [self.workspace_dir.as_uri()]}),
+            encoding="utf-8",
+        )
+        ro_binding = self.bridge.registry.resolve_readonly_binding(self.workspace_dir)
+        self.assertEqual(
+            self.bridge.registry.list_workspace_sessions(ro_binding, include_subagents=True),
+            (),
+        )
+
+        tricky_dir = self.root / "dir with space; echo pwned"
+        tricky_dir.mkdir(parents=True, exist_ok=True)
+        tricky_db = tricky_dir / "state.sqlite"
+        tricky_wal = tricky_dir / "state.sqlite-wal"
+        tricky_db.write_text("db-bytes", encoding="utf-8")
+        tricky_wal.write_text("wal-bytes", encoding="utf-8")
+
+        manifest = self.bridge.guard.create_offline_backup(
+            HostKind.CODEX,
+            "01a1ae7d-5555-7000-8000-000000000077",
+            (tricky_db,),
+        )
+        self.assertIn(shlex.quote(str(tricky_db)), manifest.restoration_command)
+        self.assertIn(shlex.quote(str(tricky_wal)), manifest.restoration_command)
+        cmd_parts = manifest.restoration_command.split(" && ")
+        self.assertGreaterEqual(len(cmd_parts), 2)
+        expected_targets = {
+            str(tricky_db),
+            str(tricky_wal),
+            str(tricky_dir / "state.sqlite-shm"),
+        }
+        for part in cmd_parts:
+            tokens = shlex.split(part)
+            self.assertIn(tokens[0], ("cp", "rm"))
+            self.assertIn(tokens[-1], expected_targets)
+
+    def test_incremental_codex_to_agy_step_indices_match_across_stores(self) -> None:
+        binding = self.bridge.pair_workspace(self.workspace_dir)
+        cid = CascadeId("3333cccc-2222-3333-4444-555555555555")
+        tid = CodexThreadId("01a1ae7d-6666-7000-8000-000000000003")
+        locks = self.bridge.guard.probe_locks(cid, tid)
+
+        t1_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T07:00:00Z",
+                ),
+                query_text="Initial question",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T07:00:01Z",
+                ),
+                text="Initial answer",
+            ),
+        ]
+        self.bridge._transport.apply_to_agy(
+            binding,
+            cid,
+            t1_events,
+            TrajectoryLedger.from_events(
+                binding.workspace_path, binding.workspace_uri, t1_events, recompute_agy_step_indices=True
+            ),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+        )
+        self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=cid,
+            codex_thread_id=tid,
+            direction=SyncDirection.AGY_TO_CODEX,
+        )
+
+        read_payload = ReadFilePayload(kind="read_file", path="/workspace/README.md", start_line=1, end_line=5)
+        t2_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T07:01:00Z",
+                ),
+                query_text="Followup in Codex",
+            ),
+            ThinkingEvent(
+                kind="thinking",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T07:01:01Z",
+                ),
+                summary_text="Checking README",
+            ),
+            ToolCallEvent(
+                kind="tool_call",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T07:01:02Z",
+                ),
+                call_id=ToolCallId("call-step-align-1"),
+                tool_name="read_file",
+                tool_summary="Read README",
+                payload=read_payload,
+            ),
+            ToolResultEvent(
+                kind="tool_result",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T07:01:03Z",
+                ),
+                call_id=ToolCallId("call-step-align-1"),
+                tool_name="read_file",
+                output_text="# Title",
+                is_error=False,
+                payload=read_payload,
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T07:01:04Z",
+                ),
+                text="Checked README.",
+            ),
+        ]
+        self.bridge._transport.apply_to_codex(
+            binding,
+            tid,
+            t2_events,
+            TrajectoryLedger.from_events(binding.workspace_path, binding.workspace_uri, [*t1_events, *t2_events]),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+            incremental=True,
+        )
+
+        inc_rec = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=cid,
+            codex_thread_id=tid,
+            direction=SyncDirection.CODEX_TO_AGY,
+        )
+        self.assertEqual(inc_rec.transition_kind, "incremental_append")
+
+        conv_conn = sqlite3.connect(
+            f"file:{self.paths.agy_data_dir / 'conversations' / f'{cid}.db'}?mode=ro",
+            uri=True,
+        )
+        try:
+            step_rows = conv_conn.execute("SELECT idx, step_type FROM steps ORDER BY idx ASC").fetchall()
+        finally:
+            conv_conn.close()
+
+        tx_path = self.paths.agy_data_dir / "brain" / str(cid) / ".system_generated" / "logs" / "transcript.jsonl"
+        tx_indices = [
+            int(json.loads(line)["step_index"])
+            for line in tx_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+        sum_conn = sqlite3.connect(
+            f"file:{self.paths.agy_data_dir / 'conversation_summaries.db'}?mode=ro",
+            uri=True,
+        )
+        try:
+            sum_row = sum_conn.execute(
+                "SELECT step_count, last_user_input_step_index FROM conversation_summaries WHERE conversation_id = ?",
+                (str(cid),),
+            ).fetchone()
+        finally:
+            sum_conn.close()
+
+        self.assertIsNotNone(sum_row)
+        assert sum_row is not None
+        self.assertEqual([int(r[0]) for r in step_rows], tx_indices)
+        self.assertEqual(int(sum_row[0]), len(step_rows))
+        expected_last_user_idx = max(int(idx) for idx, st in step_rows if int(st) == 14)
+        self.assertEqual(int(sum_row[1]), expected_last_user_idx)
+
+    def test_pre_cursor_crash_retry_converges_to_noop(self) -> None:
+        binding = self.bridge.pair_workspace(self.workspace_dir)
+        cid = CascadeId("4444dddd-2222-3333-4444-555555555555")
+        locks = self.bridge.guard.probe_locks(cid, None)
+
+        read_payload = ReadFilePayload(kind="read_file", path="/workspace/a.py", start_line=1, end_line=10)
+        t1_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T08:00:00Z",
+                ),
+                query_text="Crash recovery check",
+            ),
+            ToolCallEvent(
+                kind="tool_call",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T08:00:01Z",
+                ),
+                call_id=ToolCallId("call-crash-1"),
+                tool_name="read_file",
+                tool_summary="Read a.py",
+                payload=read_payload,
+            ),
+            ToolResultEvent(
+                kind="tool_result",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T08:00:02Z",
+                ),
+                call_id=ToolCallId("call-crash-1"),
+                tool_name="read_file",
+                output_text="x = 1",
+                is_error=False,
+                payload=read_payload,
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T08:00:03Z",
+                ),
+                text="Read complete.",
+            ),
+        ]
+        self.bridge._transport.apply_to_agy(
+            binding,
+            cid,
+            t1_events,
+            TrajectoryLedger.from_events(
+                binding.workspace_path, binding.workspace_uri, t1_events, recompute_agy_step_indices=True
+            ),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+        )
+
+        r_init = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=cid,
+            direction=SyncDirection.AGY_TO_CODEX,
+        )
+        tid = r_init.codex_thread_id
+        cpath = self.bridge._cursor_path(cid, tid)
+        self.assertTrue(cpath.is_file())
+        saved_t1_cursor = cpath.read_text(encoding="utf-8")
+
+        cpath.unlink()
+        retry_single = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=cid,
+            direction=SyncDirection.AGY_TO_CODEX,
+        )
+        self.assertEqual(retry_single.transition_kind, "no_op")
+        self.assertEqual(retry_single.events_applied, 0)
+        self.assertTrue(cpath.is_file())
+
+        cpath.unlink()
+        retry_pair = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=cid,
+            codex_thread_id=tid,
+            direction=SyncDirection.AUTO_INCREMENTAL,
+        )
+        self.assertEqual(retry_pair.transition_kind, "no_op")
+        self.assertEqual(retry_pair.events_applied, 0)
+        self.assertTrue(cpath.is_file())
+
+        t2_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T08:01:00Z",
+                ),
+                query_text="Second turn before cursor crash",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T08:01:01Z",
+                ),
+                text="Second turn done.",
+            ),
+        ]
+        self.bridge._transport.apply_to_agy(
+            binding,
+            cid,
+            t2_events,
+            TrajectoryLedger.from_events(
+                binding.workspace_path,
+                binding.workspace_uri,
+                [*t1_events, *t2_events],
+                recompute_agy_step_indices=True,
+            ),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+            incremental=True,
+        )
+        r_inc = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=cid,
+            codex_thread_id=tid,
+            direction=SyncDirection.AGY_TO_CODEX,
+        )
+        self.assertEqual(r_inc.transition_kind, "incremental_append")
+
+        cpath.write_text(saved_t1_cursor, encoding="utf-8")
+        retry_lagged = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=cid,
+            codex_thread_id=tid,
+            direction=SyncDirection.AUTO_INCREMENTAL,
+        )
+        self.assertEqual(retry_lagged.transition_kind, "no_op")
+        self.assertEqual(retry_lagged.events_applied, 0)
+        restored_cursor = json.loads(cpath.read_text(encoding="utf-8"))
+        self.assertEqual(restored_cursor["last_synced_turn_id"], "turn-2")
+
+    def test_pragma_user_version_preserved_and_stale_codex_socket_ignored(self) -> None:
+        binding = self.bridge.pair_workspace(self.workspace_dir)
+        cid = CascadeId("5555eeee-2222-3333-4444-555555555555")
+        locks = self.bridge.guard.probe_locks(cid, None)
+
+        t1_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T09:00:00Z",
+                ),
+                query_text="Schema user_version check",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T09:00:01Z",
+                ),
+                text="Created.",
+            ),
+        ]
+        self.bridge._transport.apply_to_agy(
+            binding,
+            cid,
+            t1_events,
+            TrajectoryLedger.from_events(
+                binding.workspace_path, binding.workspace_uri, t1_events, recompute_agy_step_indices=True
+            ),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+        )
+        conv_db = self.paths.agy_data_dir / "conversations" / f"{cid}.db"
+        conn = sqlite3.connect(str(conv_db))
+        try:
+            initial_uv = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(initial_uv, 1)
+            conn.execute("PRAGMA user_version = 7")
+            conn.commit()
+        finally:
+            conn.close()
+
+        t2_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T09:01:00Z",
+                ),
+                query_text="Preserve user_version",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=TurnId("turn-2"),
+                    timestamp_iso="2026-11-10T09:01:01Z",
+                ),
+                text="Preserved.",
+            ),
+        ]
+        self.bridge._transport.apply_to_agy(
+            binding,
+            cid,
+            t2_events,
+            TrajectoryLedger.from_events(
+                binding.workspace_path,
+                binding.workspace_uri,
+                [*t1_events, *t2_events],
+                recompute_agy_step_indices=True,
+            ),
+            locks,
+            TransportMode.OFFLINE_STORAGE,
+            incremental=True,
+        )
+        ro_conn = sqlite3.connect(f"file:{conv_db}?mode=ro", uri=True)
+        try:
+            preserved_uv = int(ro_conn.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            ro_conn.close()
+        self.assertEqual(preserved_uv, 7)
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="cas-") as short_tmp:
+            sroot = Path(short_tmp)
+            spaths = HostEnvironmentPaths(
+                gemini_config_dir=sroot / "g",
+                agy_data_dir=sroot / "a",
+                codex_home_dir=sroot / "c",
+                sync_state_dir=sroot / "s",
+            )
+            spaths.codex_home_dir.mkdir(parents=True, exist_ok=True)
+            sguard = SyncBridge(paths=spaths).guard
+            sock_path = spaths.codex_home_dir / "app-server.sock"
+
+            sock_path.write_text("not-a-socket", encoding="utf-8")
+            self.assertIsNone(sguard._discover_codex_daemon())
+            sock_path.unlink()
+
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                srv.bind(str(sock_path))
+                srv.listen(1)
+                live_ep = sguard._discover_codex_daemon()
+                self.assertIsNotNone(live_ep)
+            finally:
+                srv.close()
+
+            self.assertTrue(sock_path.exists())
+            self.assertIsNone(sguard._discover_codex_daemon())
 
 
 if __name__ == "__main__":
