@@ -3,6 +3,19 @@
 实现、评审或验收前阅读相关条目；用户纠正、返工或漏验暴露可复用教训后补记。
 当前仅保留模板，尚未整理经核实的教训；这不表示项目从未出现问题。
 
+## 已核实教训
+
+### 跨宿主轨迹同步的回合游标必须先归一化为顺序回合号再持久化
+
+**双端同步游标（`SessionSyncCursor`）中的 `turn_id` 必须统一归一化为顺序回合标识（`turn-1`, `turn-2`, ...），禁止把单端特有的 UUID 直接写入跨端水位线。**
+
+- 标签：#状态机 #幂等 #契约
+- 起因与后果：Codex `rollout-*.jsonl` 在 `task_started` / `turn_context` 中携带 UUID 格式的 `turn_id`，而 Antigravity `steps` 表在 Protobuf wire 层不存储 Codex 回合 UUID，重解码后会按顺序生成 `turn-1`, `turn-2`。首版 `decode_codex_rollout_to_ledger` 直接保留了 Codex UUID 作为 `turn_id`，导致 `CODEX_TO_AGY` 初次导入后立即重跑 `sync_session` 时在 Antigravity 账本中找不到该 UUID 水位线，误判为历史重写分叉（`diverged_halted`）。
+- 修复与证据：提交 `837d642` 在 `TrajectoryWireCodec.decode_codex_rollout_to_ledger`（`src/codex_agy_sync/codecs.py`）中将原始 `turn_id` 映射为确定性的顺序 `TurnId("turn-N")`，并在 `decode_agy_steps_to_ledger` 中统一 `task_started` 与 `CHECKPOINT` 的回合切分边界；`tests/test_roundtrip_and_sync.py` 的 `test_real_session_isolated_roundtrip_codex_to_agy_and_back` 实测首次导入后立即重跑返回 `no_op`。
+- 正确做法（Done right）：中间账本（`TrajectoryLedger`）的分组键与水位线锚点统一使用与宿主 wire 格式无关的规范化顺序回合号，宿主特有 UUID 放入 `HostExtensionEnvelope` 保真。
+- 验证点：运行 `./scripts/check`（含 `test_real_session_isolated_roundtrip_codex_to_agy_and_back` 与 `test_interrogate_adversarial_regressions`）。
+- 复发记录：Seen 1x (2026-11-10)；由 `/interrogate` 对抗审查在 commit `dc32f09` 捕获并于 `837d642` 修复。
+
 ## 记录模板
 
 复制下列模板新增条目，已有同类条目则更新原条。未知的提交、原因或验收结果明确写“待核实”。

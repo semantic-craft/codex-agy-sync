@@ -26,16 +26,13 @@
 ## 当前状态
 
 - 2026-11-10：通过 Kotone（判断 ID：`a607d12864a349a18ddb0d63345bd3d6`）完成正式项目立项，已挂载至 Antigravity Desktop（项目 ID：`c13d254c-e8dc-4b56-b9a9-2a8ed562b3a1`）、Codex、DSH 与 Cindy 侧栏；已完成六大参考项目调研与三阶段架构设计。
-- 2026-11-10：完成第一阶段 REA / REAP 二进制与数据库契约提取与自检杠杆落地：
-  - 新增 `scripts/extract_schema.py`，直接从 `/Applications/Antigravity.app/Contents/Resources/bin/language_server` 与 `agy`（支持运行时 PATH 发现 `~/.local/bin/agy`，合并两端描述符并记录版本漂移）提取 9 个编译态 `FileDescriptorProto`（覆盖 `gemini_coder`、`exa.jetski_cortex_pb`、`exa.cortex_pb`、`exa.codeium_common_pb`、`exa.cortex.core.tools`、`exa.project_pb`、`jetbox_summaries_pb`、`exa.language_server_pb`，共 704 个可达消息、136 个枚举、373 个 RPC 方法），生成 `schema/antigravity_2_30_schema.json`、`schema/antigravity_2_30.proto` 与 `schema/sidebar_visibility_rules.json`。
-  - 实测校正了开源项目（如 Antigravity-Database-Manager）在 Antigravity 2.30+ 上的字段偏差：`conversations/<id>.db` 的 `steps.step_payload` 实际为 `gemini_coder.Step`（`user_input` 为 field 19、`planner_response` 为 field 20、`checkpoint` 为 field 30、`task_boundary` 为 field 93、`notify_user` 为 field 94、`system_message` 为 field 114、`generic` 为 field 140），而 `step_type = 132`（`CORTEX_STEP_TYPE_GENERIC`）在 `CortexStepMetadata.tool_call`（field 4）存 `ChatToolCall`，在 `Step.generic.result.payload`（`google.protobuf.Any`）内嵌 `exa.cortex.core.tools.{ReadFile,FileEdit,RunCommand,SearchWeb,...}` 强类型结构。
-  - 新增只读验证脚本 `scripts/verify_session_mapping.py` 与自检门禁 `scripts/check`，在只读模式（`?mode=ro` + `PRAGMA query_only=ON` + inode/mtime 前后快照校验）下无损解码本机真实 Antigravity 2.30+ 会话（`eb95dc40-cb5e-4017-b4ff-f41223e1f701`，161 步，`unknown_wire_fields_count == 0`）与同项目目录 Codex 0.166+ 会话（`01a1ae7d-d56f-7650-8336-aa848b9f2a5a`，含 `exec_command` 等 19 次配对工具调用），并验证基于真实解码状态突变的 3 项负向控制全绿。
+- 2026-11-10：完成第二阶段 `/architect` + `/arena` 架构设计与第三阶段全量实现、双向真实副本往返测试及 `/interrogate` 多模型对抗审查：
+  - 按可验证单元依次提交 [`5574006`](file:///Users/xianweizhang/Projects/codex-agy-sync/docs/architecture.md)（领域骨架）、[`de391e2`](file:///Users/xianweizhang/Projects/codex-agy-sync/src/codex_agy_sync/ledger.py)（统一事件账本与 5 项伴生投影）、[`d3a8816`](file:///Users/xianweizhang/Projects/codex-agy-sync/src/codex_agy_sync/codecs.py)（表驱动 7 类步骤与 16 类工具编解码器）、[`dc32f09`](file:///Users/xianweizhang/Projects/codex-agy-sync/src/codex_agy_sync/bridge.py)（双端项目配对、WAL/Presence 锁守卫、增量游标与分叉状态机、`bin/codex-agy-sync` CLI）以及 [`837d642`](file:///Users/xianweizhang/Projects/codex-agy-sync/tests/test_roundtrip_and_sync.py)（修复 `/interrogate` 三个模型审查发现的全部 8 项问题并锁定回归测试）。
+  - 在隔离的真实会话副本上完成 `Antigravity 2.30+ (eb95dc40-cb5e-4017-b4ff-f41223e1f701, 161 步, 97 次工具调用) <-> Codex 0.166+ (01a1ae7d-d56f-7650-8336-aa848b9f2a5a, 18 条推理, 19 次工具调用)` 双向往返同步、增量追加、分叉派生、备份覆盖与 `flock` 锁延迟测试，`./scripts/check` 5 阶段全绿（15/15 行为与回归测试通过）。
 
 ## 下一步
 
-1. 用 `/architect` 设计核心领域模型（中间统一轨迹 IR、双向工具映射表、游标与分叉状态机）。
-2. 实现同目录 `Codex <-> Antigravity 2.30+` 双向高保真转换器（覆盖 `gemini_coder.Step` 14/15/23/101/132 与 Codex `rollout-*.jsonl` `response_item` / `event_msg`）及伴生文件（`transcript.jsonl`、`annotations/<id>.pbtxt`、`agyhub_summaries_proto.pb`）。
-3. 实现在线 RPC 与离线受控落盘双模同步命令并完成端到端续聊验收。
+1. 在宿主桌面端空闲窗口期执行真实工作区会话双向续聊体验验收与守护模式扩展。
 
 ## 记录
 
