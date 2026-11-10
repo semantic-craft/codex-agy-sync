@@ -1,35 +1,81 @@
 """Table-driven wire codecs for Antigravity `gemini_coder.Step` and Codex `rollout-*.jsonl`.
 
-Invariants encoded in this module:
+Invariants encoded in this module.
 1. `STEP_WIRE_TABLE` is the single authoritative mapping between `steps.step_type`
    (`exa.cortex_pb.CortexStepType` enum values 14, 15, 23, 81, 82, 101, 132) and
    `gemini_coder.Step` protobuf oneof field tags (19, 20, 30, 93, 94, 114, 140),
    eliminating scattered `if/elif` chains across encoders and decoders
    (per `principle-model-the-domain`).
-2. `TOOL_CODEC_TABLE` is the single authoritative registry mapping all 10
+2. `TOOL_CODEC_TABLE` is the single authoritative registry mapping all 16
    `exa.cortex.core.tools.*` `google.protobuf.Any` type URLs to their canonical
-   `CanonicalToolPayload` domain types and corresponding Codex `function_call` /
+   `CanonicalToolPayload` domain types and corresponding Codex `function_call` and
    `custom_tool_call` schemas.
 3. All wire parsing and serialization happens strictly at the codec boundary
-   (per `principle-boundary-discipline`); no protobuf tags or raw JSONL dicts leak
+   (per `principle-boundary-discipline`). No protobuf tags or raw JSONL dicts leak
    into `TrajectoryLedger`, while unknown protobuf tags and host extensions are
    captured into `UnknownWireField` and `HostExtensionEnvelope`.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import IntEnum
-from typing import Literal, Mapping, Sequence, Tuple
+import json
+import re
+from typing import Any, Literal, Mapping, Sequence, Tuple
 
 from .ledger import (
+    AskQuestionPayload,
+    AssistantTextEvent,
     CanonicalEvent,
     CanonicalToolPayload,
+    CheckpointEvent,
+    DefineSubagentPayload,
+    EventOriginAnchor,
+    FileEditPayload,
+    FinishPayload,
+    GenerateImagePayload,
+    HostExtensionEnvelope,
+    HostKind,
+    InvokeSubagentPayload,
+    ListResourcesPayload,
+    ManageSubagentsPayload,
+    ManageTaskPayload,
+    MediaAttachment,
+    MomaSearchPayload,
+    OpaqueToolPayload,
+    QuestionItem,
+    QuestionOption,
+    ReadFilePayload,
+    ReadResourcePayload,
     RolloutLineNo,
+    RunCommandPayload,
+    SchedulePayload,
+    SearchWebDocument,
+    SearchWebPayload,
+    SendMessagePayload,
     StepIndex,
+    SystemEvent,
+    TaskBoundaryEvent,
+    ThinkingEvent,
+    TokenUsageAccounting,
+    ToolCallEvent,
+    ToolCallId,
+    ToolResultEvent,
     TrajectoryLedger,
+    TurnId,
+    UnknownWireField,
+    UserInputEvent,
     WorkspacePath,
     WorkspaceRootUri,
+    _encode_bytes_field,
+    _encode_string_field,
+    _encode_timestamp_proto,
+    _encode_varint,
+    _encode_varint_field,
+    _serialize_tool_payload_to_arguments_json,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,12 +96,7 @@ class CortexStepTypeCode(IntEnum):
 
 
 class GeminiStepWireTag(IntEnum):
-    """Protobuf field numbers inside `gemini_coder.Step` (`steps.step_payload`).
-
-    Crucial invariant from Phase A grounding: `steps.step_type` is an enum integer
-    (e.g. `14` for `USER_INPUT`), whereas `gemini_coder.Step` uses a distinct
-    field tag in its `step` oneof (e.g. tag `19` for `Step.user_input`).
-    """
+    """Protobuf field numbers inside `gemini_coder.Step` (`steps.step_payload`)."""
 
     USER_INPUT_TAG = 19
     PLANNER_RESPONSE_TAG = 20
@@ -190,7 +231,7 @@ TOOL_CODEC_TABLE: Tuple[ToolCodecSpec, ...] = (
         agy_any_type_url="type.googleapis.com/exa.cortex.core.tools.RunCommand",
         codex_call_kind="function_call",
         codex_tool_name="exec_command",
-        codex_fallback_tool_names=("custom_tool_call:exec", "shell"),
+        codex_fallback_tool_names=("custom_tool_call:exec", "shell", "exec"),
     ),
     ToolCodecSpec(
         payload_kind="search_web",
@@ -296,10 +337,19 @@ TOOL_SPEC_BY_AGY_NAME: Mapping[str, ToolCodecSpec] = {
 TOOL_SPEC_BY_CODEX_NAME: Mapping[str, ToolCodecSpec] = {
     spec.codex_tool_name: spec for spec in TOOL_CODEC_TABLE
 }
+TOOL_SPEC_BY_PAYLOAD_KIND: Mapping[str, ToolCodecSpec] = {
+    spec.payload_kind: spec for spec in TOOL_CODEC_TABLE
+}
+_TOOL_NAME_LOOKUP: dict[str, ToolCodecSpec] = {}
+for _spec in TOOL_CODEC_TABLE:
+    for _fb in _spec.codex_fallback_tool_names:
+        _TOOL_NAME_LOOKUP.setdefault(_fb, _spec)
+    _TOOL_NAME_LOOKUP[_spec.codex_tool_name] = _spec
+    _TOOL_NAME_LOOKUP[_spec.agy_tool_name] = _spec
 
 
 # ---------------------------------------------------------------------------
-# Boundary WireEnvelopes (Private to Codec/Transport Layer)
+# Boundary WireEnvelopes (Private to Codec and Transport Layer)
 # ---------------------------------------------------------------------------
 
 
@@ -325,27 +375,1009 @@ class CodexRawRolloutLine:
 
 
 # ---------------------------------------------------------------------------
+# Low-Level Protobuf Wire Parser and Builder
+# ---------------------------------------------------------------------------
+
+
+def _read_varint(buf: bytes, pos: int) -> tuple[int, int]:
+    res = 0
+    shift = 0
+    n = len(buf)
+    while pos < n:
+        b = buf[pos]
+        res |= (b & 0x7F) << shift
+        pos += 1
+        if not (b & 0x80):
+            return res, pos
+        shift += 7
+        if shift > 70:
+            raise ValueError("Protobuf varint exceeds 70 bits.")
+    raise ValueError("Truncated protobuf varint.")
+
+
+def _signed_int64(val: int) -> int:
+    if val >= (1 << 63):
+        return val - (1 << 64)
+    return val
+
+
+def _signed_int32(val: int) -> int:
+    val &= 0xFFFFFFFF
+    if val >= (1 << 31):
+        return val - (1 << 32)
+    return val
+
+
+def _iter_wire_fields(buf: bytes) -> list[tuple[int, int, int, bytes]]:
+    """Return list of `(field_num, wire_type, int_val, raw_bytes_val)`."""
+    pos = 0
+    n = len(buf)
+    fields: list[tuple[int, int, int, bytes]] = []
+    while pos < n:
+        tag_start = pos
+        tag, pos = _read_varint(buf, pos)
+        fn = tag >> 3
+        wt = tag & 7
+        if wt == 0:
+            val_start = pos
+            ival, pos = _read_varint(buf, pos)
+            fields.append((fn, wt, ival, buf[val_start:pos]))
+        elif wt == 2:
+            ln, pos = _read_varint(buf, pos)
+            end = pos + ln
+            if end > n:
+                raise ValueError("Truncated length-delimited field.")
+            fields.append((fn, wt, ln, buf[pos:end]))
+            pos = end
+        elif wt == 5:
+            end = pos + 4
+            if end > n:
+                raise ValueError("Truncated fixed32 field.")
+            fields.append((fn, wt, int.from_bytes(buf[pos:end], "little"), buf[pos:end]))
+            pos = end
+        elif wt == 1:
+            end = pos + 8
+            if end > n:
+                raise ValueError("Truncated fixed64 field.")
+            fields.append((fn, wt, int.from_bytes(buf[pos:end], "little"), buf[pos:end]))
+            pos = end
+        else:
+            raise ValueError(f"Unsupported protobuf wire type {wt} at offset {tag_start}.")
+    return fields
+
+
+def _encode_unknown_wire_field(uf: UnknownWireField) -> bytes:
+    tag = (uf.field_tag << 3) | (uf.wire_type & 7)
+    tag_bytes = _encode_varint(tag)
+    if uf.wire_type == 0:
+        if uf.raw_bytes:
+            return tag_bytes + uf.raw_bytes
+        return tag_bytes + b"\x00"
+    if uf.wire_type == 2:
+        return tag_bytes + _encode_varint(len(uf.raw_bytes)) + uf.raw_bytes
+    if uf.wire_type in (1, 5):
+        return tag_bytes + uf.raw_bytes
+    return b""
+
+
+def _decode_timestamp_iso(buf: bytes) -> str:
+    seconds = 0
+    nanos = 0
+    for fn, wt, ival, _ in _iter_wire_fields(buf):
+        if fn == 1 and wt == 0:
+            seconds = _signed_int64(ival)
+        elif fn == 2 and wt == 0:
+            nanos = _signed_int32(ival)
+    if seconds <= 0:
+        return "2026-01-01T00:00:00Z"
+    dt = datetime.fromtimestamp(seconds + (nanos / 1_000_000_000.0), tz=timezone.utc)
+    if nanos:
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _decode_duration_ms(buf: bytes) -> int:
+    seconds = 0
+    nanos = 0
+    for fn, wt, ival, _ in _iter_wire_fields(buf):
+        if fn == 1 and wt == 0:
+            seconds = _signed_int64(ival)
+        elif fn == 2 and wt == 0:
+            nanos = _signed_int32(ival)
+    return int(seconds * 1000 + (nanos // 1_000_000))
+
+
+def _encode_duration_proto(duration_ms: int) -> bytes:
+    if duration_ms <= 0:
+        return b""
+    seconds = duration_ms // 1000
+    nanos = (duration_ms % 1000) * 1_000_000
+    out = bytearray()
+    if seconds:
+        out.extend(_encode_varint_field(1, seconds))
+    if nanos:
+        out.extend(_encode_varint_field(2, nanos))
+    return bytes(out)
+
+
+def _decode_chat_tool_call(buf: bytes) -> dict[str, Any]:
+    out: dict[str, Any] = {"id": "", "name": "", "arguments_json": "{}"}
+    for fn, wt, _, raw in _iter_wire_fields(buf):
+        if fn == 1 and wt == 2:
+            out["id"] = raw.decode("utf-8", errors="replace")
+        elif fn == 2 and wt == 2:
+            out["name"] = raw.decode("utf-8", errors="replace")
+        elif fn == 3 and wt == 2:
+            out["arguments_json"] = raw.decode("utf-8", errors="replace")
+        elif fn == 7 and wt == 2:
+            out["thinking_signature"] = raw
+    return out
+
+
+def _encode_chat_tool_call(call_id: str, name: str, arguments_json: str) -> bytes:
+    buf = bytearray()
+    buf.extend(_encode_string_field(1, call_id))
+    buf.extend(_encode_string_field(2, name))
+    buf.extend(_encode_string_field(3, arguments_json))
+    return bytes(buf)
+
+
+def _decode_step_metadata(buf: bytes) -> tuple[dict[str, Any], list[UnknownWireField]]:
+    known_tags = set(range(1, 40))
+    meta: dict[str, Any] = {
+        "created_at_iso": "2026-01-01T00:00:00Z",
+        "source": 0,
+        "tool_call": None,
+        "tool_summary": "",
+        "generator_model": None,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        " preserved_fields": [],
+    }
+    unknowns: list[UnknownWireField] = []
+    for fn, wt, ival, raw in _iter_wire_fields(buf):
+        if fn not in known_tags:
+            unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+            continue
+        if fn == 1 and wt == 2:
+            meta["created_at_iso"] = _decode_timestamp_iso(raw)
+        elif fn == 3 and wt == 0:
+            meta["source"] = ival
+        elif fn == 4 and wt == 2:
+            meta["tool_call"] = _decode_chat_tool_call(raw)
+        elif fn == 9 and wt == 2:
+            for ufn, uwt, uival, _ in _iter_wire_fields(raw):
+                if ufn == 2 and uwt == 0:
+                    meta["input_tokens"] = uival
+                elif ufn == 3 and uwt == 0:
+                    meta["output_tokens"] = uival
+                elif ufn == 5 and uwt == 0:
+                    meta["cache_read_tokens"] = uival
+        elif fn == 11 and wt == 0:
+            meta["generator_model"] = str(ival)
+        elif fn == 30 and wt == 2:
+            meta["tool_summary"] = raw.decode("utf-8", errors="replace")
+        else:
+            meta[" preserved_fields"].append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+    return meta, unknowns
+
+
+def _encode_step_metadata(
+    created_at_iso: str,
+    source_enum: int,
+    *,
+    tool_call: dict[str, str] | None = None,
+    tool_summary: str = "",
+    token_usage: TokenUsageAccounting | None = None,
+    generator_model: str | None = None,
+    extra_fields: Sequence[UnknownWireField] = (),
+) -> bytes:
+    buf = bytearray()
+    ts_bytes = _encode_timestamp_proto(created_at_iso)
+    if ts_bytes:
+        buf.extend(_encode_bytes_field(1, ts_bytes))
+    if source_enum:
+        buf.extend(_encode_varint_field(3, source_enum))
+    if tool_call is not None:
+        tc_bytes = _encode_chat_tool_call(
+            tool_call.get("id", ""),
+            tool_call.get("name", ""),
+            tool_call.get("arguments_json", "{}"),
+        )
+        buf.extend(_encode_bytes_field(4, tc_bytes))
+    if token_usage is not None and (
+        token_usage.input_tokens or token_usage.output_tokens or token_usage.cache_read_tokens
+    ):
+        usage_buf = bytearray()
+        if token_usage.input_tokens:
+            usage_buf.extend(_encode_varint_field(2, token_usage.input_tokens))
+        if token_usage.output_tokens:
+            usage_buf.extend(_encode_varint_field(3, token_usage.output_tokens))
+        if token_usage.cache_read_tokens:
+            usage_buf.extend(_encode_varint_field(5, token_usage.cache_read_tokens))
+        buf.extend(_encode_bytes_field(9, bytes(usage_buf)))
+    if generator_model and generator_model.isdigit():
+        buf.extend(_encode_varint_field(11, int(generator_model)))
+    if tool_summary:
+        buf.extend(_encode_string_field(30, tool_summary))
+    for uf in extra_fields:
+        buf.extend(_encode_unknown_wire_field(uf))
+    return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
+# Tool Any-Payload Encoders and Decoders (All 16 `exa.cortex.core.tools.*`)
+# ---------------------------------------------------------------------------
+
+
+def _safe_json_dict(raw_json: str) -> dict[str, Any]:
+    if not raw_json or not raw_json.strip():
+        return {}
+    try:
+        parsed = json.loads(raw_json)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    return {}
+
+
+def _decode_any_envelope(buf: bytes) -> tuple[str, bytes]:
+    type_url = ""
+    value_bytes = b""
+    for fn, wt, _, raw in _iter_wire_fields(buf):
+        if fn == 1 and wt == 2:
+            type_url = raw.decode("utf-8", errors="replace")
+        elif fn == 2 and wt == 2:
+            value_bytes = raw
+    return type_url, value_bytes
+
+
+def _encode_any_envelope(type_url: str, value_bytes: bytes) -> bytes:
+    return _encode_string_field(1, type_url) + _encode_bytes_field(2, value_bytes)
+
+
+def _decode_unified_diff_block(diff_block_bytes: bytes) -> str:
+    lines_out: list[str] = []
+    for fn, wt, _, raw in _iter_wire_fields(diff_block_bytes):
+        if fn == 3 and wt == 2:
+            for ufn, uwt, _, uraw in _iter_wire_fields(raw):
+                if ufn == 3 and uwt == 2:
+                    l_text = ""
+                    l_type = 0
+                    for lfn, lwt, lival, lraw in _iter_wire_fields(uraw):
+                        if lfn == 1 and lwt == 2:
+                            l_text = lraw.decode("utf-8", errors="replace")
+                        elif lfn == 2 and lwt == 0:
+                            l_type = lival
+                    prefix = "+" if l_type == 1 else ("-" if l_type == 2 else " ")
+                    lines_out.append(f"{prefix}{l_text}")
+    return "\n".join(lines_out)
+
+
+def _encode_unified_diff_block(unified_diff: str) -> bytes:
+    if not unified_diff:
+        return b""
+    ud_buf = bytearray()
+    for line in unified_diff.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            l_type = 1
+            l_text = line[1:]
+        elif line.startswith("-") and not line.startswith("---"):
+            l_type = 2
+            l_text = line[1:]
+        else:
+            l_type = 3
+            l_text = line[1:] if line.startswith(" ") else line
+        line_msg = _encode_string_field(1, l_text) + _encode_varint_field(2, l_type)
+        ud_buf.extend(_encode_bytes_field(3, line_msg))
+    return _encode_bytes_field(3, bytes(ud_buf))
+
+
+def _decode_tool_any_bytes(
+    spec: ToolCodecSpec,
+    args_dict: Mapping[str, Any],
+    raw_arguments_json: str,
+    any_value: bytes,
+) -> CanonicalToolPayload:
+    kind = spec.payload_kind
+    f_items = _iter_wire_fields(any_value) if any_value else []
+
+    if kind == "read_file":
+        path = str(args_dict.get("Path") or args_dict.get("path") or "")
+        start_line = args_dict.get("StartLine") or args_dict.get("start_line")
+        end_line = args_dict.get("EndLine") or args_dict.get("end_line")
+        byte_offset = args_dict.get("ByteOffset") or args_dict.get("byte_offset")
+        file_num_lines: int | None = args_dict.get("file_num_lines")
+        file_num_bytes: int | None = args_dict.get("file_num_bytes")
+        for fn, wt, ival, raw in f_items:
+            if fn == 1 and wt == 0:
+                file_num_lines = ival
+            elif fn == 2 and wt == 0:
+                file_num_bytes = ival
+            elif fn == 3 and wt == 2:
+                path = raw.decode("utf-8", errors="replace") or path
+            elif fn == 4 and wt == 0:
+                start_line = _signed_int32(ival)
+            elif fn == 5 and wt == 0:
+                end_line = _signed_int32(ival)
+        return ReadFilePayload(
+            kind="read_file",
+            path=path,
+            start_line=int(start_line) if start_line is not None else None,
+            end_line=int(end_line) if end_line is not None else None,
+            byte_offset=int(byte_offset) if byte_offset is not None else None,
+            file_num_lines=int(file_num_lines) if file_num_lines is not None else None,
+            file_num_bytes=int(file_num_bytes) if file_num_bytes is not None else None,
+            content_excerpt=args_dict.get("content_excerpt"),
+        )
+
+    if kind == "file_edit":
+        path = str(args_dict.get("Path") or args_dict.get("path") or "")
+        edit_op: Literal["CREATE", "MODIFY", "DELETE"] = "MODIFY"
+        raw_op = str(args_dict.get("edit_op") or "").upper()
+        if raw_op in ("CREATE", "MODIFY", "DELETE"):
+            edit_op = raw_op  # type: ignore[assignment]
+        unified_diff = str(args_dict.get("unified_diff") or "")
+        if not unified_diff and ("Target" in args_dict or "Replacement" in args_dict or "Content" in args_dict):
+            if "Content" in args_dict and "Target" not in args_dict:
+                edit_op = "CREATE"
+                unified_diff = "\n".join(f"+{l}" for l in str(args_dict.get("Content", "")).splitlines())
+            else:
+                tgt = str(args_dict.get("Target", ""))
+                rep = str(args_dict.get("Replacement", ""))
+                unified_diff = "\n".join(
+                    [f"-{l}" for l in tgt.splitlines()] + [f"+{l}" for l in rep.splitlines()]
+                )
+        additions = 0
+        deletions = 0
+        raw_stats = args_dict.get("diff_stats")
+        if isinstance(raw_stats, (list, tuple)) and len(raw_stats) == 2:
+            additions, deletions = int(raw_stats[0]), int(raw_stats[1])
+        is_artifact = bool(args_dict.get("is_artifact", False))
+        artifact_summary: str | None = args_dict.get("artifact_summary")
+
+        for fn, wt, ival, raw in f_items:
+            if fn == 1 and wt == 0:
+                edit_op = "CREATE" if ival == 1 else "MODIFY"
+            elif fn == 2 and wt == 2:
+                path = raw.decode("utf-8", errors="replace") or path
+            elif fn == 3 and wt == 2:
+                decoded_diff = _decode_unified_diff_block(raw)
+                if decoded_diff:
+                    unified_diff = decoded_diff
+            elif fn == 4 and wt == 2:
+                for sfn, swt, sival, _ in _iter_wire_fields(raw):
+                    if sfn == 1 and swt == 0:
+                        additions = _signed_int32(sival)
+                    elif sfn == 2 and swt == 0:
+                        deletions = _signed_int32(sival)
+            elif fn == 5 and wt == 2:
+                for afn, awt, _, araw in _iter_wire_fields(raw):
+                    if afn == 2 and awt == 2:
+                        artifact_summary = araw.decode("utf-8", errors="replace")
+            elif fn == 6 and wt == 0:
+                is_artifact = bool(ival)
+        return FileEditPayload(
+            kind="file_edit",
+            path=path,
+            edit_op=edit_op,
+            unified_diff=unified_diff,
+            diff_stats=(additions, deletions),
+            is_artifact=is_artifact,
+            artifact_summary=artifact_summary,
+        )
+
+    if kind == "run_command":
+        cmd = str(
+            args_dict.get("CommandLine")
+            or args_dict.get("command_line")
+            or args_dict.get("cmd")
+            or args_dict.get("command")
+            or ""
+        )
+        cwd = str(args_dict.get("cwd") or args_dict.get("workdir") or "")
+        exit_code: int | None = args_dict.get("exit_code")
+        timed_out = bool(args_dict.get("timed_out", False))
+        is_daemon = bool(args_dict.get("IsDaemon") or args_dict.get("is_daemon") or False)
+        shell_name: str | None = args_dict.get("shell_name")
+        ran_in_sandbox = bool(args_dict.get("ran_in_sandbox", False))
+        sandbox_policy: str | None = args_dict.get("sandbox_policy")
+
+        for fn, wt, ival, raw in f_items:
+            if fn == 1 and wt == 0:
+                exit_code = _signed_int32(ival)
+            elif fn == 2 and wt == 0:
+                timed_out = bool(ival)
+            elif fn == 3 and wt == 2:
+                for sfn, swt, sival, sraw in _iter_wire_fields(raw):
+                    if sfn == 1 and swt == 0:
+                        ran_in_sandbox = bool(sival)
+                    elif sfn == 2 and swt == 2:
+                        sandbox_policy = sraw.decode("utf-8", errors="replace")
+            elif fn == 5 and wt == 2:
+                shell_name = raw.decode("utf-8", errors="replace")
+            elif fn == 6 and wt == 2:
+                cmd = raw.decode("utf-8", errors="replace") or cmd
+            elif fn == 7 and wt == 2:
+                cwd = raw.decode("utf-8", errors="replace") or cwd
+            elif fn == 8 and wt == 0 and ival:
+                exit_code = None
+        if exit_code is None and any_value and not any(fn == 8 for fn, _, _, _ in f_items):
+            if any(fn in (3, 4, 5, 6, 7) for fn, _, _, _ in f_items):
+                exit_code = 0
+        return RunCommandPayload(
+            kind="run_command",
+            command_line=cmd,
+            cwd=cwd,
+            exit_code=int(exit_code) if exit_code is not None else None,
+            timed_out=timed_out,
+            is_daemon=is_daemon,
+            shell_name=shell_name,
+            ran_in_sandbox=ran_in_sandbox,
+            sandbox_policy=sandbox_policy,
+        )
+
+    if kind == "search_web":
+        query = str(args_dict.get("query") or "")
+        domain = args_dict.get("domain") or args_dict.get("domain_filter")
+        summary: str | None = args_dict.get("summary")
+        docs: list[SearchWebDocument] = []
+        raw_docs = args_dict.get("documents", [])
+        if isinstance(raw_docs, list):
+            for d in raw_docs:
+                if isinstance(d, dict):
+                    docs.append(
+                        SearchWebDocument(
+                            title=str(d.get("title", "")),
+                            url=str(d.get("url", "")),
+                            snippet=str(d.get("snippet", "")),
+                        )
+                    )
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                query = raw.decode("utf-8", errors="replace") or query
+            elif fn == 2 and wt == 2:
+                domain = raw.decode("utf-8", errors="replace")
+            elif fn == 3 and wt == 2:
+                d_title = ""
+                d_url = ""
+                d_text = ""
+                for dfn, dwt, _, draw in _iter_wire_fields(raw):
+                    if dfn == 2 and dwt == 2:
+                        d_text = draw.decode("utf-8", errors="replace")
+                    elif dfn == 3 and dwt == 2:
+                        d_url = draw.decode("utf-8", errors="replace")
+                    elif dfn == 4 and dwt == 2:
+                        d_title = draw.decode("utf-8", errors="replace")
+                    elif dfn == 7 and dwt == 2 and not d_text:
+                        d_text = draw.decode("utf-8", errors="replace")
+                docs.append(SearchWebDocument(title=d_title, url=d_url, snippet=d_text))
+            elif fn == 4 and wt == 2:
+                summary = raw.decode("utf-8", errors="replace")
+        return SearchWebPayload(
+            kind="search_web",
+            query=query,
+            domain_filter=str(domain) if domain else None,
+            documents=tuple(docs),
+            summary=summary,
+        )
+
+    if kind == "invoke_subagent":
+        sub_type = str(args_dict.get("TypeName") or args_dict.get("subagent_type") or "")
+        role = str(args_dict.get("Role") or args_dict.get("role") or "")
+        prompt = str(args_dict.get("Prompt") or args_dict.get("prompt") or "")
+        ws_mode: Literal["inherit", "branch", "share"] = "inherit"
+        raw_ws = str(args_dict.get("Workspace") or args_dict.get("workspace_mode") or "inherit")
+        if raw_ws in ("inherit", "branch", "share"):
+            ws_mode = raw_ws  # type: ignore[assignment]
+        spawned_cid: str | None = args_dict.get("spawned_conversation_id")
+        task_mode = bool(args_dict.get("task_mode", False))
+
+        for fn, wt, ival, raw in f_items:
+            if fn == 1 and wt == 2:
+                for sfn, swt, _, sraw in _iter_wire_fields(raw):
+                    if sfn == 1 and swt == 2:
+                        sub_type = sraw.decode("utf-8", errors="replace") or sub_type
+                    elif sfn == 2 and swt == 2:
+                        role = sraw.decode("utf-8", errors="replace") or role
+                    elif sfn == 3 and swt == 2:
+                        prompt = sraw.decode("utf-8", errors="replace") or prompt
+                    elif sfn == 5 and swt == 2:
+                        ws_mode = "branch"
+                    elif sfn == 10 and swt == 2:
+                        ws_mode = "share"
+            elif fn == 2 and wt == 2:
+                for rfn, rwt, _, rraw in _iter_wire_fields(raw):
+                    if rfn == 1 and rwt == 2:
+                        spawned_cid = rraw.decode("utf-8", errors="replace")
+            elif fn == 3 and wt == 0:
+                task_mode = bool(ival)
+        return InvokeSubagentPayload(
+            kind="invoke_subagent",
+            subagent_type=sub_type,
+            role=role,
+            prompt=prompt,
+            spawned_conversation_id=spawned_cid,
+            workspace_mode=ws_mode,
+            task_mode=task_mode,
+        )
+
+    if kind == "define_subagent":
+        name = str(args_dict.get("Name") or args_dict.get("name") or "")
+        tool_names: list[str] = list(args_dict.get("tool_names", []))
+        agent_path: str | None = args_dict.get("agent_path")
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                name = raw.decode("utf-8", errors="replace") or name
+            elif fn == 2 and wt == 2:
+                tool_names.append(raw.decode("utf-8", errors="replace"))
+            elif fn == 3 and wt == 2:
+                agent_path = raw.decode("utf-8", errors="replace")
+        return DefineSubagentPayload(
+            kind="define_subagent",
+            name=name,
+            tool_names=tuple(tool_names),
+            agent_path=agent_path,
+        )
+
+    if kind == "manage_subagents":
+        raw_action = str(args_dict.get("Action") or args_dict.get("action") or "list")
+        cids: list[str] = list(args_dict.get("ConversationIds") or args_dict.get("target_conversation_ids") or [])
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                raw_action = raw.decode("utf-8", errors="replace") or raw_action
+            elif fn == 2 and wt == 2:
+                cids.append(raw.decode("utf-8", errors="replace"))
+        action_norm: Literal["list", "kill", "kill_all"] = "list"
+        if raw_action in ("list", "kill", "kill_all"):
+            action_norm = raw_action  # type: ignore[assignment]
+        return ManageSubagentsPayload(
+            kind="manage_subagents",
+            action=action_norm,
+            target_conversation_ids=tuple(cids),
+        )
+
+    if kind == "manage_task":
+        raw_action = str(args_dict.get("Action") or args_dict.get("action") or "status")
+        task_id: str | None = args_dict.get("TaskId") or args_dict.get("task_id")
+        input_text: str | None = args_dict.get("Input") or args_dict.get("input_text")
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                raw_action = raw.decode("utf-8", errors="replace") or raw_action
+            elif fn == 2 and wt == 2 and not task_id:
+                task_id = raw.decode("utf-8", errors="replace")
+            elif fn == 3 and wt == 2:
+                input_text = raw.decode("utf-8", errors="replace")
+        action_task: Literal["list", "status", "send_input", "kill"] = "status"
+        if raw_action in ("list", "status", "send_input", "kill"):
+            action_task = raw_action  # type: ignore[assignment]
+        return ManageTaskPayload(
+            kind="manage_task",
+            action=action_task,
+            task_id=str(task_id) if task_id else None,
+            input_text=str(input_text) if input_text else None,
+        )
+
+    if kind == "send_message":
+        recipient = str(
+            args_dict.get("Recipient")
+            or args_dict.get("recipient_id")
+            or args_dict.get("recipient")
+            or args_dict.get("to")
+            or ""
+        )
+        msg_body = str(
+            args_dict.get("Message")
+            or args_dict.get("message_body")
+            or args_dict.get("message")
+            or args_dict.get("prompt")
+            or ""
+        )
+        recipient_name: str | None = args_dict.get("recipient_name") or args_dict.get("reply_to")
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                recipient = raw.decode("utf-8", errors="replace") or recipient
+            elif fn == 2 and wt == 2:
+                recipient_name = raw.decode("utf-8", errors="replace")
+            elif fn == 3 and wt == 2:
+                msg_body = raw.decode("utf-8", errors="replace") or msg_body
+        return SendMessagePayload(
+            kind="send_message",
+            recipient_id=recipient,
+            message_body=msg_body,
+            recipient_name=str(recipient_name) if recipient_name else None,
+        )
+
+    if kind == "schedule":
+        prompt = str(args_dict.get("Prompt") or args_dict.get("prompt") or "")
+        dur = args_dict.get("DurationSeconds") or args_dict.get("duration_seconds")
+        cron = args_dict.get("CronExpression") or args_dict.get("cron_expression")
+        cond = str(args_dict.get("TimerCondition") or args_dict.get("timer_condition") or "never")
+        is_daemon = bool(args_dict.get("IsDaemon") or args_dict.get("is_daemon") or False)
+        for fn, wt, _, raw in f_items:
+            if fn == 2 and wt == 2 and not prompt:
+                prompt = raw.decode("utf-8", errors="replace")
+        return SchedulePayload(
+            kind="schedule",
+            prompt=prompt,
+            duration_seconds=int(dur) if dur is not None else None,
+            cron_expression=str(cron) if cron else None,
+            timer_condition=cond,
+            is_daemon=is_daemon,
+        )
+
+    if kind == "ask_question":
+        questions: list[QuestionItem] = []
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                q_text = ""
+                q_opts: list[QuestionOption] = []
+                q_multi = False
+                q_ans: list[str] = []
+                for qfn, qwt, qival, qraw in _iter_wire_fields(raw):
+                    if qfn == 1 and qwt == 2:
+                        q_text = qraw.decode("utf-8", errors="replace")
+                    elif qfn == 2 and qwt == 2:
+                        opt_id = ""
+                        opt_txt = ""
+                        for ofn, owt, _, oraw in _iter_wire_fields(qraw):
+                            if ofn == 1 and owt == 2:
+                                opt_id = oraw.decode("utf-8", errors="replace")
+                            elif ofn == 2 and owt == 2:
+                                opt_txt = oraw.decode("utf-8", errors="replace")
+                        q_opts.append(QuestionOption(label=opt_txt or opt_id, description=opt_id))
+                    elif qfn == 3 and qwt == 0:
+                        q_multi = bool(qival)
+                    elif qfn in (4, 5) and qwt == 2:
+                        q_ans.append(qraw.decode("utf-8", errors="replace"))
+                questions.append(
+                    QuestionItem(
+                        question=q_text,
+                        options=tuple(q_opts),
+                        is_multi_select=q_multi,
+                        user_answers=tuple(q_ans),
+                    )
+                )
+        if not questions and isinstance(args_dict.get("questions"), list):
+            for q in args_dict["questions"]:
+                if isinstance(q, dict):
+                    raw_opts = q.get("options", [])
+                    parsed_opts = [
+                        QuestionOption(
+                            label=str(o.get("label", o.get("text", ""))),
+                            description=str(o.get("description", "")),
+                        )
+                        if isinstance(o, dict)
+                        else QuestionOption(label=str(o))
+                        for o in raw_opts
+                    ]
+                    questions.append(
+                        QuestionItem(
+                            question=str(q.get("question", "")),
+                            options=tuple(parsed_opts),
+                            is_multi_select=bool(q.get("is_multi_select", False)),
+                            user_answers=tuple(str(a) for a in q.get("user_answers", [])),
+                        )
+                    )
+        return AskQuestionPayload(kind="ask_question", questions=tuple(questions))
+
+    if kind == "list_resources":
+        server_name = str(args_dict.get("ServerName") or args_dict.get("server_name") or "")
+        uris: list[str] = list(args_dict.get("resource_uris", []))
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                server_name = raw.decode("utf-8", errors="replace") or server_name
+            elif fn == 2 and wt == 2:
+                for rfn, rwt, _, rraw in _iter_wire_fields(raw):
+                    if rfn == 1 and rwt == 2:
+                        uris.append(rraw.decode("utf-8", errors="replace"))
+        return ListResourcesPayload(
+            kind="list_resources",
+            server_name=server_name,
+            resource_uris=tuple(uris),
+        )
+
+    if kind == "read_resource":
+        server_name = str(args_dict.get("ServerName") or args_dict.get("server_name") or "")
+        uri = str(args_dict.get("Uri") or args_dict.get("uri") or "")
+        texts: list[str] = list(args_dict.get("contents_text", []))
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                server_name = raw.decode("utf-8", errors="replace") or server_name
+            elif fn == 2 and wt == 2:
+                uri = raw.decode("utf-8", errors="replace") or uri
+            elif fn == 3 and wt == 2:
+                for cfn, cwt, _, craw in _iter_wire_fields(raw):
+                    if cfn == 2 and cwt == 2:
+                        for tfn, twt, _, traw in _iter_wire_fields(craw):
+                            if tfn == 1 and twt == 2:
+                                texts.append(traw.decode("utf-8", errors="replace"))
+        return ReadResourcePayload(
+            kind="read_resource",
+            server_name=server_name,
+            uri=uri,
+            contents_text=tuple(texts),
+        )
+
+    if kind == "generate_image":
+        prompt = str(args_dict.get("prompt") or "")
+        img_paths: list[str] = list(args_dict.get("image_paths", []))
+        aspect = str(args_dict.get("aspect_ratio") or "1:1")
+        img_uri: str | None = args_dict.get("image_uri")
+        model_name: str | None = args_dict.get("model_name")
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                prompt = raw.decode("utf-8", errors="replace") or prompt
+            elif fn == 2 and wt == 2:
+                img_paths.append(raw.decode("utf-8", errors="replace"))
+            elif fn == 3 and wt == 2:
+                aspect = raw.decode("utf-8", errors="replace") or aspect
+            elif fn == 4 and wt == 2:
+                img_uri = raw.decode("utf-8", errors="replace")
+            elif fn == 6 and wt == 2:
+                model_name = raw.decode("utf-8", errors="replace")
+        return GenerateImagePayload(
+            kind="generate_image",
+            prompt=prompt,
+            image_paths=tuple(img_paths),
+            aspect_ratio=aspect,
+            image_uri=img_uri,
+            model_name=model_name,
+        )
+
+    if kind == "moma_search":
+        query = str(args_dict.get("query") or "")
+        result_count = int(args_dict.get("result_count", 0))
+        proto_results = 0
+        for fn, wt, _, raw in f_items:
+            if fn == 1 and wt == 2:
+                query = raw.decode("utf-8", errors="replace") or query
+            elif fn == 2 and wt == 2:
+                proto_results += 1
+        if proto_results:
+            result_count = proto_results
+        return MomaSearchPayload(
+            kind="moma_search",
+            query=query,
+            result_count=result_count,
+        )
+
+    if kind == "finish":
+        finish_args = raw_arguments_json or "{}"
+        has_schema = bool(args_dict.get("has_result_schema", False))
+        for fn, wt, ival, raw in f_items:
+            if fn == 1 and wt == 2:
+                finish_args = raw.decode("utf-8", errors="replace") or finish_args
+            elif fn == 2 and wt == 0:
+                has_schema = bool(ival)
+        return FinishPayload(
+            kind="finish",
+            arguments_json=finish_args,
+            has_result_schema=has_schema,
+        )
+
+    return OpaqueToolPayload(
+        kind="opaque",
+        tool_name=spec.agy_tool_name,
+        raw_arguments_json=raw_arguments_json,
+        type_url=spec.agy_any_type_url,
+        raw_any_bytes=any_value,
+    )
+
+
+def _encode_tool_payload_to_any(payload: CanonicalToolPayload) -> bytes:
+    if isinstance(payload, OpaqueToolPayload):
+        if payload.type_url and payload.raw_any_bytes is not None:
+            return _encode_any_envelope(payload.type_url, payload.raw_any_bytes)
+        return b""
+
+    spec = TOOL_SPEC_BY_PAYLOAD_KIND.get(payload.kind)
+    if spec is None:
+        return b""
+
+    inner = bytearray()
+    if isinstance(payload, ReadFilePayload):
+        if payload.file_num_lines:
+            inner.extend(_encode_varint_field(1, payload.file_num_lines))
+        if payload.file_num_bytes:
+            inner.extend(_encode_varint_field(2, payload.file_num_bytes))
+        inner.extend(_encode_string_field(3, payload.path))
+        if payload.start_line is not None:
+            inner.extend(_encode_varint_field(4, payload.start_line))
+        if payload.end_line is not None:
+            inner.extend(_encode_varint_field(5, payload.end_line))
+
+    elif isinstance(payload, FileEditPayload):
+        kind_code = 1 if payload.edit_op == "CREATE" else 3
+        inner.extend(_encode_varint_field(1, kind_code))
+        inner.extend(_encode_string_field(2, payload.path))
+        if payload.unified_diff:
+            diff_block = _encode_unified_diff_block(payload.unified_diff)
+            if diff_block:
+                inner.extend(_encode_bytes_field(3, diff_block))
+        adds, dels = payload.diff_stats
+        if adds or dels:
+            stats_buf = _encode_varint_field(1, adds) + _encode_varint_field(2, dels)
+            inner.extend(_encode_bytes_field(4, stats_buf))
+        if payload.artifact_summary:
+            art_buf = _encode_string_field(2, payload.artifact_summary)
+            inner.extend(_encode_bytes_field(5, art_buf))
+        if payload.is_artifact:
+            inner.extend(_encode_varint_field(6, 1))
+
+    elif isinstance(payload, RunCommandPayload):
+        if payload.exit_code is not None:
+            inner.extend(_encode_varint_field(1, payload.exit_code))
+        else:
+            inner.extend(_encode_varint_field(8, 1))
+        if payload.timed_out:
+            inner.extend(_encode_varint_field(2, 1))
+        if payload.ran_in_sandbox or payload.sandbox_policy:
+            sb_buf = bytearray()
+            if payload.ran_in_sandbox:
+                sb_buf.extend(_encode_varint_field(1, 1))
+            if payload.sandbox_policy:
+                sb_buf.extend(_encode_string_field(2, payload.sandbox_policy))
+            inner.extend(_encode_bytes_field(3, bytes(sb_buf)))
+        if payload.shell_name:
+            inner.extend(_encode_string_field(5, payload.shell_name))
+        inner.extend(_encode_string_field(6, payload.command_line))
+        inner.extend(_encode_string_field(7, payload.cwd))
+
+    elif isinstance(payload, SearchWebPayload):
+        inner.extend(_encode_string_field(1, payload.query))
+        if payload.domain_filter:
+            inner.extend(_encode_string_field(2, payload.domain_filter))
+        for doc in payload.documents:
+            doc_buf = (
+                _encode_string_field(2, doc.snippet)
+                + _encode_string_field(3, doc.url)
+                + _encode_string_field(4, doc.title)
+            )
+            inner.extend(_encode_bytes_field(3, doc_buf))
+        if payload.summary:
+            inner.extend(_encode_string_field(4, payload.summary))
+
+    elif isinstance(payload, InvokeSubagentPayload):
+        sub_buf = (
+            _encode_string_field(1, payload.subagent_type)
+            + _encode_string_field(2, payload.role)
+            + _encode_string_field(3, payload.prompt)
+        )
+        if payload.workspace_mode == "branch":
+            sub_buf += _encode_string_field(5, "branch")
+        elif payload.workspace_mode == "share":
+            sub_buf += _encode_string_field(10, "share")
+        else:
+            sub_buf += _encode_varint_field(4, 1)
+        inner.extend(_encode_bytes_field(1, sub_buf))
+        if payload.spawned_conversation_id:
+            res_buf = _encode_string_field(1, payload.spawned_conversation_id)
+            inner.extend(_encode_bytes_field(2, res_buf))
+        if payload.task_mode:
+            inner.extend(_encode_varint_field(3, 1))
+
+    elif isinstance(payload, DefineSubagentPayload):
+        inner.extend(_encode_string_field(1, payload.name))
+        for tname in payload.tool_names:
+            inner.extend(_encode_string_field(2, tname))
+        if payload.agent_path:
+            inner.extend(_encode_string_field(3, payload.agent_path))
+
+    elif isinstance(payload, ManageSubagentsPayload):
+        inner.extend(_encode_string_field(1, payload.action))
+        for cid in payload.target_conversation_ids:
+            inner.extend(_encode_string_field(2, cid))
+
+    elif isinstance(payload, ManageTaskPayload):
+        inner.extend(_encode_string_field(1, payload.action))
+        if payload.task_id:
+            inner.extend(_encode_string_field(2, payload.task_id))
+        if payload.input_text:
+            inner.extend(_encode_string_field(3, payload.input_text))
+
+    elif isinstance(payload, SendMessagePayload):
+        inner.extend(_encode_string_field(1, payload.recipient_id))
+        if payload.recipient_name:
+            inner.extend(_encode_string_field(2, payload.recipient_name))
+        inner.extend(_encode_string_field(3, payload.message_body))
+
+    elif isinstance(payload, SchedulePayload):
+        mode = "cron" if payload.cron_expression else "timer"
+        inner.extend(_encode_string_field(1, mode))
+        inner.extend(_encode_string_field(2, payload.prompt))
+
+    elif isinstance(payload, AskQuestionPayload):
+        for q in payload.questions:
+            q_buf = bytearray()
+            q_buf.extend(_encode_string_field(1, q.question))
+            for opt in q.options:
+                opt_buf = _encode_string_field(1, opt.description or opt.label) + _encode_string_field(2, opt.label)
+                q_buf.extend(_encode_bytes_field(2, opt_buf))
+            if q.is_multi_select:
+                q_buf.extend(_encode_varint_field(3, 1))
+            for ans in q.user_answers:
+                q_buf.extend(_encode_string_field(4, ans))
+            inner.extend(_encode_bytes_field(1, bytes(q_buf)))
+
+    elif isinstance(payload, ListResourcesPayload):
+        inner.extend(_encode_string_field(1, payload.server_name))
+        for uri in payload.resource_uris:
+            res_buf = _encode_string_field(1, uri)
+            inner.extend(_encode_bytes_field(2, res_buf))
+
+    elif isinstance(payload, ReadResourcePayload):
+        inner.extend(_encode_string_field(1, payload.server_name))
+        inner.extend(_encode_string_field(2, payload.uri))
+        for txt in payload.contents_text:
+            text_data = _encode_string_field(1, txt)
+            content_item = _encode_string_field(1, payload.uri) + _encode_bytes_field(2, text_data)
+            inner.extend(_encode_bytes_field(3, content_item))
+
+    elif isinstance(payload, GenerateImagePayload):
+        inner.extend(_encode_string_field(1, payload.prompt))
+        for p in payload.image_paths:
+            inner.extend(_encode_string_field(2, p))
+        inner.extend(_encode_string_field(3, payload.aspect_ratio))
+        if payload.image_uri:
+            inner.extend(_encode_string_field(4, payload.image_uri))
+        if payload.model_name:
+            inner.extend(_encode_string_field(6, payload.model_name))
+
+    elif isinstance(payload, MomaSearchPayload):
+        inner.extend(_encode_string_field(1, payload.query))
+        for idx in range(payload.result_count):
+            res_buf = _encode_string_field(2, f"result-{idx}")
+            inner.extend(_encode_bytes_field(2, res_buf))
+
+    elif isinstance(payload, FinishPayload):
+        inner.extend(_encode_string_field(1, payload.arguments_json))
+        if payload.has_result_schema:
+            inner.extend(_encode_varint_field(2, 1))
+
+    return _encode_any_envelope(spec.agy_any_type_url, bytes(inner))
+
+
+# ---------------------------------------------------------------------------
 # Pure Table-Driven Trajectory Codecs
 # ---------------------------------------------------------------------------
 
 
 class TrajectoryWireCodec:
-    """Stateless, table-driven bidirectional translator between host wire formats and `TrajectoryLedger`.
+    """Stateless, table-driven bidirectional translator between host wire formats and `TrajectoryLedger`."""
 
-    Invariants:
-    - Uses `STEP_WIRE_TABLE` and `TOOL_CODEC_TABLE` for dispatch rather than ad-hoc branching.
-    - Resolves the 1-to-N fanout between one `CortexStepPlannerResponse` (`step_type = 15`,
-      wire tag `20`) and N `CortexStepGeneric` (`step_type = 132`, wire tag `140`) steps:
-      - Decoding AGY -> Ledger splits `step_type = 15` into `ThinkingEvent` (if `thinking`
-        field 3 or `raw_thinking` field 16 is present), `AssistantTextEvent` (if `response`
-        field 1 is present), and `N` `ToolCallEvent` items (from `tool_calls` field 7), all
-        sharing the parent `StepIndex`. Each following `step_type = 132` decodes into a
-        `ToolResultEvent` correlated via `CortexStepMetadata.tool_call.id` (field 4).
-      - Encoding Ledger -> AGY coalesces a consecutive `(ThinkingEvent?, AssistantTextEvent?,
-        ToolCallEvent*)` sequence belonging to the same turn slice back into one
-        `CortexStepPlannerResponse` (`step_type = 15`, tag `20`) followed by `N`
-        `CortexStepGeneric` (`step_type = 132`, tag `140`) rows.
-    """
+    @staticmethod
+    def decode_tool_payload(
+        tool_name: str,
+        arguments_json: str,
+        any_type_url: str | None = None,
+        any_value_bytes: bytes | None = None,
+    ) -> CanonicalToolPayload:
+        """Decode a tool call or result into a typed `CanonicalToolPayload` via `TOOL_CODEC_TABLE`."""
+        spec: ToolCodecSpec | None = None
+        if any_type_url:
+            spec = TOOL_SPEC_BY_TYPE_URL.get(any_type_url)
+        if spec is None and tool_name:
+            spec = _TOOL_NAME_LOOKUP.get(tool_name)
+
+        args_dict = _safe_json_dict(arguments_json)
+        if spec is None:
+            return OpaqueToolPayload(
+                kind="opaque",
+                tool_name=tool_name or "unknown_tool",
+                raw_arguments_json=arguments_json or "{}",
+                type_url=any_type_url,
+                raw_any_bytes=any_value_bytes,
+            )
+
+        return _decode_tool_any_bytes(
+            spec=spec,
+            args_dict=args_dict,
+            raw_arguments_json=arguments_json or "{}",
+            any_value=any_value_bytes or b"",
+        )
 
     @staticmethod
     def decode_agy_steps_to_ledger(
@@ -355,48 +1387,800 @@ class TrajectoryWireCodec:
         *,
         explicit_title_override: str | None = None,
     ) -> TrajectoryLedger:
-        """Parse raw Antigravity `steps` rows into an indexed `TrajectoryLedger`.
+        """Parse raw Antigravity `steps` rows into an indexed `TrajectoryLedger`."""
+        events: list[CanonicalEvent] = []
+        call_index_by_id: dict[ToolCallId, int] = {}
 
-        Invariants:
-        - Looks up each `row.step_type` in `STEP_WIRE_TABLE` and verifies that the
-          inner `gemini_coder.Step` protobuf contains `spec.step_oneof_tag`.
-        - Unpacks `CortexStepGeneric.payload` (`field 6`, `google.protobuf.Any`) via
-          `TOOL_SPEC_BY_TYPE_URL`, falling back to `OpaqueToolPayload` if unknown.
-        - Preserves any unrecognized protobuf field tags in `EventOriginAnchor.unknown_wire_fields`.
-        """
-        # TODO:
-        # 1. Track current `TurnId` (incremented on each `CortexStepTypeCode.USER_INPUT`).
-        # 2. For each `row` in `raw_steps`, look up `spec = STEP_WIRE_TABLE.get(row.step_type)`.
-        # 3. Parse `metadata_blob` (`CortexStepMetadata`: timestamps, token counts, `tool_call` field 4,
-        #    `tool_summary` field 30) and `step_payload_blob` (`gemini_coder.Step` tag `spec.step_oneof_tag`).
-        # 4. Emit corresponding `CanonicalEvent` node(s) and return `TrajectoryLedger.from_events(...)`.
-        raise NotImplementedError("TrajectoryWireCodec.decode_agy_steps_to_ledger stub")
+        turn_num = 1
+        current_turn_id = TurnId(f"turn-{turn_num}")
+        turn_has_response = False
+
+        known_step_tags = {1, 4, 5, 6, 31, 56, 69, 133, 147, 148, 155, 158, 159} | {
+            int(t) for t in GeminiStepWireTag
+        }
+
+        for row in raw_steps:
+            meta_dict, meta_unknowns = (
+                _decode_step_metadata(row.metadata_blob)
+                if row.metadata_blob
+                else (
+                    {
+                        "created_at_iso": "2026-01-01T00:00:00Z",
+                        "source": 0,
+                        "tool_call": None,
+                        "tool_summary": "",
+                        "generator_model": None,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_tokens": 0,
+                        " preserved_fields": [],
+                    },
+                    [],
+                )
+            )
+            step_fields = _iter_wire_fields(row.step_payload_blob) if row.step_payload_blob else []
+            step_unknowns: list[UnknownWireField] = list(meta_unknowns)
+
+            spec: StepWireSpec | None = None
+            if row.step_type in STEP_WIRE_TABLE:
+                spec = STEP_WIRE_TABLE[CortexStepTypeCode(row.step_type)]
+            oneof_bytes = b""
+            for fn, wt, _, raw in step_fields:
+                if fn not in known_step_tags:
+                    step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                elif spec is not None and fn == int(spec.step_oneof_tag) and wt == 2:
+                    oneof_bytes = raw
+                elif spec is None and fn in STEP_TAG_TO_SPEC and wt == 2:
+                    spec = STEP_TAG_TO_SPEC[GeminiStepWireTag(fn)]
+                    oneof_bytes = raw
+
+            if spec is None:
+                continue
+
+            created_at_iso = meta_dict["created_at_iso"]
+            token_usage = TokenUsageAccounting(
+                input_tokens=int(meta_dict["input_tokens"]),
+                output_tokens=int(meta_dict["output_tokens"]),
+                cache_read_tokens=int(meta_dict["cache_read_tokens"]),
+            )
+
+            if spec.step_type == CortexStepTypeCode.USER_INPUT:
+                if turn_has_response:
+                    turn_num += 1
+                    current_turn_id = TurnId(f"turn-{turn_num}")
+                    turn_has_response = False
+
+                query_str = ""
+                user_resp = ""
+                item_texts: list[str] = []
+                scope_uris: list[str] = []
+                media_list: list[MediaAttachment] = []
+                client_msg_id: str | None = None
+                known_ui_tags = set(range(1, 20))
+
+                for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
+                    if fn not in known_ui_tags:
+                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                    elif fn == 1 and wt == 2:
+                        query_str = raw.decode("utf-8", errors="replace")
+                    elif fn == 2 and wt == 2:
+                        user_resp = raw.decode("utf-8", errors="replace")
+                    elif fn == 3 and wt == 2:
+                        for ifn, iwt, _, iraw in _iter_wire_fields(raw):
+                            if ifn == 1 and iwt == 2:
+                                item_texts.append(iraw.decode("utf-8", errors="replace"))
+                            elif ifn == 2 and iwt == 2:
+                                scope_uris.append(iraw.hex())
+                    elif fn == 9 and wt == 2:
+                        m_mime = ""
+                        m_uri = ""
+                        for mfn, mwt, _, mraw in _iter_wire_fields(raw):
+                            if mfn == 1 and mwt == 2:
+                                m_mime = mraw.decode("utf-8", errors="replace")
+                            elif mfn == 5 and mwt == 2:
+                                m_uri = mraw.decode("utf-8", errors="replace")
+                        media_list.append(MediaAttachment(mime_type=m_mime, uri=m_uri))
+                    elif fn == 19 and wt == 2:
+                        client_msg_id = raw.decode("utf-8", errors="replace")
+
+                final_query = user_resp or "\n".join(t for t in item_texts if t) or query_str
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=current_turn_id,
+                    timestamp_iso=created_at_iso,
+                    agy_step_index=row.idx,
+                    client_message_id=client_msg_id,
+                    unknown_wire_fields=tuple(step_unknowns),
+                )
+                events.append(
+                    UserInputEvent(
+                        kind="user_input",
+                        anchor=anchor,
+                        query_text=final_query,
+                        scope_items=tuple(scope_uris),
+                        media=tuple(media_list),
+                    )
+                )
+
+            elif spec.step_type == CortexStepTypeCode.PLANNER_RESPONSE:
+                turn_has_response = True
+                resp_text = ""
+                mod_resp = ""
+                thinking_text = ""
+                raw_thinking: str | None = None
+                sig_str = ""
+                thinking_sig_bytes: bytes | None = None
+                msg_id: str | None = None
+                stop_reason: str | None = None
+                thinking_dur_ms: int | None = None
+                tool_calls_raw: list[dict[str, Any]] = []
+                known_pr_tags = set(range(1, 21))
+
+                for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
+                    if fn not in known_pr_tags:
+                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                    elif fn == 1 and wt == 2:
+                        resp_text = raw.decode("utf-8", errors="replace")
+                    elif fn == 3 and wt == 2:
+                        thinking_text = raw.decode("utf-8", errors="replace")
+                    elif fn == 4 and wt == 2:
+                        sig_str = raw.decode("utf-8", errors="replace")
+                    elif fn == 6 and wt == 2:
+                        msg_id = raw.decode("utf-8", errors="replace")
+                    elif fn == 7 and wt == 2:
+                        tool_calls_raw.append(_decode_chat_tool_call(raw))
+                    elif fn == 8 and wt == 2:
+                        mod_resp = raw.decode("utf-8", errors="replace")
+                    elif fn == 11 and wt == 2:
+                        thinking_dur_ms = _decode_duration_ms(raw)
+                    elif fn == 12 and wt == 0:
+                        stop_reason = str(ival)
+                    elif fn == 14 and wt == 2:
+                        thinking_sig_bytes = raw
+                    elif fn == 16 and wt == 2:
+                        raw_thinking = raw.decode("utf-8", errors="replace")
+
+                if thinking_sig_bytes is None and sig_str:
+                    thinking_sig_bytes = sig_str.encode("utf-8")
+
+                usage_with_dur = dataclasses.replace(token_usage, thinking_duration_ms=thinking_dur_ms)
+                base_anchor = EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=current_turn_id,
+                    timestamp_iso=created_at_iso,
+                    agy_step_index=row.idx,
+                    unknown_wire_fields=tuple(step_unknowns),
+                )
+
+                emitted_in_step = False
+                if thinking_text or raw_thinking or thinking_sig_bytes:
+                    events.append(
+                        ThinkingEvent(
+                            kind="thinking",
+                            anchor=base_anchor,
+                            summary_text=thinking_text or (raw_thinking or ""),
+                            raw_thinking=raw_thinking,
+                            thinking_signature=thinking_sig_bytes,
+                            token_usage=usage_with_dur,
+                        )
+                    )
+                    emitted_in_step = True
+
+                final_resp = resp_text or mod_resp
+                if final_resp or (not emitted_in_step and not tool_calls_raw):
+                    events.append(
+                        AssistantTextEvent(
+                            kind="assistant_text",
+                            anchor=base_anchor,
+                            text=final_resp,
+                            message_id=msg_id,
+                            stop_reason=stop_reason,
+                            generator_model=meta_dict["generator_model"],
+                            token_usage=usage_with_dur,
+                        )
+                    )
+
+                for tc in tool_calls_raw:
+                    cid = ToolCallId(tc.get("id") or f"call-step-{int(row.idx)}-{len(events)}")
+                    tname = tc.get("name") or "unknown_tool"
+                    args_json = tc.get("arguments_json") or "{}"
+                    args_obj = _safe_json_dict(args_json)
+                    summary_label = str(
+                        args_obj.get("toolSummary")
+                        or args_obj.get("tool_summary")
+                        or meta_dict["tool_summary"]
+                        or tname
+                    )
+                    payload = TrajectoryWireCodec.decode_tool_payload(tname, args_json)
+                    call_index_by_id[cid] = len(events)
+                    events.append(
+                        ToolCallEvent(
+                            kind="tool_call",
+                            anchor=base_anchor,
+                            call_id=cid,
+                            tool_name=tname,
+                            tool_summary=summary_label,
+                            payload=payload,
+                        )
+                    )
+
+            elif spec.step_type == CortexStepTypeCode.GENERIC:
+                turn_has_response = True
+                tc_meta = meta_dict["tool_call"] or {}
+                cid = ToolCallId(tc_meta.get("id") or f"call-generic-{int(row.idx)}")
+                tname = tc_meta.get("name") or "unknown_tool"
+                args_json = tc_meta.get("arguments_json") or "{}"
+                tool_summary = str(meta_dict["tool_summary"] or tname)
+
+                args_map: dict[str, str] = {}
+                result_text = ""
+                any_url: str | None = None
+                any_val: bytes | None = None
+                full_uri: str | None = None
+                known_gen_tags = {1, 2}
+
+                for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
+                    if fn not in known_gen_tags:
+                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                    elif fn == 1 and wt == 2:
+                        k_str = ""
+                        v_str = ""
+                        for afn, awt, _, araw in _iter_wire_fields(raw):
+                            if afn == 1 and awt == 2:
+                                k_str = araw.decode("utf-8", errors="replace")
+                            elif afn == 2 and awt == 2:
+                                v_str = araw.decode("utf-8", errors="replace")
+                        if k_str:
+                            args_map[k_str] = v_str
+                    elif fn == 2 and wt == 2:
+                        for rfn, rwt, _, rraw in _iter_wire_fields(raw):
+                            if rfn == 1 and rwt == 2:
+                                result_text = rraw.decode("utf-8", errors="replace")
+                            elif rfn == 6 and rwt == 2:
+                                any_url, any_val = _decode_any_envelope(rraw)
+                            elif rfn == 7 and rwt == 2:
+                                full_uri = rraw.decode("utf-8", errors="replace")
+
+                if (not args_json or args_json == "{}") and args_map:
+                    args_json = json.dumps(args_map, ensure_ascii=False, sort_keys=True)
+
+                rich_payload = TrajectoryWireCodec.decode_tool_payload(
+                    tool_name=tname,
+                    arguments_json=args_json,
+                    any_type_url=any_url,
+                    any_value_bytes=any_val,
+                )
+
+                if cid in call_index_by_id:
+                    call_pos = call_index_by_id[cid]
+                    prior_call = events[call_pos]
+                    if isinstance(prior_call, ToolCallEvent):
+                        upgraded_summary = (
+                            tool_summary
+                            if tool_summary and tool_summary != tname
+                            else prior_call.tool_summary
+                        )
+                        events[call_pos] = dataclasses.replace(
+                            prior_call,
+                            tool_summary=upgraded_summary,
+                            payload=rich_payload,
+                        )
+
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=current_turn_id,
+                    timestamp_iso=created_at_iso,
+                    agy_step_index=row.idx,
+                    unknown_wire_fields=tuple(step_unknowns),
+                )
+                events.append(
+                    ToolResultEvent(
+                        kind="tool_result",
+                        anchor=anchor,
+                        call_id=cid,
+                        tool_name=tname,
+                        output_text=result_text,
+                        is_error=(row.status == 7),
+                        payload=rich_payload,
+                        full_output_uri=full_uri,
+                    )
+                )
+
+            elif spec.step_type == CortexStepTypeCode.CHECKPOINT:
+                turn_has_response = True
+                cp_idx = 0
+                u_intent = ""
+                s_summary = ""
+                c_summary = ""
+                conv_title: str | None = None
+                known_cp_tags = set(range(1, 32))
+
+                for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
+                    if fn not in known_cp_tags:
+                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                    elif fn == 1 and wt == 0:
+                        cp_idx = ival
+                    elif fn == 4 and wt == 2:
+                        u_intent = raw.decode("utf-8", errors="replace")
+                    elif fn == 5 and wt == 2:
+                        s_summary = raw.decode("utf-8", errors="replace")
+                    elif fn == 6 and wt == 2:
+                        c_summary = raw.decode("utf-8", errors="replace")
+                    elif fn == 10 and wt == 2:
+                        conv_title = raw.decode("utf-8", errors="replace")
+
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=current_turn_id,
+                    timestamp_iso=created_at_iso,
+                    agy_step_index=row.idx,
+                    unknown_wire_fields=tuple(step_unknowns),
+                )
+                events.append(
+                    CheckpointEvent(
+                        kind="checkpoint",
+                        anchor=anchor,
+                        checkpoint_index=cp_idx,
+                        user_intent=u_intent,
+                        session_summary=s_summary,
+                        code_change_summary=c_summary,
+                        conversation_title=conv_title,
+                    )
+                )
+
+            elif spec.step_type == CortexStepTypeCode.TASK_BOUNDARY:
+                turn_has_response = True
+                t_name = ""
+                t_status = ""
+                t_summary = ""
+                t_mode: str | None = None
+                known_tb_tags = set(range(1, 8))
+
+                for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
+                    if fn not in known_tb_tags:
+                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                    elif fn == 1 and wt == 2:
+                        t_name = raw.decode("utf-8", errors="replace")
+                    elif fn == 2 and wt == 2:
+                        t_status = raw.decode("utf-8", errors="replace")
+                    elif fn == 3 and wt == 2:
+                        t_summary = raw.decode("utf-8", errors="replace")
+                    elif fn == 5 and wt == 0:
+                        t_mode = str(ival)
+
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=current_turn_id,
+                    timestamp_iso=created_at_iso,
+                    agy_step_index=row.idx,
+                    unknown_wire_fields=tuple(step_unknowns),
+                )
+                events.append(
+                    TaskBoundaryEvent(
+                        kind="task_boundary",
+                        anchor=anchor,
+                        boundary_kind="task_boundary",
+                        task_name=t_name,
+                        task_status=t_status or "DONE",
+                        task_summary=t_summary,
+                        mode=t_mode,
+                    )
+                )
+
+            elif spec.step_type == CortexStepTypeCode.NOTIFY_USER:
+                turn_has_response = True
+                review_uris: list[str] = []
+                notif_content = ""
+                is_blocking = False
+                known_nu_tags = set(range(1, 9))
+
+                for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
+                    if fn not in known_nu_tags:
+                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                    elif fn == 1 and wt == 2:
+                        review_uris.append(raw.decode("utf-8", errors="replace"))
+                    elif fn == 2 and wt == 2:
+                        notif_content = raw.decode("utf-8", errors="replace")
+                    elif fn == 3 and wt == 0:
+                        is_blocking = bool(ival)
+
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=current_turn_id,
+                    timestamp_iso=created_at_iso,
+                    agy_step_index=row.idx,
+                    unknown_wire_fields=tuple(step_unknowns),
+                )
+                events.append(
+                    TaskBoundaryEvent(
+                        kind="task_boundary",
+                        anchor=anchor,
+                        boundary_kind="notify_user",
+                        task_name="notify_user",
+                        task_status="DONE",
+                        task_summary=notif_content,
+                        blocked_on_user=is_blocking,
+                        review_uris=tuple(review_uris),
+                    )
+                )
+
+            elif spec.step_type == CortexStepTypeCode.SYSTEM_MESSAGE:
+                msg_text = ""
+                ev_type = ""
+                known_sm_tags = set(range(1, 7))
+
+                for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
+                    if fn not in known_sm_tags:
+                        step_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
+                    elif fn == 1 and wt == 2:
+                        msg_text = raw.decode("utf-8", errors="replace")
+                    elif fn == 3 and wt == 2:
+                        ev_type = raw.decode("utf-8", errors="replace")
+
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=current_turn_id,
+                    timestamp_iso=created_at_iso,
+                    agy_step_index=row.idx,
+                    unknown_wire_fields=tuple(step_unknowns),
+                )
+                events.append(
+                    SystemEvent(
+                        kind="system_message",
+                        anchor=anchor,
+                        event_type=ev_type or "system_message",
+                        message_text=msg_text,
+                    )
+                )
+
+        return TrajectoryLedger.from_events(
+            workspace_path=workspace_path,
+            workspace_uri=workspace_uri,
+            events=events,
+            explicit_title_override=explicit_title_override,
+        )
 
     @staticmethod
     def encode_events_to_agy_steps(
         events: Sequence[CanonicalEvent],
-        starting_step_idx: StepIndex,
+        starting_step_idx: StepIndex = StepIndex(0),
     ) -> Tuple[AgyRawStepRow, ...]:
-        """Serialize a slice of `CanonicalEvent` nodes into Antigravity `steps` rows.
+        """Serialize a slice of `CanonicalEvent` nodes into Antigravity `steps` rows."""
+        rows: list[AgyRawStepRow] = []
+        next_idx = int(starting_step_idx)
+        pos = 0
+        n = len(events)
 
-        Invariants:
-        - Coalesces adjacent `ThinkingEvent`, `AssistantTextEvent`, and `ToolCallEvent` items
-          from the same planner turn-step into a single `AgyRawStepRow` with
-          `step_type = 15` (`PLANNER_RESPONSE`) and wire tag `20` (`Step.planner_response`).
-        - Emits one `AgyRawStepRow` with `step_type = 132` (`GENERIC`) and wire tag `140`
-          (`Step.generic`) per `ToolResultEvent`, packing the typed tool payload into
-          `google.protobuf.Any` (`field 6`) using `TOOL_CODEC_TABLE` and storing tool call
-          identity in `CortexStepMetadata.tool_call` (`field 4`).
-        - Re-emits any preserved `UnknownWireField` bytes on round-trip steps.
-        - Assigns strictly contiguous `StepIndex` values starting at `starting_step_idx`.
-        """
-        # TODO:
-        # 1. Group contiguous planner events (`thinking`, `assistant_text`, `tool_call`) before
-        #    any `tool_result` or boundary event into one `CortexStepPlannerResponse` (tag 20).
-        # 2. Encode each `ToolResultEvent` as `CortexStepGeneric` (tag 140) with `status = 3` (DONE).
-        # 3. Encode `UserInputEvent` (type 14, tag 19), `CheckpointEvent` (type 23, tag 30),
-        #    `TaskBoundaryEvent` (type 81/82, tag 93/94), `SystemEvent` (type 101, tag 114).
-        raise NotImplementedError("TrajectoryWireCodec.encode_events_to_agy_steps stub")
+        while pos < n:
+            ev = events[pos]
+
+            if isinstance(ev, (ThinkingEvent, AssistantTextEvent, ToolCallEvent)):
+                group_turn = ev.anchor.turn_id
+                group_step_idx = ev.anchor.agy_step_index if ev.anchor.origin_host == HostKind.ANTIGRAVITY else None
+                thinking_ev: ThinkingEvent | None = None
+                text_ev: AssistantTextEvent | None = None
+                tool_evs: list[ToolCallEvent] = []
+                unknowns: list[UnknownWireField] = []
+                seen_unknown_keys: set[tuple[int, int, bytes]] = set()
+
+                while pos < n:
+                    cand = events[pos]
+                    if not isinstance(cand, (ThinkingEvent, AssistantTextEvent, ToolCallEvent)):
+                        break
+                    if cand.anchor.turn_id != group_turn:
+                        break
+                    if group_step_idx is not None and cand.anchor.origin_host == HostKind.ANTIGRAVITY:
+                        if cand.anchor.agy_step_index != group_step_idx:
+                            break
+                    else:
+                        if isinstance(cand, ThinkingEvent) and (
+                            thinking_ev is not None or text_ev is not None or tool_evs
+                        ):
+                            break
+                        if isinstance(cand, AssistantTextEvent) and (text_ev is not None or tool_evs):
+                            break
+
+                    if isinstance(cand, ThinkingEvent):
+                        thinking_ev = cand
+                    elif isinstance(cand, AssistantTextEvent):
+                        text_ev = cand
+                    elif isinstance(cand, ToolCallEvent):
+                        tool_evs.append(cand)
+
+                    for uf in cand.anchor.unknown_wire_fields:
+                        ukey = (uf.field_tag, uf.wire_type, uf.raw_bytes)
+                        if ukey not in seen_unknown_keys:
+                            seen_unknown_keys.add(ukey)
+                            unknowns.append(uf)
+                    pos += 1
+
+                first_ev = thinking_ev or text_ev or tool_evs[0]
+                created_iso = first_ev.anchor.timestamp_iso
+                token_usage = (
+                    text_ev.token_usage
+                    if text_ev is not None
+                    else (thinking_ev.token_usage if thinking_ev is not None else TokenUsageAccounting())
+                )
+                gen_model = text_ev.generator_model if text_ev is not None else None
+
+                pr_buf = bytearray()
+                if text_ev is not None and text_ev.text:
+                    pr_buf.extend(_encode_string_field(1, text_ev.text))
+                if thinking_ev is not None and thinking_ev.summary_text:
+                    pr_buf.extend(_encode_string_field(3, thinking_ev.summary_text))
+                if text_ev is not None and text_ev.message_id:
+                    pr_buf.extend(_encode_string_field(6, text_ev.message_id))
+                for tc_ev in tool_evs:
+                    spec_for_call = TOOL_SPEC_BY_PAYLOAD_KIND.get(tc_ev.payload.kind)
+                    agy_tname = spec_for_call.agy_tool_name if spec_for_call else tc_ev.tool_name
+                    args_json = _serialize_tool_payload_to_arguments_json(tc_ev.payload)
+                    pr_buf.extend(
+                        _encode_bytes_field(
+                            7,
+                            _encode_chat_tool_call(str(tc_ev.call_id), agy_tname, args_json),
+                        )
+                    )
+                if token_usage.thinking_duration_ms:
+                    dur_bytes = _encode_duration_proto(token_usage.thinking_duration_ms)
+                    if dur_bytes:
+                        pr_buf.extend(_encode_bytes_field(11, dur_bytes))
+                if text_ev is not None and text_ev.stop_reason and text_ev.stop_reason.isdigit():
+                    pr_buf.extend(_encode_varint_field(12, int(text_ev.stop_reason)))
+                if thinking_ev is not None and thinking_ev.thinking_signature:
+                    pr_buf.extend(_encode_bytes_field(14, thinking_ev.thinking_signature))
+                if thinking_ev is not None and thinking_ev.raw_thinking:
+                    pr_buf.extend(_encode_string_field(16, thinking_ev.raw_thinking))
+
+                meta_blob = _encode_step_metadata(
+                    created_at_iso=created_iso,
+                    source_enum=2,
+                    token_usage=token_usage,
+                    generator_model=gen_model,
+                )
+                step_buf = bytearray()
+                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.PLANNER_RESPONSE)))
+                step_buf.extend(_encode_varint_field(4, 3))
+                step_buf.extend(_encode_bytes_field(5, meta_blob))
+                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.PLANNER_RESPONSE_TAG), bytes(pr_buf)))
+                for uf in unknowns:
+                    step_buf.extend(_encode_unknown_wire_field(uf))
+
+                rows.append(
+                    AgyRawStepRow(
+                        idx=StepIndex(next_idx),
+                        step_type=int(CortexStepTypeCode.PLANNER_RESPONSE),
+                        status=3,
+                        has_subtrajectory=False,
+                        metadata_blob=meta_blob,
+                        step_payload_blob=bytes(step_buf),
+                    )
+                )
+                next_idx += 1
+                continue
+
+            if isinstance(ev, UserInputEvent):
+                ui_buf = bytearray()
+                ui_buf.extend(_encode_string_field(1, ev.query_text))
+                ui_buf.extend(_encode_string_field(2, ev.query_text))
+                item_msg = _encode_string_field(1, ev.query_text)
+                ui_buf.extend(_encode_bytes_field(3, item_msg))
+                for m in ev.media:
+                    m_msg = _encode_string_field(1, m.mime_type) + _encode_string_field(5, m.uri)
+                    ui_buf.extend(_encode_bytes_field(9, m_msg))
+                if ev.anchor.client_message_id:
+                    ui_buf.extend(_encode_string_field(19, ev.anchor.client_message_id))
+
+                meta_blob = _encode_step_metadata(
+                    created_at_iso=ev.anchor.timestamp_iso,
+                    source_enum=4,
+                )
+                step_buf = bytearray()
+                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.USER_INPUT)))
+                step_buf.extend(_encode_varint_field(4, 3))
+                step_buf.extend(_encode_bytes_field(5, meta_blob))
+                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.USER_INPUT_TAG), bytes(ui_buf)))
+                for uf in ev.anchor.unknown_wire_fields:
+                    step_buf.extend(_encode_unknown_wire_field(uf))
+
+                rows.append(
+                    AgyRawStepRow(
+                        idx=StepIndex(next_idx),
+                        step_type=int(CortexStepTypeCode.USER_INPUT),
+                        status=3,
+                        has_subtrajectory=False,
+                        metadata_blob=meta_blob,
+                        step_payload_blob=bytes(step_buf),
+                    )
+                )
+                next_idx += 1
+                pos += 1
+                continue
+
+            if isinstance(ev, ToolResultEvent):
+                spec_for_res = TOOL_SPEC_BY_PAYLOAD_KIND.get(ev.payload.kind)
+                agy_tname = spec_for_res.agy_tool_name if spec_for_res else ev.tool_name
+                args_json = _serialize_tool_payload_to_arguments_json(ev.payload)
+                args_dict = _safe_json_dict(args_json)
+
+                gen_buf = bytearray()
+                for k in sorted(args_dict.keys()):
+                    val_str = (
+                        args_dict[k]
+                        if isinstance(args_dict[k], str)
+                        else json.dumps(args_dict[k], ensure_ascii=False)
+                    )
+                    entry = _encode_string_field(1, str(k)) + _encode_string_field(2, str(val_str))
+                    gen_buf.extend(_encode_bytes_field(1, entry))
+
+                res_buf = bytearray()
+                res_buf.extend(_encode_string_field(1, ev.output_text))
+                any_bytes = _encode_tool_payload_to_any(ev.payload)
+                if any_bytes:
+                    res_buf.extend(_encode_bytes_field(6, any_bytes))
+                if ev.full_output_uri:
+                    res_buf.extend(_encode_string_field(7, ev.full_output_uri))
+                gen_buf.extend(_encode_bytes_field(2, bytes(res_buf)))
+
+                meta_blob = _encode_step_metadata(
+                    created_at_iso=ev.anchor.timestamp_iso,
+                    source_enum=2,
+                    tool_call={
+                        "id": str(ev.call_id),
+                        "name": agy_tname,
+                        "arguments_json": args_json,
+                    },
+                    tool_summary=agy_tname,
+                )
+                status_code = 7 if ev.is_error else 3
+                step_buf = bytearray()
+                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.GENERIC)))
+                step_buf.extend(_encode_varint_field(4, status_code))
+                step_buf.extend(_encode_bytes_field(5, meta_blob))
+                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.GENERIC_TAG), bytes(gen_buf)))
+                for uf in ev.anchor.unknown_wire_fields:
+                    step_buf.extend(_encode_unknown_wire_field(uf))
+
+                rows.append(
+                    AgyRawStepRow(
+                        idx=StepIndex(next_idx),
+                        step_type=int(CortexStepTypeCode.GENERIC),
+                        status=status_code,
+                        has_subtrajectory=False,
+                        metadata_blob=meta_blob,
+                        step_payload_blob=bytes(step_buf),
+                    )
+                )
+                next_idx += 1
+                pos += 1
+                continue
+
+            if isinstance(ev, CheckpointEvent):
+                cp_buf = bytearray()
+                if ev.checkpoint_index:
+                    cp_buf.extend(_encode_varint_field(1, ev.checkpoint_index))
+                cp_buf.extend(_encode_string_field(4, ev.user_intent))
+                cp_buf.extend(_encode_string_field(5, ev.session_summary))
+                cp_buf.extend(_encode_string_field(6, ev.code_change_summary))
+                if ev.conversation_title:
+                    cp_buf.extend(_encode_string_field(10, ev.conversation_title))
+
+                meta_blob = _encode_step_metadata(
+                    created_at_iso=ev.anchor.timestamp_iso,
+                    source_enum=5,
+                )
+                step_buf = bytearray()
+                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.CHECKPOINT)))
+                step_buf.extend(_encode_varint_field(4, 3))
+                step_buf.extend(_encode_bytes_field(5, meta_blob))
+                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.CHECKPOINT_TAG), bytes(cp_buf)))
+                for uf in ev.anchor.unknown_wire_fields:
+                    step_buf.extend(_encode_unknown_wire_field(uf))
+
+                rows.append(
+                    AgyRawStepRow(
+                        idx=StepIndex(next_idx),
+                        step_type=int(CortexStepTypeCode.CHECKPOINT),
+                        status=3,
+                        has_subtrajectory=False,
+                        metadata_blob=meta_blob,
+                        step_payload_blob=bytes(step_buf),
+                    )
+                )
+                next_idx += 1
+                pos += 1
+                continue
+
+            if isinstance(ev, TaskBoundaryEvent):
+                meta_blob = _encode_step_metadata(
+                    created_at_iso=ev.anchor.timestamp_iso,
+                    source_enum=2,
+                )
+                step_buf = bytearray()
+                if ev.boundary_kind == "notify_user":
+                    nu_buf = bytearray()
+                    for ruri in ev.review_uris:
+                        nu_buf.extend(_encode_string_field(1, ruri))
+                    nu_buf.extend(_encode_string_field(2, ev.task_summary))
+                    if ev.blocked_on_user:
+                        nu_buf.extend(_encode_varint_field(3, 1))
+                    step_type_int = int(CortexStepTypeCode.NOTIFY_USER)
+                    step_buf.extend(_encode_varint_field(1, step_type_int))
+                    step_buf.extend(_encode_varint_field(4, 3))
+                    step_buf.extend(_encode_bytes_field(5, meta_blob))
+                    step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.NOTIFY_USER_TAG), bytes(nu_buf)))
+                else:
+                    tb_buf = bytearray()
+                    tb_buf.extend(_encode_string_field(1, ev.task_name))
+                    tb_buf.extend(_encode_string_field(2, ev.task_status))
+                    tb_buf.extend(_encode_string_field(3, ev.task_summary))
+                    if ev.mode and ev.mode.isdigit():
+                        tb_buf.extend(_encode_varint_field(5, int(ev.mode)))
+                    step_type_int = int(CortexStepTypeCode.TASK_BOUNDARY)
+                    step_buf.extend(_encode_varint_field(1, step_type_int))
+                    step_buf.extend(_encode_varint_field(4, 3))
+                    step_buf.extend(_encode_bytes_field(5, meta_blob))
+                    step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.TASK_BOUNDARY_TAG), bytes(tb_buf)))
+                for uf in ev.anchor.unknown_wire_fields:
+                    step_buf.extend(_encode_unknown_wire_field(uf))
+
+                rows.append(
+                    AgyRawStepRow(
+                        idx=StepIndex(next_idx),
+                        step_type=step_type_int,
+                        status=3,
+                        has_subtrajectory=False,
+                        metadata_blob=meta_blob,
+                        step_payload_blob=bytes(step_buf),
+                    )
+                )
+                next_idx += 1
+                pos += 1
+                continue
+
+            if isinstance(ev, SystemEvent):
+                sm_buf = _encode_string_field(1, ev.message_text) + _encode_string_field(3, ev.event_type)
+                meta_blob = _encode_step_metadata(
+                    created_at_iso=ev.anchor.timestamp_iso,
+                    source_enum=5,
+                )
+                step_buf = bytearray()
+                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.SYSTEM_MESSAGE)))
+                step_buf.extend(_encode_varint_field(4, 3))
+                step_buf.extend(_encode_bytes_field(5, meta_blob))
+                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.SYSTEM_MESSAGE_TAG), sm_buf))
+                for uf in ev.anchor.unknown_wire_fields:
+                    step_buf.extend(_encode_unknown_wire_field(uf))
+
+                rows.append(
+                    AgyRawStepRow(
+                        idx=StepIndex(next_idx),
+                        step_type=int(CortexStepTypeCode.SYSTEM_MESSAGE),
+                        status=3,
+                        has_subtrajectory=False,
+                        metadata_blob=meta_blob,
+                        step_payload_blob=bytes(step_buf),
+                    )
+                )
+                next_idx += 1
+                pos += 1
+                continue
+
+            pos += 1
+
+        return tuple(rows)
+
+    @staticmethod
+    def encode_ledger_to_agy_steps(
+        ledger_or_events: TrajectoryLedger | Sequence[CanonicalEvent],
+        starting_step_idx: StepIndex = StepIndex(0),
+    ) -> Tuple[AgyRawStepRow, ...]:
+        """Encode a `TrajectoryLedger` or event sequence into Antigravity `steps` rows."""
+        events = (
+            ledger_or_events.events
+            if isinstance(ledger_or_events, TrajectoryLedger)
+            else ledger_or_events
+        )
+        return TrajectoryWireCodec.encode_events_to_agy_steps(events, starting_step_idx)
 
     @staticmethod
     def decode_codex_rollout_to_ledger(
@@ -406,55 +2190,708 @@ class TrajectoryWireCodec:
         *,
         explicit_title_override: str | None = None,
     ) -> TrajectoryLedger:
-        """Parse Codex `rollout-*.jsonl` lines into an indexed `TrajectoryLedger`.
+        """Parse Codex `rollout-*.jsonl` lines into an indexed `TrajectoryLedger`."""
+        events: list[CanonicalEvent] = []
+        call_index_by_id: dict[ToolCallId, int] = {}
 
-        Invariants:
-        - Maps `event_msg` (`task_started` / `task_complete`) to `TaskBoundaryEvent` and turn
-          completion state (`has_inflight_turn = False` only when the trailing `task_started`
-          is closed by `task_complete` or all tool calls have resolved with an assistant reply).
-        - Maps `response_item` (`reasoning`/`magpie_reasoning`, `message`,
-          `function_call`/`custom_tool_call`, `function_call_output`/`custom_tool_call_output`)
-          to `ThinkingEvent` (storing `encrypted_content` in `HostExtensionEnvelope`),
-          `UserInputEvent`/`AssistantTextEvent`, `ToolCallEvent`, and `ToolResultEvent`
-          using `TOOL_SPEC_BY_CODEX_NAME`.
-        """
-        # TODO:
-        # 1. Iterate `raw_lines`, parsing JSON at the boundary.
-        # 2. Dispatch on record type (`session_meta`, `turn_context`, `world_state`,
-        #    `event_msg`, `response_item`) and map tool calls via `TOOL_SPEC_BY_CODEX_NAME`.
-        # 3. Construct and return `TrajectoryLedger.from_events(...)`.
-        raise NotImplementedError("TrajectoryWireCodec.decode_codex_rollout_to_ledger stub")
+        turn_num = 1
+        current_turn_id = TurnId(f"turn-{turn_num}")
+        turn_has_response = False
+        checkpoint_counter = 0
+
+        for row in raw_lines:
+            raw_str = row.raw_json.strip()
+            if not raw_str:
+                continue
+            obj = json.loads(raw_str)
+            rtype = obj.get("type", "")
+            ts_iso = str(obj.get("timestamp") or "2026-01-01T00:00:00Z")
+            pl = obj.get("payload")
+            if not isinstance(pl, dict):
+                continue
+
+            if rtype == "session_meta":
+                sid = str(pl.get("id") or pl.get("session_id") or "")
+                ext = HostExtensionEnvelope(
+                    host=HostKind.CODEX,
+                    extension_type="session_meta",
+                    raw_payload=json.dumps(pl, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                )
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=current_turn_id,
+                    timestamp_iso=ts_iso,
+                    codex_line_no=row.line_no,
+                    host_extensions=(ext,),
+                )
+                events.append(
+                    SystemEvent(
+                        kind="system_message",
+                        anchor=anchor,
+                        event_type="session_meta",
+                        message_text=f"codex_session:{sid}",
+                    )
+                )
+
+            elif rtype == "world_state":
+                ext = HostExtensionEnvelope(
+                    host=HostKind.CODEX,
+                    extension_type="world_state",
+                    raw_payload=json.dumps(pl, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                )
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=current_turn_id,
+                    timestamp_iso=ts_iso,
+                    codex_line_no=row.line_no,
+                    host_extensions=(ext,),
+                )
+                events.append(
+                    SystemEvent(
+                        kind="system_message",
+                        anchor=anchor,
+                        event_type="world_state",
+                        message_text="codex_world_state",
+                    )
+                )
+
+            elif rtype == "turn_context":
+                tc_turn = pl.get("turn_id")
+                if tc_turn:
+                    current_turn_id = TurnId(str(tc_turn))
+                checkpoint_counter += 1
+                ext = HostExtensionEnvelope(
+                    host=HostKind.CODEX,
+                    extension_type="turn_context",
+                    raw_payload=json.dumps(pl, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                )
+                anchor = EventOriginAnchor(
+                    origin_host=HostKind.CODEX,
+                    turn_id=current_turn_id,
+                    timestamp_iso=ts_iso,
+                    codex_line_no=row.line_no,
+                    host_extensions=(ext,),
+                )
+                summary_str = str(pl.get("summary") or pl.get("model") or "turn_context")
+                conv_title = pl.get("conversation_title") or pl.get("title")
+                events.append(
+                    CheckpointEvent(
+                        kind="checkpoint",
+                        anchor=anchor,
+                        checkpoint_index=int(pl.get("checkpoint_index") or checkpoint_counter),
+                        user_intent=str(pl.get("user_intent") or ""),
+                        session_summary=summary_str,
+                        code_change_summary=str(pl.get("code_change_summary") or ""),
+                        conversation_title=str(conv_title) if conv_title else None,
+                    )
+                )
+
+            elif rtype == "event_msg":
+                ev_sub = str(pl.get("type") or "")
+                ev_turn = pl.get("turn_id")
+                if ev_sub == "task_started":
+                    if ev_turn:
+                        current_turn_id = TurnId(str(ev_turn))
+                    elif turn_has_response:
+                        turn_num += 1
+                        current_turn_id = TurnId(f"turn-{turn_num}")
+                    turn_has_response = False
+                    anchor = EventOriginAnchor(
+                        origin_host=HostKind.CODEX,
+                        turn_id=current_turn_id,
+                        timestamp_iso=ts_iso,
+                        codex_line_no=row.line_no,
+                    )
+                    events.append(
+                        TaskBoundaryEvent(
+                            kind="task_boundary",
+                            anchor=anchor,
+                            boundary_kind="task_boundary",
+                            task_name=str(pl.get("task_name") or "codex_turn"),
+                            task_status="task_started",
+                            task_summary=str(pl.get("task_summary") or "Turn started"),
+                        )
+                    )
+                elif ev_sub == "task_complete":
+                    if ev_turn:
+                        current_turn_id = TurnId(str(ev_turn))
+                    turn_has_response = True
+                    anchor = EventOriginAnchor(
+                        origin_host=HostKind.CODEX,
+                        turn_id=current_turn_id,
+                        timestamp_iso=ts_iso,
+                        codex_line_no=row.line_no,
+                    )
+                    events.append(
+                        TaskBoundaryEvent(
+                            kind="task_boundary",
+                            anchor=anchor,
+                            boundary_kind="task_boundary",
+                            task_name=str(pl.get("task_name") or "codex_turn"),
+                            task_status="task_complete",
+                            task_summary=str(pl.get("last_agent_message") or pl.get("task_summary") or "Turn complete"),
+                        )
+                    )
+                elif ev_sub == "user_message":
+                    if turn_has_response and not ev_turn:
+                        turn_num += 1
+                        current_turn_id = TurnId(f"turn-{turn_num}")
+                        turn_has_response = False
+                    elif ev_turn:
+                        current_turn_id = TurnId(str(ev_turn))
+                    anchor = EventOriginAnchor(
+                        origin_host=HostKind.CODEX,
+                        turn_id=current_turn_id,
+                        timestamp_iso=ts_iso,
+                        codex_line_no=row.line_no,
+                    )
+                    events.append(
+                        UserInputEvent(
+                            kind="user_input",
+                            anchor=anchor,
+                            query_text=str(pl.get("message") or pl.get("text") or ""),
+                        )
+                    )
+                elif ev_sub == "agent_message":
+                    turn_has_response = True
+                    anchor = EventOriginAnchor(
+                        origin_host=HostKind.CODEX,
+                        turn_id=current_turn_id,
+                        timestamp_iso=ts_iso,
+                        codex_line_no=row.line_no,
+                    )
+                    events.append(
+                        AssistantTextEvent(
+                            kind="assistant_text",
+                            anchor=anchor,
+                            text=str(pl.get("message") or pl.get("text") or ""),
+                        )
+                    )
+                elif ev_sub == "agent_reasoning":
+                    turn_has_response = True
+                    anchor = EventOriginAnchor(
+                        origin_host=HostKind.CODEX,
+                        turn_id=current_turn_id,
+                        timestamp_iso=ts_iso,
+                        codex_line_no=row.line_no,
+                    )
+                    events.append(
+                        ThinkingEvent(
+                            kind="thinking",
+                            anchor=anchor,
+                            summary_text=str(pl.get("text") or pl.get("summary") or ""),
+                        )
+                    )
+
+            elif rtype == "response_item":
+                ptype = str(pl.get("type") or "")
+                passthrough = pl.get("internal_chat_message_metadata_passthrough")
+                if isinstance(passthrough, dict) and passthrough.get("turn_id"):
+                    current_turn_id = TurnId(str(passthrough["turn_id"]))
+
+                if ptype == "message":
+                    role = str(pl.get("role") or "user")
+                    content_blocks = pl.get("content") or []
+                    texts: list[str] = []
+                    media_items: list[MediaAttachment] = []
+                    if isinstance(content_blocks, list):
+                        for blk in content_blocks:
+                            if isinstance(blk, dict):
+                                if "text" in blk and blk["text"] is not None:
+                                    texts.append(str(blk["text"]))
+                                elif blk.get("type") == "input_image":
+                                    media_items.append(
+                                        MediaAttachment(
+                                            mime_type=str(blk.get("mime_type") or "image/png"),
+                                            uri=str(blk.get("image_url") or blk.get("uri") or ""),
+                                        )
+                                    )
+                    full_text = "\n".join(texts)
+                    msg_id = str(pl.get("id")) if pl.get("id") else None
+
+                    if role == "user":
+                        if turn_has_response and not (isinstance(passthrough, dict) and passthrough.get("turn_id")):
+                            turn_num += 1
+                            current_turn_id = TurnId(f"turn-{turn_num}")
+                            turn_has_response = False
+                        anchor = EventOriginAnchor(
+                            origin_host=HostKind.CODEX,
+                            turn_id=current_turn_id,
+                            timestamp_iso=ts_iso,
+                            codex_line_no=row.line_no,
+                            client_message_id=msg_id,
+                        )
+                        events.append(
+                            UserInputEvent(
+                                kind="user_input",
+                                anchor=anchor,
+                                query_text=full_text,
+                                media=tuple(media_items),
+                            )
+                        )
+                    elif role == "assistant":
+                        turn_has_response = True
+                        anchor = EventOriginAnchor(
+                            origin_host=HostKind.CODEX,
+                            turn_id=current_turn_id,
+                            timestamp_iso=ts_iso,
+                            codex_line_no=row.line_no,
+                        )
+                        events.append(
+                            AssistantTextEvent(
+                                kind="assistant_text",
+                                anchor=anchor,
+                                text=full_text,
+                                message_id=msg_id,
+                            )
+                        )
+                    else:
+                        ext = HostExtensionEnvelope(
+                            host=HostKind.CODEX,
+                            extension_type=f"message_{role}",
+                            raw_payload=json.dumps(pl, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                        )
+                        anchor = EventOriginAnchor(
+                            origin_host=HostKind.CODEX,
+                            turn_id=current_turn_id,
+                            timestamp_iso=ts_iso,
+                            codex_line_no=row.line_no,
+                            host_extensions=(ext,),
+                        )
+                        events.append(
+                            SystemEvent(
+                                kind="system_message",
+                                anchor=anchor,
+                                event_type=f"codex_{role}_message",
+                                message_text=full_text,
+                            )
+                        )
+
+                elif ptype in ("reasoning", "magpie_reasoning"):
+                    turn_has_response = True
+                    summary_list = pl.get("summary") or []
+                    summary_parts: list[str] = []
+                    if isinstance(summary_list, list):
+                        for item in summary_list:
+                            if isinstance(item, dict) and "text" in item:
+                                summary_parts.append(str(item["text"]))
+                            elif isinstance(item, str):
+                                summary_parts.append(item)
+                    summary_text = "\n".join(summary_parts)
+                    raw_thinking_str: str | None = None
+                    if isinstance(pl.get("content"), str):
+                        raw_thinking_str = pl["content"]
+
+                    exts: list[HostExtensionEnvelope] = []
+                    enc_content = pl.get("encrypted_content")
+                    if enc_content:
+                        exts.append(
+                            HostExtensionEnvelope(
+                                host=HostKind.CODEX,
+                                extension_type="encrypted_content",
+                                raw_payload=str(enc_content).encode("utf-8"),
+                                metadata=(("reasoning_type", ptype),),
+                            )
+                        )
+                    else:
+                        exts.append(
+                            HostExtensionEnvelope(
+                                host=HostKind.CODEX,
+                                extension_type="reasoning_meta",
+                                raw_payload=b"",
+                                metadata=(("reasoning_type", ptype),),
+                            )
+                        )
+
+                    anchor = EventOriginAnchor(
+                        origin_host=HostKind.CODEX,
+                        turn_id=current_turn_id,
+                        timestamp_iso=ts_iso,
+                        codex_line_no=row.line_no,
+                        host_extensions=tuple(exts),
+                    )
+                    events.append(
+                        ThinkingEvent(
+                            kind="thinking",
+                            anchor=anchor,
+                            summary_text=summary_text,
+                            raw_thinking=raw_thinking_str,
+                        )
+                    )
+
+                elif ptype in ("function_call", "custom_tool_call", "tool_search_call"):
+                    turn_has_response = True
+                    cid = ToolCallId(str(pl.get("call_id") or pl.get("id") or f"call-line-{int(row.line_no)}"))
+                    tname = str(pl.get("name") or ("tool_search" if ptype == "tool_search_call" else "unknown_tool"))
+                    raw_args = pl.get("arguments") if "arguments" in pl else pl.get("input", "{}")
+                    if isinstance(raw_args, (dict, list)):
+                        args_json = json.dumps(raw_args, ensure_ascii=False, sort_keys=True)
+                    elif isinstance(raw_args, str):
+                        if ptype == "custom_tool_call" and tname == "apply_patch" and not raw_args.strip().startswith("{"):
+                            path_match = re.search(r"\*\*\* (?:Update|Add|Delete) File:\s*(\S+)", raw_args)
+                            inferred_path = path_match.group(1) if path_match else "patch_target"
+                            args_json = json.dumps(
+                                {"path": inferred_path, "unified_diff": raw_args},
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            )
+                        else:
+                            args_json = raw_args
+                    else:
+                        args_json = "{}"
+
+                    payload = TrajectoryWireCodec.decode_tool_payload(tname, args_json)
+                    exts = []
+                    if pl.get("namespace"):
+                        exts.append(
+                            HostExtensionEnvelope(
+                                host=HostKind.CODEX,
+                                extension_type="tool_namespace",
+                                raw_payload=str(pl["namespace"]).encode("utf-8"),
+                                metadata=(("item_type", ptype),),
+                            )
+                        )
+                    anchor = EventOriginAnchor(
+                        origin_host=HostKind.CODEX,
+                        turn_id=current_turn_id,
+                        timestamp_iso=ts_iso,
+                        codex_line_no=row.line_no,
+                        host_extensions=tuple(exts),
+                    )
+                    call_index_by_id[cid] = len(events)
+                    events.append(
+                        ToolCallEvent(
+                            kind="tool_call",
+                            anchor=anchor,
+                            call_id=cid,
+                            tool_name=tname,
+                            tool_summary=tname,
+                            payload=payload,
+                        )
+                    )
+
+                elif ptype in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
+                    turn_has_response = True
+                    cid = ToolCallId(str(pl.get("call_id") or pl.get("id") or f"call-out-{int(row.line_no)}"))
+                    raw_out = pl.get("output") if "output" in pl else pl.get("tools", "")
+                    if isinstance(raw_out, list):
+                        parts: list[str] = []
+                        for item in raw_out:
+                            if isinstance(item, dict) and "text" in item:
+                                parts.append(str(item["text"]))
+                            else:
+                                parts.append(json.dumps(item, ensure_ascii=False))
+                        out_text = "\n".join(parts)
+                    elif isinstance(raw_out, dict):
+                        out_text = json.dumps(raw_out, ensure_ascii=False)
+                    else:
+                        out_text = str(raw_out or "")
+
+                    prior_tname = "unknown_tool"
+                    prior_payload: CanonicalToolPayload = OpaqueToolPayload(
+                        kind="opaque",
+                        tool_name=prior_tname,
+                        raw_arguments_json="{}",
+                    )
+                    if cid in call_index_by_id:
+                        call_pos = call_index_by_id[cid]
+                        prior_ev = events[call_pos]
+                        if isinstance(prior_ev, ToolCallEvent):
+                            prior_tname = prior_ev.tool_name
+                            prior_payload = prior_ev.payload
+                            if isinstance(prior_payload, RunCommandPayload) and prior_payload.exit_code is None:
+                                m_exit = re.search(r"Process exited with code (-?\d+)", out_text)
+                                exit_val = int(m_exit.group(1)) if m_exit else 0
+                                prior_payload = dataclasses.replace(prior_payload, exit_code=exit_val)
+                                events[call_pos] = dataclasses.replace(prior_ev, payload=prior_payload)
+
+                    is_err = bool(pl.get("is_error", False))
+                    anchor = EventOriginAnchor(
+                        origin_host=HostKind.CODEX,
+                        turn_id=current_turn_id,
+                        timestamp_iso=ts_iso,
+                        codex_line_no=row.line_no,
+                    )
+                    events.append(
+                        ToolResultEvent(
+                            kind="tool_result",
+                            anchor=anchor,
+                            call_id=cid,
+                            tool_name=prior_tname,
+                            output_text=out_text,
+                            is_error=is_err,
+                            payload=prior_payload,
+                        )
+                    )
+
+        return TrajectoryLedger.from_events(
+            workspace_path=workspace_path,
+            workspace_uri=workspace_uri,
+            events=events,
+            explicit_title_override=explicit_title_override,
+        )
 
     @staticmethod
     def encode_events_to_codex_rollout(
         events: Sequence[CanonicalEvent],
-        starting_line_no: RolloutLineNo,
+        starting_line_no: RolloutLineNo = RolloutLineNo(1),
     ) -> Tuple[CodexRawRolloutLine, ...]:
-        """Serialize a slice of `CanonicalEvent` nodes into Codex `rollout-*.jsonl` lines.
+        """Serialize a slice of `CanonicalEvent` nodes into Codex `rollout-*.jsonl` lines."""
+        lines: list[CodexRawRolloutLine] = []
+        next_line = int(starting_line_no)
 
-        Invariants:
-        - Wraps each logical turn with `event_msg` (`task_started` / `task_complete`) and
-          emits `response_item` lines for `ThinkingEvent` (`reasoning`), `ToolCallEvent`
-          (`function_call` or `custom_tool_call` per `TOOL_CODEC_TABLE`), `ToolResultEvent`
-          (`function_call_output` or `custom_tool_call_output` correlated by `call_id`),
-          and `AssistantTextEvent` (`message`).
-        """
-        # TODO:
-        # 1. Iterate `events` in ledger order, emitting `turn_context` / `event_msg` headers
-        #    on turn boundaries.
-        # 2. Look up `ToolCodecSpec` for each `ToolCallEvent` / `ToolResultEvent` and format
-        #    the JSONL line with monotonically increasing `RolloutLineNo`.
-        raise NotImplementedError("TrajectoryWireCodec.encode_events_to_codex_rollout stub")
+        def _append_record(ts: str, rtype: str, payload: Mapping[str, Any]) -> None:
+            nonlocal next_line
+            record = {
+                "timestamp": ts or "2026-01-01T00:00:00Z",
+                "ordinal": next_line - 1,
+                "type": rtype,
+                "payload": payload,
+            }
+            lines.append(
+                CodexRawRolloutLine(
+                    line_no=RolloutLineNo(next_line),
+                    raw_json=json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                )
+            )
+            next_line += 1
+
+        has_session_meta = any(
+            isinstance(e, SystemEvent) and e.event_type == "session_meta" for e in events
+        )
+        if not has_session_meta and events and int(starting_line_no) == 1:
+            first_ts = events[0].anchor.timestamp_iso or "2026-01-01T00:00:00Z"
+            _append_record(
+                first_ts,
+                "session_meta",
+                {
+                    "id": "codex-synced-session",
+                    "session_id": "codex-synced-session",
+                    "timestamp": first_ts,
+                    "originator": "codex_agy_sync",
+                    "source": "desktop",
+                    "model_provider": "openai",
+                },
+            )
+
+        active_turn: TurnId | None = None
+        active_turn_closed = True
+        last_ts = "2026-01-01T00:00:00Z"
+
+        for ev in events:
+            ts = ev.anchor.timestamp_iso or last_ts
+            last_ts = ts
+
+            if isinstance(ev, SystemEvent) and ev.event_type in ("session_meta", "world_state"):
+                raw_dict: dict[str, Any] = {}
+                for ext in ev.anchor.host_extensions:
+                    if ext.extension_type == ev.event_type and ext.raw_payload:
+                        raw_dict = _safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace"))
+                if not raw_dict:
+                    raw_dict = {"message": ev.message_text, "event_type": ev.event_type}
+                _append_record(ts, ev.event_type, raw_dict)
+                continue
+
+            if ev.anchor.turn_id != active_turn:
+                if active_turn is not None and not active_turn_closed:
+                    _append_record(
+                        ts,
+                        "event_msg",
+                        {
+                            "type": "task_complete",
+                            "turn_id": str(active_turn),
+                            "root_turn_id": str(active_turn),
+                            "last_agent_message": "Turn complete",
+                        },
+                    )
+                active_turn = ev.anchor.turn_id
+                active_turn_closed = False
+                if not (isinstance(ev, TaskBoundaryEvent) and ev.task_status == "task_started"):
+                    _append_record(
+                        ts,
+                        "event_msg",
+                        {
+                            "type": "task_started",
+                            "turn_id": str(active_turn),
+                            "root_turn_id": str(active_turn),
+                        },
+                    )
+
+            if isinstance(ev, UserInputEvent):
+                content_list: list[dict[str, Any]] = [{"type": "input_text", "text": ev.query_text}]
+                for m in ev.media:
+                    content_list.append({"type": "input_image", "mime_type": m.mime_type, "uri": m.uri})
+                _append_record(
+                    ts,
+                    "response_item",
+                    {
+                        "type": "message",
+                        "id": ev.anchor.client_message_id or f"msg_user_{next_line}",
+                        "role": "user",
+                        "content": content_list,
+                        "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
+                    },
+                )
+
+            elif isinstance(ev, ThinkingEvent):
+                r_type = "reasoning"
+                enc_val: str | None = None
+                for ext in ev.anchor.host_extensions:
+                    for mk, mv in ext.metadata:
+                        if mk == "reasoning_type" and mv in ("reasoning", "magpie_reasoning"):
+                            r_type = mv
+                    if ext.extension_type == "encrypted_content" and ext.raw_payload:
+                        enc_val = ext.raw_payload.decode("utf-8", errors="replace")
+                pl_dict: dict[str, Any] = {
+                    "type": r_type,
+                    "summary": [{"type": "summary_text", "text": ev.summary_text}],
+                    "content": ev.raw_thinking,
+                    "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
+                }
+                if enc_val is not None:
+                    pl_dict["encrypted_content"] = enc_val
+                _append_record(ts, "response_item", pl_dict)
+
+            elif isinstance(ev, AssistantTextEvent):
+                _append_record(
+                    ts,
+                    "response_item",
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "id": ev.message_id or f"msg_asst_{next_line}",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": ev.text}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
+                    },
+                )
+
+            elif isinstance(ev, ToolCallEvent):
+                spec = TOOL_SPEC_BY_PAYLOAD_KIND.get(ev.payload.kind)
+                if spec is not None:
+                    c_kind = spec.codex_call_kind
+                    c_name = spec.codex_tool_name
+                else:
+                    c_kind = "tool_search_call" if ev.tool_name == "tool_search" else "function_call"
+                    c_name = ev.tool_name
+
+                args_json = _serialize_tool_payload_to_arguments_json(ev.payload)
+                call_pl: dict[str, Any] = {
+                    "type": c_kind,
+                    "status": "completed",
+                    "call_id": str(ev.call_id),
+                    "name": c_name,
+                    "arguments": args_json,
+                    "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
+                }
+                for ext in ev.anchor.host_extensions:
+                    if ext.extension_type == "tool_namespace" and ext.raw_payload:
+                        call_pl["namespace"] = ext.raw_payload.decode("utf-8", errors="replace")
+                _append_record(ts, "response_item", call_pl)
+
+            elif isinstance(ev, ToolResultEvent):
+                spec = TOOL_SPEC_BY_PAYLOAD_KIND.get(ev.payload.kind)
+                if spec is not None and spec.codex_call_kind == "custom_tool_call":
+                    out_kind = "custom_tool_call_output"
+                elif ev.tool_name == "tool_search":
+                    out_kind = "tool_search_output"
+                else:
+                    out_kind = "function_call_output"
+
+                _append_record(
+                    ts,
+                    "response_item",
+                    {
+                        "type": out_kind,
+                        "call_id": str(ev.call_id),
+                        "output": ev.output_text,
+                        "is_error": ev.is_error,
+                        "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
+                    },
+                )
+
+            elif isinstance(ev, CheckpointEvent):
+                cp_pl: dict[str, Any] = {
+                    "turn_id": str(ev.anchor.turn_id),
+                    "root_turn_id": str(ev.anchor.turn_id),
+                    "checkpoint_index": ev.checkpoint_index,
+                    "user_intent": ev.user_intent,
+                    "summary": ev.session_summary,
+                    "code_change_summary": ev.code_change_summary,
+                }
+                if ev.conversation_title:
+                    cp_pl["conversation_title"] = ev.conversation_title
+                for ext in ev.anchor.host_extensions:
+                    if ext.extension_type == "turn_context" and ext.raw_payload:
+                        orig_tc = _safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace"))
+                        orig_tc.update(cp_pl)
+                        cp_pl = orig_tc
+                _append_record(ts, "turn_context", cp_pl)
+
+            elif isinstance(ev, TaskBoundaryEvent):
+                if ev.task_status == "task_complete":
+                    active_turn_closed = True
+                _append_record(
+                    ts,
+                    "event_msg",
+                    {
+                        "type": ev.task_status if ev.task_status in ("task_started", "task_complete") else "task_complete",
+                        "turn_id": str(ev.anchor.turn_id),
+                        "root_turn_id": str(ev.anchor.turn_id),
+                        "task_name": ev.task_name,
+                        "task_summary": ev.task_summary,
+                        "last_agent_message": ev.task_summary,
+                    },
+                )
+
+            elif isinstance(ev, SystemEvent):
+                if ev.event_type.startswith("codex_") and ev.event_type.endswith("_message"):
+                    role = ev.event_type.removeprefix("codex_").removesuffix("_message")
+                    _append_record(
+                        ts,
+                        "response_item",
+                        {
+                            "type": "message",
+                            "role": role,
+                            "content": [{"type": "input_text", "text": ev.message_text}],
+                            "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)},
+                        },
+                    )
+                else:
+                    _append_record(
+                        ts,
+                        "event_msg",
+                        {
+                            "type": "system_message",
+                            "turn_id": str(ev.anchor.turn_id),
+                            "event_type": ev.event_type,
+                            "message": ev.message_text,
+                        },
+                    )
+
+        if active_turn is not None and not active_turn_closed:
+            _append_record(
+                last_ts,
+                "event_msg",
+                {
+                    "type": "task_complete",
+                    "turn_id": str(active_turn),
+                    "root_turn_id": str(active_turn),
+                    "last_agent_message": "Turn complete",
+                },
+            )
+
+        return tuple(lines)
 
     @staticmethod
-    def decode_tool_payload(
-        tool_name: str,
-        arguments_json: str,
-        any_type_url: str | None = None,
-        any_value_bytes: bytes | None = None,
-    ) -> CanonicalToolPayload:
-        """Decode a tool call/result into a typed `CanonicalToolPayload` via `TOOL_CODEC_TABLE`."""
-        # TODO:
-        # Lookup `TOOL_SPEC_BY_TYPE_URL` or `TOOL_SPEC_BY_AGY_NAME` / `TOOL_SPEC_BY_CODEX_NAME`;
-        # parse into the matching dataclass or return `OpaqueToolPayload`.
-        raise NotImplementedError("TrajectoryWireCodec.decode_tool_payload stub")
+    def encode_ledger_to_codex_rollout(
+        ledger_or_events: TrajectoryLedger | Sequence[CanonicalEvent],
+        starting_line_no: RolloutLineNo = RolloutLineNo(1),
+    ) -> Tuple[CodexRawRolloutLine, ...]:
+        """Encode a `TrajectoryLedger` or event sequence into Codex `rollout-*.jsonl` lines."""
+        events = (
+            ledger_or_events.events
+            if isinstance(ledger_or_events, TrajectoryLedger)
+            else ledger_or_events
+        )
+        return TrajectoryWireCodec.encode_events_to_codex_rollout(events, starting_line_no)

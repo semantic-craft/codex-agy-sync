@@ -3,22 +3,53 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
+from codex_agy_sync.codecs import (
+    AgyRawStepRow,
+    CodexRawRolloutLine,
+    STEP_TAG_TO_SPEC,
+    STEP_WIRE_TABLE,
+    TOOL_CODEC_TABLE,
+    TrajectoryWireCodec,
+)
 from codex_agy_sync.ledger import (
+    _encode_bytes_field,
+    _encode_string_field,
+    _encode_varint,
+    _encode_varint_field,
     AgyGuiSafeSource,
     AgyProjectId,
+    AskQuestionPayload,
     AssistantTextEvent,
     CascadeId,
     CheckpointEvent,
     CodexProjectId,
     CodexThreadId,
+    DefineSubagentPayload,
     EventOriginAnchor,
+    FileEditPayload,
+    FinishPayload,
+    GenerateImagePayload,
     HostKind,
+    InvokeSubagentPayload,
+    ListResourcesPayload,
+    ManageSubagentsPayload,
+    ManageTaskPayload,
+    MomaSearchPayload,
+    OpaqueToolPayload,
+    QuestionItem,
+    QuestionOption,
     ReadFilePayload,
+    ReadResourcePayload,
     RolloutLineNo,
     RunCommandPayload,
+    SchedulePayload,
+    SearchWebDocument,
+    SearchWebPayload,
+    SendMessagePayload,
     StepIndex,
     TaskBoundaryEvent,
     ThinkingEvent,
@@ -28,6 +59,7 @@ from codex_agy_sync.ledger import (
     ToolResultEvent,
     TrajectoryLedger,
     TurnId,
+    UnknownWireField,
     UserInputEvent,
     parse_workspace_identity,
     resolve_canonical_title,
@@ -435,6 +467,458 @@ class TestLedgerBehavior(unittest.TestCase):
                 cascade_id=cascade_id,
                 project_id=AgyProjectId("default-cli-project"),
             )
+
+
+class TestCodecBehavior(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.workspace_dir = Path(self.temp_dir.name) / "codec-workspace"
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.ws_path, self.ws_uri = parse_workspace_identity(self.workspace_dir)
+        self.codec = TrajectoryWireCodec()
+        repo_root = Path(__file__).resolve().parent.parent
+        self.schema = json.loads((repo_root / "schema" / "antigravity_2_30_schema.json").read_text())
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_step_and_tool_codec_tables_cover_full_catalog(self) -> None:
+        self.assertEqual(len(STEP_WIRE_TABLE), 7)
+        self.assertEqual(len(STEP_TAG_TO_SPEC), 7)
+        self.assertEqual(len(TOOL_CODEC_TABLE), 16)
+
+        payloads = [
+            ReadFilePayload(kind="read_file", path="a.py", start_line=1, end_line=20, file_num_lines=50),
+            FileEditPayload(
+                kind="file_edit",
+                path="b.py",
+                edit_op="MODIFY",
+                unified_diff="--- a/b.py\n+++ b/b.py\n@@ -1,2 +1,4 @@\n",
+                diff_stats=(4, 2),
+                is_artifact=False,
+            ),
+            RunCommandPayload(
+                kind="run_command",
+                command_line="pytest -q",
+                cwd=str(self.ws_path),
+                exit_code=0,
+            ),
+            SearchWebPayload(
+                kind="search_web",
+                query="protobuf wire format",
+                domain_filter="protobuf.dev",
+                summary="Summary markdown",
+                documents=(SearchWebDocument(title="Protobuf Docs", url="https://protobuf.dev", snippet="Docs"),),
+            ),
+            InvokeSubagentPayload(
+                kind="invoke_subagent",
+                subagent_type="research",
+                role="Codebase Researcher",
+                prompt="Inspect schema",
+                spawned_conversation_id="sub-123",
+            ),
+            DefineSubagentPayload(
+                kind="define_subagent",
+                name="auditor",
+                tool_names=("read_file",),
+            ),
+            ManageSubagentsPayload(
+                kind="manage_subagents",
+                action="list",
+                target_conversation_ids=("sub-123",),
+            ),
+            ManageTaskPayload(
+                kind="manage_task",
+                action="status",
+                task_id="task-9",
+                input_text="running",
+            ),
+            SendMessagePayload(
+                kind="send_message",
+                recipient_id="sub-123",
+                message_body="Status check",
+            ),
+            SchedulePayload(
+                kind="schedule",
+                prompt="Wake up",
+                duration_seconds=30,
+                timer_condition="any",
+            ),
+            AskQuestionPayload(
+                kind="ask_question",
+                questions=(
+                    QuestionItem(
+                        question="Which mode?",
+                        options=(
+                            QuestionOption(label="(Recommended) Auto"),
+                            QuestionOption(label="Offline"),
+                        ),
+                        is_multi_select=False,
+                    ),
+                ),
+            ),
+            ListResourcesPayload(
+                kind="list_resources",
+                server_name="context7",
+                resource_uris=("res://1",),
+            ),
+            ReadResourcePayload(
+                kind="read_resource",
+                server_name="context7",
+                uri="res://1",
+                contents_text=("resource text",),
+            ),
+            GenerateImagePayload(
+                kind="generate_image",
+                prompt="Architecture diagram",
+                image_paths=("arch.png",),
+            ),
+            MomaSearchPayload(
+                kind="moma_search",
+                query="jetski_cortex_pb",
+                result_count=3,
+            ),
+            FinishPayload(
+                kind="finish",
+                arguments_json='{"final_response":"Completed task"}',
+            ),
+            OpaqueToolPayload(
+                kind="opaque",
+                tool_name="custom_mcp_tool",
+                raw_arguments_json='{"k":"v"}',
+                type_url="type.googleapis.com/custom.ToolMessage",
+                raw_any_bytes=b"\x08\x2a",
+            ),
+        ]
+
+        turn_id = TurnId("turn-tools")
+        events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=turn_id,
+                    timestamp_iso="2026-11-10T03:00:00Z",
+                ),
+                query_text="Run all 16 tools plus opaque fallback",
+            )
+        ]
+        for idx, payload in enumerate(payloads):
+            call_id = ToolCallId(f"call-{idx}")
+            tool_name = payload.tool_name if isinstance(payload, OpaqueToolPayload) else payload.kind
+            events.append(
+                ToolCallEvent(
+                    kind="tool_call",
+                    anchor=EventOriginAnchor(
+                        origin_host=HostKind.ANTIGRAVITY,
+                        turn_id=turn_id,
+                        timestamp_iso="2026-11-10T03:00:01Z",
+                    ),
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    tool_summary=f"Summary {idx}",
+                    payload=payload,
+                )
+            )
+            events.append(
+                ToolResultEvent(
+                    kind="tool_result",
+                    anchor=EventOriginAnchor(
+                        origin_host=HostKind.ANTIGRAVITY,
+                        turn_id=turn_id,
+                        timestamp_iso="2026-11-10T03:00:02Z",
+                    ),
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    output_text=f"Output {idx}",
+                    is_error=False,
+                    payload=payload,
+                )
+            )
+
+        agy_steps = self.codec.encode_events_to_agy_steps(events)
+        decoded_from_agy = self.codec.decode_agy_steps_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            agy_steps,
+        )
+        decoded_calls = [ev for ev in decoded_from_agy.events if isinstance(ev, ToolCallEvent)]
+        decoded_results = [ev for ev in decoded_from_agy.events if isinstance(ev, ToolResultEvent)]
+        self.assertEqual(len(decoded_calls), len(payloads))
+        self.assertEqual(len(decoded_results), len(payloads))
+
+        file_edit_results = [
+            ev.payload for ev in decoded_results if isinstance(ev.payload, FileEditPayload)
+        ]
+        self.assertEqual(len(file_edit_results), 1)
+        self.assertEqual(file_edit_results[0].diff_stats[0], 4)
+
+        run_cmd_results = [
+            ev.payload for ev in decoded_results if isinstance(ev.payload, RunCommandPayload)
+        ]
+        self.assertEqual(len(run_cmd_results), 1)
+        self.assertEqual(run_cmd_results[0].exit_code, 0)
+
+        search_web_results = [
+            ev.payload for ev in decoded_results if isinstance(ev.payload, SearchWebPayload)
+        ]
+        self.assertEqual(len(search_web_results), 1)
+        self.assertEqual(search_web_results[0].documents[0].url, "https://protobuf.dev")
+
+        ask_q_results = [
+            ev.payload for ev in decoded_results if isinstance(ev.payload, AskQuestionPayload)
+        ]
+        self.assertEqual(len(ask_q_results), 1)
+        self.assertEqual(len(ask_q_results[0].questions), 1)
+
+        codex_lines = self.codec.encode_ledger_to_codex_rollout(decoded_from_agy)
+        decoded_from_codex = self.codec.decode_codex_rollout_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            codex_lines,
+        )
+        self.assertEqual(
+            len([ev for ev in decoded_from_codex.events if isinstance(ev, ToolCallEvent)]),
+            len(payloads),
+        )
+        self.assertEqual(
+            len([ev for ev in decoded_from_codex.events if isinstance(ev, ToolResultEvent)]),
+            len(payloads),
+        )
+
+    def test_unknown_wire_fields_survive_agy_roundtrip(self) -> None:
+        unknown_tag_9999 = _encode_varint((9999 << 3) | 2) + _encode_varint(5) + b"hello"
+        user_body = _encode_string_field(5, "Test unknown field preservation")
+        step_blob = (
+            _encode_varint_field(1, 14)
+            + _encode_varint_field(4, 3)
+            + _encode_bytes_field(19, user_body)
+            + unknown_tag_9999
+        )
+        ledger = self.codec.decode_agy_steps_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            [
+                AgyRawStepRow(
+                    idx=StepIndex(0),
+                    step_type=14,
+                    status=3,
+                    has_subtrajectory=False,
+                    metadata_blob=b"",
+                    step_payload_blob=step_blob,
+                    step_format=1,
+                )
+            ],
+        )
+        self.assertEqual(len(ledger.events), 1)
+        self.assertEqual(
+            ledger.events[0].anchor.unknown_wire_fields,
+            (UnknownWireField(field_tag=9999, wire_type=2, raw_bytes=b"hello"),),
+        )
+        reencoded = self.codec.encode_ledger_to_agy_steps(ledger)
+        self.assertEqual(len(reencoded), 1)
+        self.assertIn(unknown_tag_9999, reencoded[0].step_payload_blob)
+
+    def test_real_agy_session_161_steps_roundtrip(self) -> None:
+        real_conv_db = (
+            Path.home()
+            / ".gemini"
+            / "antigravity"
+            / "conversations"
+            / "eb95dc40-cb5e-4017-b4ff-f41223e1f701.db"
+        )
+        if not real_conv_db.exists():
+            self.skipTest("Real Antigravity session database not present on this machine")
+
+        conn = sqlite3.connect(f"file:{real_conv_db}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = ON;")
+            rows = conn.execute(
+                "SELECT idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format FROM steps ORDER BY idx ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        self.assertEqual(len(rows), 161)
+
+        raw_rows = [
+            AgyRawStepRow(
+                idx=StepIndex(int(r[0])),
+                step_type=int(r[1]),
+                status=int(r[2]),
+                has_subtrajectory=bool(r[3]),
+                metadata_blob=bytes(r[4] or b""),
+                step_payload_blob=bytes(r[5] or b""),
+                step_format=int(r[6] or 1),
+            )
+            for r in rows
+        ]
+        ledger = self.codec.decode_agy_steps_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            raw_rows,
+        )
+        user_events = [ev for ev in ledger.events if isinstance(ev, UserInputEvent)]
+        tool_calls = [ev for ev in ledger.events if isinstance(ev, ToolCallEvent)]
+        tool_results = [ev for ev in ledger.events if isinstance(ev, ToolResultEvent)]
+        checkpoints = [ev for ev in ledger.events if isinstance(ev, CheckpointEvent)]
+        thinking_events = [ev for ev in ledger.events if isinstance(ev, ThinkingEvent)]
+
+        self.assertEqual(len(user_events), 2)
+        self.assertEqual(len(tool_calls), 97)
+        self.assertEqual(len(tool_results), 97)
+        self.assertEqual(len(checkpoints), 1)
+        self.assertGreaterEqual(len(thinking_events), 40)
+
+        for call_ev in tool_calls:
+            c_ev, r_ev = ledger.call_and_result(call_ev.call_id)
+            self.assertEqual(c_ev.call_id, call_ev.call_id)
+            self.assertIsNotNone(r_ev)
+
+        codex_lines = self.codec.encode_ledger_to_codex_rollout(ledger)
+        ledger_from_codex = self.codec.decode_codex_rollout_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            codex_lines,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_from_codex.events if isinstance(ev, UserInputEvent)]),
+            2,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_from_codex.events if isinstance(ev, ToolCallEvent)]),
+            97,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_from_codex.events if isinstance(ev, ToolResultEvent)]),
+            97,
+        )
+
+        reencoded_agy = self.codec.encode_ledger_to_agy_steps(ledger_from_codex)
+        unknown_fields: list[str] = []
+        for step_row in reencoded_agy:
+            decode_protobuf(
+                step_row.step_payload_blob,
+                "gemini_coder.Step",
+                self.schema,
+                unknown_fields,
+            )
+        self.assertEqual(unknown_fields, [])
+
+        ledger_roundtrip = self.codec.decode_agy_steps_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            reencoded_agy,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_roundtrip.events if isinstance(ev, ToolCallEvent)]),
+            97,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_roundtrip.events if isinstance(ev, ToolResultEvent)]),
+            97,
+        )
+
+    def test_real_codex_session_rollout_roundtrip(self) -> None:
+        codex_sessions_dir = Path.home() / ".codex" / "sessions"
+        matches = list(codex_sessions_dir.rglob("*01a1ae7d-d56f-7650-8336-aa848b9f2a5a.jsonl"))
+        if not matches:
+            self.skipTest("Real Codex rollout file not present on this machine")
+
+        raw_lines = [
+            CodexRawRolloutLine(line_no=RolloutLineNo(idx + 1), raw_json=line)
+            for idx, line in enumerate(matches[0].read_text(encoding="utf-8").splitlines())
+            if line.strip()
+        ]
+        ledger = self.codec.decode_codex_rollout_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            raw_lines,
+        )
+        user_events = [ev for ev in ledger.events if isinstance(ev, UserInputEvent)]
+        assistant_events = [ev for ev in ledger.events if isinstance(ev, AssistantTextEvent)]
+        thinking_events = [ev for ev in ledger.events if isinstance(ev, ThinkingEvent)]
+        tool_calls = [ev for ev in ledger.events if isinstance(ev, ToolCallEvent)]
+        tool_results = [ev for ev in ledger.events if isinstance(ev, ToolResultEvent)]
+
+        self.assertGreaterEqual(len(user_events), 2)
+        self.assertGreaterEqual(len(assistant_events), 2)
+        self.assertEqual(len(thinking_events), 18)
+        self.assertEqual(len(tool_calls), 19)
+        self.assertEqual(len(tool_results), 19)
+        self.assertTrue(
+            any(
+                any(
+                    ext.extension_type in ("encrypted_content", "reasoning_meta")
+                    and dict(ext.metadata).get("reasoning_type") in ("reasoning", "magpie_reasoning")
+                    for ext in ev.anchor.host_extensions
+                )
+                for ev in thinking_events
+            )
+        )
+
+        agy_steps = self.codec.encode_ledger_to_agy_steps(ledger)
+        unknown_fields: list[str] = []
+        for step_row in agy_steps:
+            decode_protobuf(
+                step_row.step_payload_blob,
+                "gemini_coder.Step",
+                self.schema,
+                unknown_fields,
+            )
+        self.assertEqual(unknown_fields, [])
+
+        ledger_from_agy = self.codec.decode_agy_steps_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            agy_steps,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_from_agy.events if isinstance(ev, UserInputEvent)]),
+            len(user_events),
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_from_agy.events if isinstance(ev, AssistantTextEvent)]),
+            len(assistant_events),
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_from_agy.events if isinstance(ev, ThinkingEvent)]),
+            18,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_from_agy.events if isinstance(ev, ToolCallEvent)]),
+            19,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_from_agy.events if isinstance(ev, ToolResultEvent)]),
+            19,
+        )
+
+        reencoded_codex = self.codec.encode_ledger_to_codex_rollout(ledger)
+        ledger_codex_rt = self.codec.decode_codex_rollout_to_ledger(
+            self.ws_path,
+            self.ws_uri,
+            reencoded_codex,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_codex_rt.events if isinstance(ev, ToolCallEvent)]),
+            19,
+        )
+        self.assertEqual(
+            len([ev for ev in ledger_codex_rt.events if isinstance(ev, ToolResultEvent)]),
+            19,
+        )
+        self.assertTrue(
+            any(
+                any(
+                    ext.extension_type in ("encrypted_content", "reasoning_meta")
+                    and dict(ext.metadata).get("reasoning_type") in ("reasoning", "magpie_reasoning")
+                    for ext in ev.anchor.host_extensions
+                )
+                for ev in ledger_codex_rt.events
+                if isinstance(ev, ThinkingEvent)
+            )
+        )
 
 
 if __name__ == "__main__":
