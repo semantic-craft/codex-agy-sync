@@ -85,6 +85,7 @@ from .ledger import (
     SearchWebPayload,
     SendMessagePayload,
     StepIndex,
+    SubagentLineage,
     SummariesStateProjection,
     SystemEvent,
     TaskBoundaryEvent,
@@ -101,6 +102,7 @@ from .ledger import (
     UserInputEvent,
     WorkspacePath,
     WorkspaceRootUri,
+    normalize_tool_file_path,
     parse_workspace_identity,
     resolve_canonical_title,
 )
@@ -173,6 +175,7 @@ __all__ = [
     "SessionSyncCursor",
     "StepIndex",
     "StepWireSpec",
+    "SubagentLineage",
     "SummariesStateProjection",
     "SyncBridge",
     "SyncDirection",
@@ -197,6 +200,7 @@ __all__ = [
     "WorkspacePath",
     "WorkspaceProjectBinding",
     "WorkspaceRootUri",
+    "normalize_tool_file_path",
     "parse_workspace_identity",
     "resolve_canonical_title",
 ]

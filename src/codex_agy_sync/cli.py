@@ -130,6 +130,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_p = subparsers.add_parser("status", help="Show workspace project bindings and discovered sessions.")
     status_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
+    status_p.add_argument(
+        "--include-subagents",
+        action="store_true",
+        help="Include spawned subagent sessions in the workspace status listing.",
+    )
 
     inspect_p = subparsers.add_parser("inspect", help="Decode and summarize a session ledger without mutating state.")
     inspect_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
@@ -191,6 +196,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=ForkResolutionPolicy.HALT_ON_DIVERGENCE.value,
         help="Divergence resolution policy.",
     )
+    sync_w.add_argument(
+        "--include-subagents",
+        action="store_true",
+        help="Synchronize spawned subagent sessions in addition to top-level sessions.",
+    )
 
     return parser
 
@@ -223,7 +233,10 @@ def main(
 
     if args.subcommand == "status":
         binding = bridge.pair_workspace(workspace_arg)
-        sessions = bridge.registry.list_workspace_sessions(binding)
+        sessions = bridge.registry.list_workspace_sessions(
+            binding,
+            include_subagents=bool(args.include_subagents),
+        )
         out = {
             "workspace": _binding_to_dict(binding),
             "sessions": [
@@ -235,6 +248,10 @@ def main(
                     "codex_turn_count": s.codex_turn_count,
                     "parent_cascade_id": str(s.parent_cascade_id) if s.parent_cascade_id else None,
                     "parent_codex_thread_id": str(s.parent_codex_thread_id) if s.parent_codex_thread_id else None,
+                    "is_subagent": s.lineage.is_subagent,
+                    "nesting_depth": s.lineage.nesting_depth,
+                    "agent_type_name": s.lineage.agent_type_name or None,
+                    "agent_role": s.lineage.agent_role or None,
                 }
                 for s in sessions
             ],
@@ -297,6 +314,7 @@ def main(
             direction=SyncDirection(args.direction),
             mode=TransportMode(args.mode),
             fork_policy=ForkResolutionPolicy(args.fork_policy),
+            include_subagents=bool(args.include_subagents),
         )
         out = {
             "synced_count": len(receipts),

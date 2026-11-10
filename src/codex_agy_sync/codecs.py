@@ -76,6 +76,7 @@ from .ledger import (
     _encode_varint,
     _encode_varint_field,
     _serialize_tool_payload_to_arguments_json,
+    normalize_tool_file_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -704,7 +705,7 @@ def _decode_tool_any_bytes(
                 end_line = _signed_int32(ival)
         return ReadFilePayload(
             kind="read_file",
-            path=path,
+            path=normalize_tool_file_path(path),
             start_line=int(start_line) if start_line is not None else None,
             end_line=int(end_line) if end_line is not None else None,
             byte_offset=int(byte_offset) if byte_offset is not None else None,
@@ -759,9 +760,29 @@ def _decode_tool_any_bytes(
                         artifact_summary = araw.decode("utf-8", errors="replace")
             elif fn == 6 and wt == 0:
                 is_artifact = bool(ival)
+        if unified_diff:
+            header_match = re.search(
+                r"^\*\*\* (Add|Update|Delete) File:\s*(.+)$",
+                unified_diff,
+                flags=re.MULTILINE,
+            )
+            if header_match:
+                if not path:
+                    path = header_match.group(2)
+                verb = header_match.group(1)
+                if verb == "Add":
+                    edit_op = "CREATE"
+                elif verb == "Delete":
+                    edit_op = "DELETE"
+                unified_diff = re.sub(
+                    r"^(\*\*\* (?:Add|Update|Delete) File:\s*)(.+)$",
+                    lambda m: m.group(1) + normalize_tool_file_path(m.group(2)),
+                    unified_diff,
+                    flags=re.MULTILINE,
+                )
         return FileEditPayload(
             kind="file_edit",
-            path=path,
+            path=normalize_tool_file_path(path),
             edit_op=edit_op,
             unified_diff=unified_diff,
             diff_stats=(additions, deletions),
@@ -810,7 +831,7 @@ def _decode_tool_any_bytes(
         return RunCommandPayload(
             kind="run_command",
             command_line=cmd,
-            cwd=cwd,
+            cwd=normalize_tool_file_path(cwd),
             exit_code=int(exit_code) if exit_code is not None else None,
             timed_out=timed_out,
             is_daemon=is_daemon,
@@ -919,7 +940,7 @@ def _decode_tool_any_bytes(
             kind="define_subagent",
             name=name,
             tool_names=tuple(tool_names),
-            agent_path=agent_path,
+            agent_path=normalize_tool_file_path(agent_path) if agent_path is not None else None,
         )
 
     if kind == "manage_subagents":
@@ -1121,7 +1142,7 @@ def _decode_tool_any_bytes(
         return GenerateImagePayload(
             kind="generate_image",
             prompt=prompt,
-            image_paths=tuple(img_paths),
+            image_paths=tuple(normalize_tool_file_path(p) for p in img_paths),
             aspect_ratio=aspect,
             image_uri=img_uri,
             model_name=model_name,
@@ -1183,7 +1204,7 @@ def _encode_tool_payload_to_any(payload: CanonicalToolPayload) -> bytes:
             inner.extend(_encode_varint_field(1, payload.file_num_lines))
         if payload.file_num_bytes:
             inner.extend(_encode_varint_field(2, payload.file_num_bytes))
-        inner.extend(_encode_string_field(3, payload.path))
+        inner.extend(_encode_string_field(3, normalize_tool_file_path(payload.path)))
         if payload.start_line is not None:
             inner.extend(_encode_varint_field(4, payload.start_line))
         if payload.end_line is not None:
@@ -1192,7 +1213,7 @@ def _encode_tool_payload_to_any(payload: CanonicalToolPayload) -> bytes:
     elif isinstance(payload, FileEditPayload):
         kind_code = 1 if payload.edit_op == "CREATE" else 3
         inner.extend(_encode_varint_field(1, kind_code))
-        inner.extend(_encode_string_field(2, payload.path))
+        inner.extend(_encode_string_field(2, normalize_tool_file_path(payload.path)))
         if payload.unified_diff:
             diff_block = _encode_unified_diff_block(payload.unified_diff)
             if diff_block:
@@ -1224,7 +1245,7 @@ def _encode_tool_payload_to_any(payload: CanonicalToolPayload) -> bytes:
         if payload.shell_name:
             inner.extend(_encode_string_field(5, payload.shell_name))
         inner.extend(_encode_string_field(6, payload.command_line))
-        inner.extend(_encode_string_field(7, payload.cwd))
+        inner.extend(_encode_string_field(7, normalize_tool_file_path(payload.cwd)))
 
     elif isinstance(payload, SearchWebPayload):
         inner.extend(_encode_string_field(1, payload.query))
@@ -1264,7 +1285,7 @@ def _encode_tool_payload_to_any(payload: CanonicalToolPayload) -> bytes:
         for tname in payload.tool_names:
             inner.extend(_encode_string_field(2, tname))
         if payload.agent_path:
-            inner.extend(_encode_string_field(3, payload.agent_path))
+            inner.extend(_encode_string_field(3, normalize_tool_file_path(payload.agent_path)))
 
     elif isinstance(payload, ManageSubagentsPayload):
         inner.extend(_encode_string_field(1, payload.action))
@@ -1319,7 +1340,7 @@ def _encode_tool_payload_to_any(payload: CanonicalToolPayload) -> bytes:
     elif isinstance(payload, GenerateImagePayload):
         inner.extend(_encode_string_field(1, payload.prompt))
         for p in payload.image_paths:
-            inner.extend(_encode_string_field(2, p))
+            inner.extend(_encode_string_field(2, normalize_tool_file_path(p)))
         inner.extend(_encode_string_field(3, payload.aspect_ratio))
         if payload.image_uri:
             inner.extend(_encode_string_field(4, payload.image_uri))
@@ -2608,10 +2629,24 @@ class TrajectoryWireCodec:
                         args_json = json.dumps(raw_args, ensure_ascii=False, sort_keys=True)
                     elif isinstance(raw_args, str):
                         if ptype == "custom_tool_call" and tname == "apply_patch" and not raw_args.strip().startswith("{"):
-                            path_match = re.search(r"\*\*\* (?:Update|Add|Delete) File:\s*(\S+)", raw_args)
-                            inferred_path = path_match.group(1) if path_match else "patch_target"
+                            path_match = re.search(
+                                r"^\*\*\* (?:Update|Add|Delete) File:\s*(.+)$",
+                                raw_args,
+                                flags=re.MULTILINE,
+                            )
+                            inferred_path = (
+                                normalize_tool_file_path(path_match.group(1))
+                                if path_match
+                                else "patch_target"
+                            )
+                            normalized_patch = re.sub(
+                                r"^(\*\*\* (?:Update|Add|Delete) File:\s*)(.+)$",
+                                lambda m: m.group(1) + normalize_tool_file_path(m.group(2)),
+                                raw_args,
+                                flags=re.MULTILINE,
+                            )
                             args_json = json.dumps(
-                                {"path": inferred_path, "unified_diff": raw_args},
+                                {"path": inferred_path, "unified_diff": normalized_patch},
                                 ensure_ascii=False,
                                 sort_keys=True,
                             )

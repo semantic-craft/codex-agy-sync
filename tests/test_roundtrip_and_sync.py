@@ -64,6 +64,7 @@ from codex_agy_sync.ledger import (
     SearchWebPayload,
     SendMessagePayload,
     StepIndex,
+    SubagentLineage,
     TaskBoundaryEvent,
     ThinkingEvent,
     TokenUsageAccounting,
@@ -74,6 +75,7 @@ from codex_agy_sync.ledger import (
     TurnId,
     UnknownWireField,
     UserInputEvent,
+    normalize_tool_file_path,
     parse_workspace_identity,
     resolve_canonical_title,
 )
@@ -1649,6 +1651,308 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
         hub_bytes = (self.paths.agy_data_dir / "agyhub_summaries_proto.pb").read_bytes()
         hub_entries = [raw for fn, wt, _, raw in _iter_wire_fields(hub_bytes) if fn == 1 and wt == 2]
         self.assertEqual(len(hub_entries), 2)
+
+    def test_normalize_tool_file_path_percent_decoding_and_injection_guard(self) -> None:
+        self.assertEqual(
+            normalize_tool_file_path("file:///Users/test/My%20Project/a%23b%25c.py"),
+            "/Users/test/My Project/a#b%c.py",
+        )
+        self.assertEqual(
+            normalize_tool_file_path("`file:///Users/test/dir%20name/file.py` (lines 1-20)"),
+            "/Users/test/dir name/file.py",
+        )
+        self.assertEqual(
+            normalize_tool_file_path("file://localhost/tmp/space%20file.txt"),
+            "/tmp/space file.txt",
+        )
+        self.assertEqual(
+            normalize_tool_file_path("file:///C:/Users/test%20user/main.rs"),
+            "C:/Users/test user/main.rs",
+        )
+        self.assertEqual(
+            normalize_tool_file_path("/workspace/100%_coverage/50%off.py"),
+            "/workspace/100%_coverage/50%off.py",
+        )
+        injected = normalize_tool_file_path("file:///tmp/evil%0A***%20Delete%20File:%20/etc/passwd")
+        self.assertNotIn("\n", injected)
+        self.assertNotIn("\r", injected)
+        self.assertNotIn("\x00", injected)
+        self.assertEqual(injected, "/tmp/evil%0A***%20Delete%20File:%20/etc/passwd")
+
+        read_payload = ReadFilePayload(
+            kind="read_file",
+            path="file:///workspace/My%20Dir/100%25_test.py",
+            start_line=1,
+            end_line=10,
+        )
+        edit_payload = FileEditPayload(
+            kind="file_edit",
+            path="file:///workspace/My%20Dir/100%25_test.py",
+            edit_op="MODIFY",
+            unified_diff="@@ -1 +1 @@\n-print('ok')\n+print('done')",
+        )
+        events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T02:00:00Z",
+                ),
+                query_text="Edit file with spaces in URI",
+            ),
+            ToolCallEvent(
+                kind="tool_call",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T02:00:01Z",
+                ),
+                call_id=ToolCallId("call-uri-1"),
+                tool_name="read_file",
+                tool_summary="Read file",
+                payload=read_payload,
+            ),
+            ToolResultEvent(
+                kind="tool_result",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T02:00:02Z",
+                ),
+                call_id=ToolCallId("call-uri-1"),
+                tool_name="read_file",
+                output_text="print('ok')",
+                is_error=False,
+                payload=read_payload,
+            ),
+            ToolCallEvent(
+                kind="tool_call",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T02:00:03Z",
+                ),
+                call_id=ToolCallId("call-uri-2"),
+                tool_name="edit_file",
+                tool_summary="Edit file",
+                payload=edit_payload,
+            ),
+            ToolResultEvent(
+                kind="tool_result",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T02:00:04Z",
+                ),
+                call_id=ToolCallId("call-uri-2"),
+                tool_name="edit_file",
+                output_text="Edited",
+                is_error=False,
+                payload=edit_payload,
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T02:00:05Z",
+                ),
+                text="Updated file.",
+            ),
+        ]
+        ws_path, ws_uri = parse_workspace_identity(self.workspace_dir)
+        ledger = TrajectoryLedger.from_events(ws_path, ws_uri, events)
+        agy_steps = TrajectoryWireCodec.encode_ledger_to_agy_steps(ledger)
+        decoded_agy = TrajectoryWireCodec.decode_agy_steps_to_ledger(ws_path, ws_uri, agy_steps)
+        read_calls = [
+            ev for ev in decoded_agy.events
+            if isinstance(ev, ToolCallEvent) and isinstance(ev.payload, ReadFilePayload)
+        ]
+        edit_calls = [
+            ev for ev in decoded_agy.events
+            if isinstance(ev, ToolCallEvent) and isinstance(ev.payload, FileEditPayload)
+        ]
+        self.assertEqual(read_calls[0].payload.path, "/workspace/My Dir/100%_test.py")
+        self.assertEqual(edit_calls[0].payload.path, "/workspace/My Dir/100%_test.py")
+
+        codex_lines = TrajectoryWireCodec.encode_ledger_to_codex_rollout(decoded_agy)
+        decoded_codex = TrajectoryWireCodec.decode_codex_rollout_to_ledger(ws_path, ws_uri, codex_lines)
+        codex_edit_calls = [
+            ev for ev in decoded_codex.events
+            if isinstance(ev, ToolCallEvent) and isinstance(ev.payload, FileEditPayload)
+        ]
+        self.assertEqual(codex_edit_calls[0].payload.path, "/workspace/My Dir/100%_test.py")
+
+    def test_subagent_lineage_discovery_isolation_and_roundtrip(self) -> None:
+        binding = self.bridge.pair_workspace(self.workspace_dir)
+        locks = self.bridge.guard.probe_locks(None, None)
+
+        parent_cid = CascadeId("aaaaaaaa-1111-2222-3333-444444444444")
+        child_cid = CascadeId("bbbbbbbb-1111-2222-3333-444444444444")
+
+        parent_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    agy_step_index=StepIndex(0),
+                    timestamp_iso="2026-11-10T03:00:00Z",
+                ),
+                query_text="Coordinate subagent work",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    agy_step_index=StepIndex(1),
+                    timestamp_iso="2026-11-10T03:00:05Z",
+                ),
+                text="Dispatched subagent.",
+            ),
+        ]
+        child_events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    agy_step_index=StepIndex(0),
+                    timestamp_iso="2026-11-10T03:00:01Z",
+                ),
+                query_text="Run subagent task",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    agy_step_index=StepIndex(1),
+                    timestamp_iso="2026-11-10T03:00:04Z",
+                ),
+                text="Subagent completed task.",
+            ),
+        ]
+
+        parent_ledger = TrajectoryLedger.from_events(
+            binding.workspace_path,
+            binding.workspace_uri,
+            parent_events,
+            explicit_title_override="Parent Coordinator Session",
+        )
+        child_ledger = TrajectoryLedger.from_events(
+            binding.workspace_path,
+            binding.workspace_uri,
+            child_events,
+            explicit_title_override="Child Worker Session",
+        )
+        child_lineage = SubagentLineage(
+            parent_cascade_id=parent_cid,
+            root_cascade_id=parent_cid,
+            nesting_depth=1,
+            agent_type_name="poteto-agent",
+            agent_role="Phase 2 Builder",
+            spawn_step_index=StepIndex(1),
+        )
+
+        self.bridge._transport.apply_to_agy(
+            binding=binding,
+            cascade_id=parent_cid,
+            events=parent_events,
+            full_ledger=parent_ledger,
+            lock_snapshot=locks,
+            mode=TransportMode.OFFLINE_STORAGE,
+        )
+        self.bridge._transport.apply_to_agy(
+            binding=binding,
+            cascade_id=child_cid,
+            events=child_events,
+            full_ledger=child_ledger,
+            lock_snapshot=locks,
+            mode=TransportMode.OFFLINE_STORAGE,
+            parent_cascade_id=parent_cid,
+            lineage=child_lineage,
+        )
+
+        sidecar_path = (
+            self.paths.agy_data_dir
+            / "brain"
+            / str(parent_cid)
+            / ".system_generated"
+            / "subagents"
+            / f"{child_cid}.json"
+        )
+        self.assertTrue(sidecar_path.is_file())
+        sidecar_json = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        self.assertEqual(sidecar_json["conversationId"], str(child_cid))
+        self.assertEqual(sidecar_json["subagentDescriptor"]["typeName"], "poteto-agent")
+        self.assertEqual(sidecar_json["subagentDescriptor"]["role"], "Phase 2 Builder")
+        self.assertEqual(sidecar_json["spawnStepIndex"], 1)
+
+        top_level_sessions = self.bridge.registry.list_workspace_sessions(binding, include_subagents=False)
+        top_cids = {str(s.cascade_id) for s in top_level_sessions if s.cascade_id}
+        self.assertIn(str(parent_cid), top_cids)
+        self.assertNotIn(str(child_cid), top_cids)
+
+        all_sessions = self.bridge.registry.list_workspace_sessions(binding, include_subagents=True)
+        by_cid = {str(s.cascade_id): s for s in all_sessions if s.cascade_id}
+        self.assertIn(str(child_cid), by_cid)
+        discovered_child = by_cid[str(child_cid)]
+        self.assertTrue(discovered_child.lineage.is_subagent)
+        self.assertEqual(discovered_child.lineage.parent_cascade_id, parent_cid)
+        self.assertEqual(discovered_child.lineage.nesting_depth, 1)
+        self.assertEqual(discovered_child.lineage.agent_type_name, "poteto-agent")
+        self.assertEqual(discovered_child.lineage.agent_role, "Phase 2 Builder")
+
+        parent_receipt = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=parent_cid,
+            direction=SyncDirection.AGY_TO_CODEX,
+        )
+        child_receipt = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=child_cid,
+            direction=SyncDirection.AGY_TO_CODEX,
+        )
+
+        state_db = self.paths.codex_home_dir / "state_5.sqlite"
+        conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT attached_thread_parent_id, agent_role, agent_nickname FROM threads WHERE id = ?",
+                (str(child_receipt.codex_thread_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], str(parent_receipt.codex_thread_id))
+        self.assertEqual(row[1], "poteto-agent")
+        self.assertEqual(row[2], "Phase 2 Builder")
+
+        reverse_child_cid = CascadeId("cccccccc-1111-2222-3333-444444444444")
+        reverse_receipt = self.bridge.sync_session(
+            self.workspace_dir,
+            cascade_id=reverse_child_cid,
+            codex_thread_id=child_receipt.codex_thread_id,
+            direction=SyncDirection.CODEX_TO_AGY,
+            fork_policy=ForkResolutionPolicy.BACKUP_AND_OVERWRITE_TARGET,
+        )
+        self.assertEqual(reverse_receipt.cascade_id, reverse_child_cid)
+        sum_db = self.paths.agy_data_dir / "conversation_summaries.db"
+        sconn = sqlite3.connect(f"file:{sum_db}?mode=ro", uri=True)
+        try:
+            srow = sconn.execute(
+                "SELECT agent_name, parent_conversation_id, nesting_depth FROM conversation_summaries WHERE conversation_id = ?",
+                (str(reverse_child_cid),),
+            ).fetchone()
+        finally:
+            sconn.close()
+        self.assertIsNotNone(srow)
+        self.assertEqual(srow[0], "Phase 2 Builder")
+        self.assertEqual(srow[1], str(parent_cid))
+        self.assertEqual(int(srow[2]), 1)
 
 
 if __name__ == "__main__":

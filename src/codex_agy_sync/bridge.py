@@ -58,6 +58,7 @@ from .ledger import (
     HostKind,
     RolloutLineNo,
     StepIndex,
+    SubagentLineage,
     TrajectoryId,
     TrajectoryLedger,
     TurnId,
@@ -380,6 +381,38 @@ class PairedSessionDescriptor:
     codex_turn_count: int
     parent_cascade_id: CascadeId | None = None
     parent_codex_thread_id: CodexThreadId | None = None
+    lineage: SubagentLineage = SubagentLineage()
+
+
+def _parse_agy_trajectory_metadata_lineage(raw_blob: bytes) -> dict[str, Any]:
+    """Decode subagent lineage fields (5, 6, 7, 8, 17, 18) from `CortexTrajectoryMetadata`."""
+    info: dict[str, Any] = {
+        "parent_conversation_id": "",
+        "root_conversation_id": "",
+        "workspace_uris": [],
+        "agent_type_name": "",
+        "agent_role": "",
+        "nesting_depth": 0,
+        "project_id": "",
+    }
+    for fn, wt, val, raw in _iter_wire_fields(raw_blob):
+        if fn == 5 and wt == 2:
+            info["parent_conversation_id"] = raw.decode("utf-8", errors="replace").strip()
+        elif fn == 6 and wt == 2:
+            info["root_conversation_id"] = raw.decode("utf-8", errors="replace").strip()
+        elif fn == 7 and wt == 2:
+            info["workspace_uris"].append(raw.decode("utf-8", errors="replace").strip())
+        elif fn == 8 and wt == 2:
+            for sfn, swt, _, sraw in _iter_wire_fields(raw):
+                if sfn == 1 and swt == 2:
+                    info["agent_type_name"] = sraw.decode("utf-8", errors="replace").strip()
+                elif sfn == 2 and swt == 2:
+                    info["agent_role"] = sraw.decode("utf-8", errors="replace").strip()
+        elif fn == 17 and wt == 0:
+            info["nesting_depth"] = max(0, int(val))
+        elif fn == 18 and wt == 2:
+            info["project_id"] = raw.decode("utf-8", errors="replace").strip()
+    return info
 
 
 class ProjectRegistry:
@@ -661,11 +694,51 @@ class ProjectRegistry:
             codex_legacy_project_id=codex_legacy_pid,
         )
 
+    def _discover_agy_subagent_sidecars(self) -> dict[str, dict[str, Any]]:
+        """Scan `brain/<parent_id>/.system_generated/subagents/<child_id>.json` sidecars."""
+        sidecars: dict[str, dict[str, Any]] = {}
+        brain_dir = self._paths.agy_data_dir / "brain"
+        if not brain_dir.is_dir():
+            return sidecars
+        for sidecar_file in sorted(brain_dir.glob("*/.system_generated/subagents/*.json")):
+            try:
+                raw = json.loads(sidecar_file.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            parent_cid = sidecar_file.parts[-4] if len(sidecar_file.parts) >= 4 else ""
+            child_cid = str(raw.get("conversationId") or sidecar_file.stem).strip()
+            if not child_cid:
+                continue
+            desc = raw.get("subagentDescriptor")
+            type_name = ""
+            role = ""
+            if isinstance(desc, dict):
+                type_name = str(desc.get("typeName") or "").strip()
+                role = str(desc.get("role") or "").strip()
+            spawn_idx_raw = raw.get("spawnStepIndex")
+            spawn_idx = StepIndex(int(spawn_idx_raw)) if isinstance(spawn_idx_raw, int) and spawn_idx_raw >= 0 else None
+            ws_uris = raw.get("workspaceUris")
+            uri_list = [str(u) for u in ws_uris] if isinstance(ws_uris, list) else []
+            sidecars[child_cid] = {
+                "parent_cascade_id": parent_cid,
+                "child_cascade_id": child_cid,
+                "agent_type_name": type_name,
+                "agent_role": role,
+                "spawn_step_index": spawn_idx,
+                "workspace_uris": uri_list,
+            }
+        return sidecars
+
     def list_workspace_sessions(
         self,
         binding: WorkspaceProjectBinding,
+        *,
+        include_subagents: bool = False,
     ) -> Tuple[PairedSessionDescriptor, ...]:
-        """List all sessions belonging to `binding` across both hosts."""
+        """List sessions belonging to `binding` across both hosts (excluding subagents by default)."""
+        sidecars = self._discover_agy_subagent_sidecars()
         agy_sessions: dict[str, dict[str, Any]] = {}
         sum_db = self._paths.agy_data_dir / "conversation_summaries.db"
         if sum_db.is_file():
@@ -674,22 +747,28 @@ class ProjectRegistry:
                 try:
                     rows = conn.execute(
                         """
-                        SELECT conversation_id, title, step_count, workspace_uris, project_id, parent_conversation_id
+                        SELECT conversation_id, title, step_count, workspace_uris, project_id,
+                               agent_name, parent_conversation_id, nesting_depth
                         FROM conversation_summaries
                         ORDER BY last_modified_time DESC
                         """
                     ).fetchall()
-                    for cid, title, scount, uris_raw, pid, parent_cid in rows:
+                    for cid, title, scount, uris_raw, pid, agent_name, parent_cid, nesting_depth in rows:
                         cid_str = str(cid or "").strip()
                         if not cid_str:
                             continue
+                        sc_info = sidecars.get(cid_str, {})
                         matches_ws = str(pid or "") == str(binding.agy_project_id)
-                        if not matches_ws and uris_raw:
-                            try:
-                                uri_list = json.loads(uris_raw) if str(uris_raw).startswith("[") else [str(uris_raw)]
-                            except Exception:
-                                uri_list = [str(uris_raw)]
-                            for u in uri_list:
+                        if not matches_ws:
+                            candidate_uris: list[str] = list(sc_info.get("workspace_uris", []))
+                            if uris_raw:
+                                try:
+                                    parsed_u = json.loads(uris_raw) if str(uris_raw).startswith("[") else [str(uris_raw)]
+                                    if isinstance(parsed_u, list):
+                                        candidate_uris.extend(str(u) for u in parsed_u)
+                                except Exception:
+                                    candidate_uris.append(str(uris_raw))
+                            for u in candidate_uris:
                                 try:
                                     _, norm_u = parse_workspace_identity(str(u))
                                     if norm_u == binding.workspace_uri:
@@ -698,11 +777,20 @@ class ProjectRegistry:
                                 except ValueError:
                                     continue
                         if matches_ws:
+                            eff_parent = str(parent_cid or sc_info.get("parent_cascade_id") or "").strip()
+                            eff_depth = max(0, int(nesting_depth or 0), 1 if eff_parent else 0)
+                            eff_role = str(sc_info.get("agent_role") or agent_name or "").strip()
+                            eff_type = str(sc_info.get("agent_type_name") or "").strip()
                             agy_sessions[cid_str] = {
                                 "cascade_id": CascadeId(cid_str),
                                 "title": str(title or "").strip() or "Untitled Session",
                                 "step_count": int(scount or 0),
-                                "parent_cascade_id": CascadeId(str(parent_cid)) if parent_cid else None,
+                                "parent_cascade_id": CascadeId(eff_parent) if eff_parent else None,
+                                "root_cascade_id": None,
+                                "nesting_depth": eff_depth,
+                                "agent_type_name": eff_type,
+                                "agent_role": eff_role,
+                                "spawn_step_index": sc_info.get("spawn_step_index"),
                             }
                 finally:
                     conn.close()
@@ -713,31 +801,92 @@ class ProjectRegistry:
         if conv_dir.is_dir():
             for db_file in sorted(conv_dir.glob("*.db")):
                 cid_str = db_file.stem
-                if cid_str in agy_sessions:
-                    continue
+                sc_info = sidecars.get(cid_str, {})
                 try:
                     conn = _open_readonly_sqlite(db_file)
                     try:
                         tblob = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()
-                        matches_ws = False
-                        if tblob and tblob[0]:
-                            for fn, wt, _, raw in _iter_wire_fields(bytes(tblob[0])):
-                                if fn == 18 and wt == 2 and raw.decode("utf-8", errors="replace") == str(binding.agy_project_id):
-                                    matches_ws = True
-                                elif fn == 7 and wt == 2:
-                                    try:
-                                        _, norm_u = parse_workspace_identity(raw.decode("utf-8", errors="replace"))
-                                        if norm_u == binding.workspace_uri:
-                                            matches_ws = True
-                                    except ValueError:
-                                        pass
+                        meta_info = (
+                            _parse_agy_trajectory_metadata_lineage(bytes(tblob[0]))
+                            if (tblob and tblob[0])
+                            else {
+                                "parent_conversation_id": "",
+                                "root_conversation_id": "",
+                                "workspace_uris": [],
+                                "agent_type_name": "",
+                                "agent_role": "",
+                                "nesting_depth": 0,
+                                "project_id": "",
+                            }
+                        )
+                        if cid_str in agy_sessions:
+                            entry = agy_sessions[cid_str]
+                            eff_parent_str = (
+                                str(entry["parent_cascade_id"] or "")
+                                or meta_info["parent_conversation_id"]
+                                or str(sc_info.get("parent_cascade_id") or "")
+                            ).strip()
+                            eff_root_str = (meta_info["root_conversation_id"] or eff_parent_str).strip()
+                            entry["parent_cascade_id"] = CascadeId(eff_parent_str) if eff_parent_str else None
+                            entry["root_cascade_id"] = CascadeId(eff_root_str) if eff_root_str else None
+                            entry["nesting_depth"] = max(
+                                int(entry["nesting_depth"]),
+                                int(meta_info["nesting_depth"]),
+                                1 if eff_parent_str else 0,
+                            )
+                            entry["agent_type_name"] = (
+                                entry["agent_type_name"]
+                                or meta_info["agent_type_name"]
+                                or str(sc_info.get("agent_type_name") or "")
+                            ).strip()
+                            entry["agent_role"] = (
+                                entry["agent_role"]
+                                or meta_info["agent_role"]
+                                or str(sc_info.get("agent_role") or "")
+                            ).strip()
+                            continue
+
+                        matches_ws = meta_info["project_id"] == str(binding.agy_project_id)
+                        if not matches_ws:
+                            for raw_u in list(meta_info["workspace_uris"]) + list(sc_info.get("workspace_uris", [])):
+                                try:
+                                    _, norm_u = parse_workspace_identity(raw_u)
+                                    if norm_u == binding.workspace_uri:
+                                        matches_ws = True
+                                        break
+                                except ValueError:
+                                    pass
+                        eff_parent_str = (
+                            meta_info["parent_conversation_id"]
+                            or str(sc_info.get("parent_cascade_id") or "")
+                        ).strip()
+                        if not matches_ws and eff_parent_str and eff_parent_str in agy_sessions:
+                            matches_ws = True
                         if matches_ws:
                             scount_row = conn.execute("SELECT COUNT(*) FROM steps").fetchone()
+                            eff_root_str = (meta_info["root_conversation_id"] or eff_parent_str).strip()
+                            eff_depth = max(
+                                int(meta_info["nesting_depth"]),
+                                1 if eff_parent_str else 0,
+                            )
+                            eff_type = (
+                                meta_info["agent_type_name"]
+                                or str(sc_info.get("agent_type_name") or "")
+                            ).strip()
+                            eff_role = (
+                                meta_info["agent_role"]
+                                or str(sc_info.get("agent_role") or "")
+                            ).strip()
                             agy_sessions[cid_str] = {
                                 "cascade_id": CascadeId(cid_str),
-                                "title": "Untitled Session",
+                                "title": eff_role or "Untitled Session",
                                 "step_count": int(scount_row[0]) if scount_row else 0,
-                                "parent_cascade_id": None,
+                                "parent_cascade_id": CascadeId(eff_parent_str) if eff_parent_str else None,
+                                "root_cascade_id": CascadeId(eff_root_str) if eff_root_str else None,
+                                "nesting_depth": eff_depth,
+                                "agent_type_name": eff_type,
+                                "agent_role": eff_role,
+                                "spawn_step_index": sc_info.get("spawn_step_index"),
                             }
                     finally:
                         conn.close()
@@ -752,13 +901,14 @@ class ProjectRegistry:
                 try:
                     rows = conn.execute(
                         """
-                        SELECT id, title, preview, cwd, project_id, attached_thread_parent_id, rollout_path
+                        SELECT id, title, preview, cwd, project_id, attached_thread_parent_id,
+                               rollout_path, agent_nickname, agent_role
                         FROM threads
                         WHERE archived = 0
                         ORDER BY recency_at_ms DESC, updated_at DESC
                         """
                     ).fetchall()
-                    for tid, title, preview, cwd, pid, parent_tid, rpath in rows:
+                    for tid, title, preview, cwd, pid, parent_tid, rpath, agent_nickname, agent_role in rows:
                         tid_str = str(tid or "").strip()
                         if not tid_str:
                             continue
@@ -784,11 +934,14 @@ class ProjectRegistry:
                                     )
                                 except Exception:
                                     turn_count = 1
+                            parent_tid_str = str(parent_tid or "").strip()
                             codex_sessions[tid_str] = {
                                 "codex_thread_id": CodexThreadId(tid_str),
                                 "title": str(title or preview or "").strip() or "Untitled Session",
                                 "turn_count": turn_count,
-                                "parent_codex_thread_id": CodexThreadId(str(parent_tid)) if parent_tid else None,
+                                "parent_codex_thread_id": CodexThreadId(parent_tid_str) if parent_tid_str else None,
+                                "agent_type_name": str(agent_role or "").strip(),
+                                "agent_role": str(agent_nickname or "").strip(),
                             }
                 finally:
                     conn.close()
@@ -798,6 +951,26 @@ class ProjectRegistry:
         descriptors: list[PairedSessionDescriptor] = []
         paired_agy: set[str] = set()
         paired_codex: set[str] = set()
+
+        def _make_lineage(
+            agy_info: Mapping[str, Any],
+            codex_info: Mapping[str, Any],
+        ) -> SubagentLineage:
+            p_cid: CascadeId | None = agy_info.get("parent_cascade_id")
+            r_cid: CascadeId | None = agy_info.get("root_cascade_id") or p_cid
+            p_tid: CodexThreadId | None = codex_info.get("parent_codex_thread_id")
+            depth = int(agy_info.get("nesting_depth") or 0)
+            if depth == 0 and (p_cid is not None or p_tid is not None):
+                depth = 1
+            return SubagentLineage(
+                parent_cascade_id=p_cid,
+                root_cascade_id=r_cid,
+                parent_codex_thread_id=p_tid,
+                nesting_depth=depth,
+                agent_type_name=str(agy_info.get("agent_type_name") or codex_info.get("agent_type_name") or ""),
+                agent_role=str(agy_info.get("agent_role") or codex_info.get("agent_role") or ""),
+                spawn_step_index=agy_info.get("spawn_step_index"),
+            )
 
         cursors_dir = self._paths.sync_state_dir / "cursors"
         if cursors_dir.is_dir():
@@ -816,6 +989,9 @@ class ProjectRegistry:
                 paired_codex.add(tid_str)
                 agy_info = agy_sessions.get(cid_str, {})
                 codex_info = codex_sessions.get(tid_str, {})
+                lineage = _make_lineage(agy_info, codex_info)
+                if not include_subagents and lineage.is_subagent:
+                    continue
                 descriptors.append(
                     PairedSessionDescriptor(
                         workspace=binding,
@@ -824,13 +1000,17 @@ class ProjectRegistry:
                         title=str(agy_info.get("title") or codex_info.get("title") or "Synced Session"),
                         agy_step_count=int(agy_info.get("step_count", 0)),
                         codex_turn_count=int(codex_info.get("turn_count", 0)),
-                        parent_cascade_id=agy_info.get("parent_cascade_id"),
-                        parent_codex_thread_id=codex_info.get("parent_codex_thread_id"),
+                        parent_cascade_id=lineage.parent_cascade_id,
+                        parent_codex_thread_id=lineage.parent_codex_thread_id,
+                        lineage=lineage,
                     )
                 )
 
         for cid_str, ainfo in agy_sessions.items():
             if cid_str in paired_agy:
+                continue
+            lineage = _make_lineage(ainfo, {})
+            if not include_subagents and lineage.is_subagent:
                 continue
             descriptors.append(
                 PairedSessionDescriptor(
@@ -840,12 +1020,16 @@ class ProjectRegistry:
                     title=ainfo["title"],
                     agy_step_count=ainfo["step_count"],
                     codex_turn_count=0,
-                    parent_cascade_id=ainfo["parent_cascade_id"],
+                    parent_cascade_id=lineage.parent_cascade_id,
+                    lineage=lineage,
                 )
             )
 
         for tid_str, cinfo in codex_sessions.items():
             if tid_str in paired_codex:
+                continue
+            lineage = _make_lineage({}, cinfo)
+            if not include_subagents and lineage.is_subagent:
                 continue
             descriptors.append(
                 PairedSessionDescriptor(
@@ -855,7 +1039,8 @@ class ProjectRegistry:
                     title=cinfo["title"],
                     agy_step_count=0,
                     codex_turn_count=cinfo["turn_count"],
-                    parent_codex_thread_id=cinfo["parent_codex_thread_id"],
+                    parent_codex_thread_id=lineage.parent_codex_thread_id,
+                    lineage=lineage,
                 )
             )
 
@@ -1615,6 +1800,7 @@ class HostTransportPort(Protocol):
         parent_cascade_id: CascadeId | None = None,
         source_tag: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
         incremental: bool = False,
+        lineage: SubagentLineage | None = None,
     ) -> CascadeId:
         """Write delta events and companion projections to Antigravity."""
         ...
@@ -1629,6 +1815,7 @@ class HostTransportPort(Protocol):
         mode: TransportMode,
         parent_thread_id: CodexThreadId | None = None,
         incremental: bool = False,
+        lineage: SubagentLineage | None = None,
     ) -> CodexThreadId:
         """Write delta events and thread index metadata to Codex."""
         ...
@@ -1813,10 +2000,35 @@ class DefaultHostTransport:
         parent_cascade_id: CascadeId | None = None,
         source_tag: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
         incremental: bool = False,
+        lineage: SubagentLineage | None = None,
     ) -> CascadeId:
         _ = (lock_snapshot, mode)
         target_cid = cascade_id or CascadeId(str(uuid.uuid4()))
         traj_id = TrajectoryId(_deterministic_uuid("agy-trajectory", str(target_cid)))
+
+        effective_parent_cid = parent_cascade_id or (
+            lineage.parent_cascade_id if lineage is not None else None
+        )
+        effective_root_cid = (
+            (lineage.root_cascade_id if lineage is not None else None)
+            or effective_parent_cid
+        )
+        effective_depth = (
+            lineage.nesting_depth
+            if lineage is not None
+            else (1 if effective_parent_cid is not None else 0)
+        )
+        effective_type_name = lineage.agent_type_name if lineage is not None else ""
+        effective_role = lineage.agent_role if lineage is not None else ""
+        effective_lineage = SubagentLineage(
+            parent_cascade_id=effective_parent_cid,
+            root_cascade_id=effective_root_cid,
+            parent_codex_thread_id=lineage.parent_codex_thread_id if lineage is not None else None,
+            nesting_depth=effective_depth,
+            agent_type_name=effective_type_name,
+            agent_role=effective_role,
+            spawn_step_index=lineage.spawn_step_index if lineage is not None else None,
+        )
 
         conv_dir = self._paths.agy_data_dir / "conversations"
         conv_dir.mkdir(parents=True, exist_ok=True)
@@ -1881,8 +2093,11 @@ class DefaultHostTransport:
                 project_id=binding.agy_project_id,
                 workspace_uris=(binding.workspace_uri,),
                 created_at_iso=created_iso,
-                nesting_depth=0,
-                parent_conversation_id=str(parent_cascade_id or ""),
+                nesting_depth=effective_depth,
+                parent_conversation_id=str(effective_parent_cid or ""),
+                root_conversation_id=str(effective_root_cid or ""),
+                agent_type_name=effective_type_name,
+                agent_role=effective_role,
             )
 
             conn.execute(
@@ -1917,7 +2132,35 @@ class DefaultHostTransport:
             project_id=binding.agy_project_id,
             viewed_at_iso=viewed_iso,
             source=source_tag,
+            lineage=effective_lineage,
         )
+
+        if effective_parent_cid is not None and (
+            effective_depth > 0 or effective_type_name or effective_role
+        ):
+            sidecar_path = (
+                self._paths.agy_data_dir
+                / "brain"
+                / str(effective_parent_cid)
+                / ".system_generated"
+                / "subagents"
+                / f"{target_cid}.json"
+            )
+            sidecar_doc: dict[str, Any] = {
+                "conversationId": str(target_cid),
+                "subagentDescriptor": {
+                    "typeName": effective_type_name or "self",
+                    "role": effective_role or summary_proj.title,
+                },
+                "state": "SUBAGENT_STATE_ALIVE",
+                "workspaceUris": [str(binding.workspace_uri)],
+            }
+            if effective_lineage.spawn_step_index is not None:
+                sidecar_doc["spawnStepIndex"] = int(effective_lineage.spawn_step_index)
+            _atomic_write_text(
+                sidecar_path,
+                json.dumps(sidecar_doc, ensure_ascii=False, separators=(",", ":")) + "\n",
+            )
 
         last_user_time = summary_proj.created_at_iso
         last_user_idx = -1
@@ -1939,7 +2182,7 @@ class DefaultHostTransport:
                     parent_conversation_id, nesting_depth, battle_id, winning_conversation_id,
                     not_fully_idle, killed, last_user_input_time, last_user_input_step_index,
                     app_data_dir, raw_summary, group_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'CASCADE_RUN_STATUS_IDLE', ?, ?, '', ?, 0, '', '', 0, 0, ?, ?, ?, ?, '')
+                ) VALUES (?, ?, ?, ?, ?, ?, 'CASCADE_RUN_STATUS_IDLE', ?, ?, ?, ?, ?, '', '', 0, 0, ?, ?, ?, ?, '')
                 """,
                 (
                     str(target_cid),
@@ -1950,7 +2193,9 @@ class DefaultHostTransport:
                     json.dumps([str(u) for u in summary_proj.workspace_uris]),
                     summary_proj.source.summary_column_name,
                     str(summary_proj.project_id),
-                    str(parent_cascade_id or ""),
+                    summary_proj.agent_name,
+                    str(effective_parent_cid or ""),
+                    summary_proj.nesting_depth,
                     last_user_time,
                     last_user_idx,
                     str(self._paths.agy_data_dir),
@@ -1986,9 +2231,20 @@ class DefaultHostTransport:
         mode: TransportMode,
         parent_thread_id: CodexThreadId | None = None,
         incremental: bool = False,
+        lineage: SubagentLineage | None = None,
     ) -> CodexThreadId:
         _ = (lock_snapshot, mode)
         target_tid = thread_id or CodexThreadId(str(uuid.uuid4()))
+
+        effective_parent_tid = parent_thread_id or (
+            lineage.parent_codex_thread_id if lineage is not None else None
+        )
+        effective_agent_role = (
+            (lineage.agent_type_name or None) if lineage is not None else None
+        )
+        effective_agent_nickname = (
+            (lineage.agent_role or None) if lineage is not None else None
+        )
 
         state_db = self._paths.codex_home_dir / "state_5.sqlite"
         existing_rollout: Path | None = None
@@ -2065,10 +2321,10 @@ class DefaultHostTransport:
                 INSERT OR REPLACE INTO threads (
                     id, rollout_path, created_at, updated_at, source, model_provider,
                     cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event,
-                    archived, cli_version, first_user_message, created_at_ms, updated_at_ms,
-                    preview, recency_at, recency_at_ms, name, project_id, originator,
-                    attached_thread_parent_id
-                ) VALUES (?, ?, ?, ?, 'desktop', 'openai', ?, ?, 'workspace-write', 'never', 0, 1, 0, '0.166.0', ?, ?, ?, ?, ?, ?, ?, ?, 'codex_vscode', ?)
+                    archived, cli_version, first_user_message, agent_nickname, agent_role,
+                    created_at_ms, updated_at_ms, preview, recency_at, recency_at_ms,
+                    name, project_id, originator, attached_thread_parent_id
+                ) VALUES (?, ?, ?, ?, 'desktop', 'openai', ?, ?, 'workspace-write', 'never', 0, 1, 0, '0.166.0', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'codex_vscode', ?)
                 """,
                 (
                     str(target_tid),
@@ -2078,6 +2334,8 @@ class DefaultHostTransport:
                     str(thread_proj.cwd),
                     thread_proj.title,
                     thread_proj.preview,
+                    effective_agent_nickname,
+                    effective_agent_role,
                     thread_proj.created_at_ms,
                     thread_proj.updated_at_ms,
                     thread_proj.preview,
@@ -2085,7 +2343,7 @@ class DefaultHostTransport:
                     thread_proj.updated_at_ms,
                     thread_proj.title,
                     str(binding.codex_project_id),
-                    str(parent_thread_id) if parent_thread_id else None,
+                    str(effective_parent_tid) if effective_parent_tid else None,
                 ),
             )
             conn.commit()
@@ -2321,6 +2579,123 @@ class SyncBridge:
             return self._transport.read_codex_ledger(binding, codex_thread_id, locks, mode)
         raise ValueError("Must provide either cascade_id or codex_thread_id to inspect_session_ledger.")
 
+    def _resolve_session_lineage(
+        self,
+        binding: WorkspaceProjectBinding,
+        cascade_id: CascadeId | None,
+        codex_thread_id: CodexThreadId | None,
+    ) -> SubagentLineage:
+        parent_cid_str = ""
+        root_cid_str = ""
+        parent_tid_str = ""
+        depth = 0
+        type_name = ""
+        role = ""
+        spawn_idx: StepIndex | None = None
+
+        if cascade_id is not None:
+            cid_key = str(cascade_id)
+            sidecars = self._registry._discover_agy_subagent_sidecars()
+            sc_info = sidecars.get(cid_key, {})
+            if sc_info:
+                parent_cid_str = str(sc_info.get("parent_cascade_id") or "").strip()
+                type_name = str(sc_info.get("agent_type_name") or "").strip()
+                role = str(sc_info.get("agent_role") or "").strip()
+                spawn_idx = sc_info.get("spawn_step_index")
+
+            sum_db = self._paths.agy_data_dir / "conversation_summaries.db"
+            if sum_db.is_file():
+                try:
+                    conn = _open_readonly_sqlite(sum_db)
+                    try:
+                        row = conn.execute(
+                            "SELECT agent_name, parent_conversation_id, nesting_depth FROM conversation_summaries WHERE conversation_id = ?",
+                            (cid_key,),
+                        ).fetchone()
+                        if row:
+                            if not role and row[0]:
+                                role = str(row[0]).strip()
+                            if not parent_cid_str and row[1]:
+                                parent_cid_str = str(row[1]).strip()
+                            depth = max(depth, int(row[2] or 0))
+                    finally:
+                        conn.close()
+                except sqlite3.OperationalError:
+                    pass
+
+            conv_db = self._paths.agy_data_dir / "conversations" / f"{cid_key}.db"
+            if conv_db.is_file():
+                try:
+                    conn = _open_readonly_sqlite(conv_db)
+                    try:
+                        tblob = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()
+                        if tblob and tblob[0]:
+                            meta_info = _parse_agy_trajectory_metadata_lineage(bytes(tblob[0]))
+                            if not parent_cid_str and meta_info["parent_conversation_id"]:
+                                parent_cid_str = meta_info["parent_conversation_id"]
+                            if not root_cid_str and meta_info["root_conversation_id"]:
+                                root_cid_str = meta_info["root_conversation_id"]
+                            if not type_name and meta_info["agent_type_name"]:
+                                type_name = meta_info["agent_type_name"]
+                            if not role and meta_info["agent_role"]:
+                                role = meta_info["agent_role"]
+                            depth = max(depth, int(meta_info["nesting_depth"]))
+                    finally:
+                        conn.close()
+                except sqlite3.OperationalError:
+                    pass
+
+        if codex_thread_id is not None:
+            tid_key = str(codex_thread_id)
+            state_db = self._paths.codex_home_dir / "state_5.sqlite"
+            if state_db.is_file():
+                try:
+                    conn = _open_readonly_sqlite(state_db)
+                    try:
+                        row = conn.execute(
+                            "SELECT attached_thread_parent_id, agent_role, agent_nickname FROM threads WHERE id = ?",
+                            (tid_key,),
+                        ).fetchone()
+                        if row:
+                            if row[0] and str(row[0]).strip():
+                                parent_tid_str = str(row[0]).strip()
+                            if not type_name and row[1] and str(row[1]).strip():
+                                type_name = str(row[1]).strip()
+                            if not role and row[2] and str(row[2]).strip():
+                                role = str(row[2]).strip()
+                    finally:
+                        conn.close()
+                except sqlite3.OperationalError:
+                    pass
+
+        if parent_cid_str and not parent_tid_str:
+            p_cursor = self._load_cursor(binding.workspace_uri, CascadeId(parent_cid_str), None)
+            if p_cursor is not None:
+                parent_tid_str = str(p_cursor.codex_thread_id)
+            else:
+                parent_tid_str = _deterministic_uuid("paired-codex-thread", parent_cid_str)
+        elif parent_tid_str and not parent_cid_str:
+            p_cursor = self._load_cursor(binding.workspace_uri, None, CodexThreadId(parent_tid_str))
+            if p_cursor is not None:
+                parent_cid_str = str(p_cursor.cascade_id)
+            else:
+                parent_cid_str = _deterministic_uuid("paired-cascade", parent_tid_str)
+
+        if (parent_cid_str or parent_tid_str) and depth == 0:
+            depth = 1
+        if parent_cid_str and not root_cid_str:
+            root_cid_str = parent_cid_str
+
+        return SubagentLineage(
+            parent_cascade_id=CascadeId(parent_cid_str) if parent_cid_str else None,
+            root_cascade_id=CascadeId(root_cid_str) if root_cid_str else None,
+            parent_codex_thread_id=CodexThreadId(parent_tid_str) if parent_tid_str else None,
+            nesting_depth=depth,
+            agent_type_name=type_name,
+            agent_role=role,
+            spawn_step_index=spawn_idx,
+        )
+
     def sync_session(
         self,
         workspace: str | Path,
@@ -2340,6 +2715,8 @@ class SyncBridge:
                 cascade_id = cursor.cascade_id
             if codex_thread_id is None:
                 codex_thread_id = cursor.codex_thread_id
+
+        lineage = self._resolve_session_lineage(binding, cascade_id, codex_thread_id)
 
         probe_cid = cascade_id or (
             CascadeId(_deterministic_uuid("paired-cascade", str(codex_thread_id)))
@@ -2454,8 +2831,10 @@ class SyncBridge:
                     full_ledger=merged_for_agy,
                     lock_snapshot=locks,
                     mode=transition.selected_transport,
+                    parent_cascade_id=lineage.parent_cascade_id,
                     source_tag=source_tag,
                     incremental=isinstance(transition, IncrementalAppendTransition),
+                    lineage=lineage,
                 )
                 refreshed_agy = self._transport.read_agy_ledger(
                     binding, written_cid, locks, transition.selected_transport
@@ -2516,7 +2895,9 @@ class SyncBridge:
                 full_ledger=merged_for_codex,
                 lock_snapshot=locks,
                 mode=transition.selected_transport,
+                parent_thread_id=lineage.parent_codex_thread_id,
                 incremental=isinstance(transition, IncrementalAppendTransition),
+                lineage=lineage,
             )
             refreshed_codex = self._transport.read_codex_ledger(
                 binding, written_tid, locks, transition.selected_transport
@@ -2675,8 +3056,10 @@ class SyncBridge:
                 full_ledger=overwrite_for_agy,
                 lock_snapshot=locks,
                 mode=transition.selected_transport,
+                parent_cascade_id=lineage.parent_cascade_id,
                 source_tag=source_tag,
                 incremental=False,
+                lineage=lineage,
             )
             refreshed_agy = self._transport.read_agy_ledger(
                 binding, written_cid, locks, transition.selected_transport
@@ -2723,7 +3106,9 @@ class SyncBridge:
             full_ledger=overwrite_for_codex,
             lock_snapshot=locks,
             mode=transition.selected_transport,
+            parent_thread_id=lineage.parent_codex_thread_id,
             incremental=False,
+            lineage=lineage,
         )
         refreshed_codex = self._transport.read_codex_ledger(
             binding, written_tid, locks, transition.selected_transport
@@ -2761,10 +3146,14 @@ class SyncBridge:
         direction: SyncDirection = SyncDirection.AUTO_INCREMENTAL,
         mode: TransportMode = TransportMode.AUTO,
         fork_policy: ForkResolutionPolicy = ForkResolutionPolicy.HALT_ON_DIVERGENCE,
+        include_subagents: bool = False,
     ) -> Tuple[SyncReceipt, ...]:
         """Discover and synchronize all sessions in `workspace`."""
         binding = self.pair_workspace(workspace)
-        sessions = self._registry.list_workspace_sessions(binding)
+        sessions = self._registry.list_workspace_sessions(
+            binding,
+            include_subagents=include_subagents,
+        )
         receipts: list[SyncReceipt] = []
         for desc in sessions:
             if direction == SyncDirection.AGY_TO_CODEX and desc.cascade_id is None:

@@ -123,6 +123,55 @@ def parse_workspace_identity(raw_path_or_uri: str | Path) -> tuple[WorkspacePath
     return WorkspacePath(resolved), WorkspaceRootUri(uri)
 
 
+def normalize_tool_file_path(raw_path: str) -> str:
+    """Normalize a tool file path or `file://` URI at the codec boundary.
+
+    Invariants (per `principle-boundary-discipline`):
+    1. Strips surrounding whitespace, raw control characters (`\\n`, `\\r`, `\\x00`),
+       backtick wrappers (e.g., `` `file:///a/b.py` (lines 1-10) ``), and trailing
+       whitespace-separated annotations on `file://` URIs.
+    2. Strips `file://` / `file://localhost/` scheme prefixes (including Windows
+       `file:///C:/...` -> `C:/...`) and percent-decodes (`unquote`) only when a
+       `file://` scheme was present so literal `%` characters in plain filenames
+       (`100%_coverage.py`) remain intact.
+    3. Rejects percent-decoded strings that introduce `\\n`, `\\r`, or `\\x00`
+       (`%0A`, `%0D`, `%00`) so crafted `file://` URIs can never inject lines into
+       Codex `*** Update File: <path>` patch headers or `transcript.jsonl`.
+    """
+    if not raw_path:
+        return ""
+    cleaned = (
+        str(raw_path)
+        .replace("\r", "")
+        .replace("\n", "")
+        .replace("\x00", "")
+        .strip()
+    )
+    if not cleaned:
+        return ""
+    if cleaned.startswith("`"):
+        end_bt = cleaned.find("`", 1)
+        if end_bt != -1:
+            cleaned = cleaned[1:end_bt].strip()
+        else:
+            cleaned = cleaned.strip("`").strip()
+
+    if cleaned.lower().startswith("file://"):
+        token = cleaned.split()[0]
+        rest = token[7:]
+        if rest.lower().startswith("localhost/"):
+            rest = rest[9:]
+        if len(rest) >= 3 and rest[0] == "/" and rest[1].isalpha() and rest[2] == ":":
+            rest = rest[1:]
+        decoded = unquote(rest)
+        if any(ctrl in decoded for ctrl in ("\n", "\r", "\x00")):
+            return rest.replace("\n", "").replace("\r", "").replace("\x00", "")
+        return decoded
+
+    return cleaned
+
+
+
 # ---------------------------------------------------------------------------
 # Sidebar-Safe Source, Lossless Wire Envelopes & Provenance Types
 # ---------------------------------------------------------------------------
@@ -228,6 +277,38 @@ class MediaAttachment:
     uri: str
     byte_size: int | None = None
     caption: str | None = None
+
+
+@dataclass(frozen=True)
+class SubagentLineage:
+    """Parent-child subagent lineage across Antigravity and Codex.
+
+    Invariants (per `principle-model-the-domain`):
+    - `nesting_depth >= 0`.
+    - `is_subagent` is True whenever `nesting_depth > 0`, `parent_cascade_id` is set,
+      or `parent_codex_thread_id` is set.
+    """
+
+    parent_cascade_id: CascadeId | None = None
+    root_cascade_id: CascadeId | None = None
+    parent_codex_thread_id: CodexThreadId | None = None
+    nesting_depth: int = 0
+    agent_type_name: str = ""
+    agent_role: str = ""
+    spawn_step_index: StepIndex | None = None
+
+    def __post_init__(self) -> None:
+        if self.nesting_depth < 0:
+            raise ValueError("SubagentLineage.nesting_depth must be >= 0.")
+
+    @property
+    def is_subagent(self) -> bool:
+        return (
+            self.nesting_depth > 0
+            or self.parent_cascade_id is not None
+            or self.parent_codex_thread_id is not None
+        )
+
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +744,9 @@ def _encode_trajectory_metadata_proto(
     created_at_iso: str,
     nesting_depth: int = 0,
     parent_conversation_id: str = "",
+    root_conversation_id: str = "",
+    agent_type_name: str = "",
+    agent_role: str = "",
 ) -> bytes:
     buf = bytearray()
     for uri in workspace_uris:
@@ -673,8 +757,13 @@ def _encode_trajectory_metadata_proto(
         buf.extend(_encode_bytes_field(2, ts_bytes))
     if parent_conversation_id:
         buf.extend(_encode_string_field(5, parent_conversation_id))
+    if root_conversation_id:
+        buf.extend(_encode_string_field(6, root_conversation_id))
     for uri in workspace_uris:
         buf.extend(_encode_string_field(7, str(uri)))
+    if agent_type_name or agent_role:
+        spec_buf = _encode_string_field(1, agent_type_name) + _encode_string_field(2, agent_role)
+        buf.extend(_encode_bytes_field(8, spec_buf))
     if nesting_depth != 0:
         buf.extend(_encode_varint_field(17, nesting_depth))
     if project_id:
@@ -709,6 +798,10 @@ def _encode_cascade_summary_proto(proj: CascadeSummaryProjection) -> bytes:
         workspace_uris=proj.workspace_uris,
         created_at_iso=proj.created_at_iso,
         nesting_depth=proj.nesting_depth,
+        parent_conversation_id=str(proj.parent_cascade_id or ""),
+        root_conversation_id=str(proj.root_cascade_id or ""),
+        agent_type_name=proj.agent_type_name,
+        agent_role=proj.agent_role,
     )
     if traj_meta_bytes:
         buf.extend(_encode_bytes_field(17, traj_meta_bytes))
@@ -929,7 +1022,8 @@ class CascadeSummaryProjection:
     Invariants:
     - `project_id` is a valid non-CLI `AgyProjectId`.
     - `source` is an `AgyGuiSafeSource` (never enum `17`).
-    - `nesting_depth == 0` and `workspace_uris` is non-empty.
+    - `nesting_depth >= 0` (`0` for top-level sidebar sessions, `> 0` for mounted subagents)
+      and `workspace_uris` is non-empty.
     - `title` is identical across `annotations/<id>.pbtxt`, `CascadeTrajectorySummary.annotations.title`,
       and `conversation_summaries.title`.
     """
@@ -944,7 +1038,12 @@ class CascadeSummaryProjection:
     created_at_iso: str
     updated_at_iso: str
     annotations: AnnotationPbtxtProjection
-    nesting_depth: Literal[0] = 0
+    nesting_depth: int = 0
+    parent_cascade_id: CascadeId | None = None
+    root_cascade_id: CascadeId | None = None
+    agent_name: str = ""
+    agent_type_name: str = ""
+    agent_role: str = ""
     summary_proto_bytes: bytes = b""
 
     def __post_init__(self) -> None:
@@ -952,8 +1051,8 @@ class CascadeSummaryProjection:
             raise ValueError(f"Forbidden Antigravity project_id {self.project_id!r}.")
         if not self.workspace_uris:
             raise ValueError("CascadeSummaryProjection requires non-empty workspace_uris.")
-        if self.nesting_depth != 0:
-            raise ValueError("CascadeSummaryProjection requires nesting_depth == 0.")
+        if self.nesting_depth < 0:
+            raise ValueError("CascadeSummaryProjection requires nesting_depth >= 0.")
         if not isinstance(self.source, AgyGuiSafeSource) or self.source.proto_enum_value == 17:
             raise ValueError(f"Illegal CLI trajectory source {self.source!r}.")
         if not self.summary_proto_bytes:
@@ -1139,6 +1238,16 @@ def _serialize_tool_payload_to_arguments_json(payload: CanonicalToolPayload) -> 
         return payload.arguments_json or "{}"
     data = dataclasses.asdict(payload)
     data.pop("kind", None)
+    if isinstance(payload, ReadFilePayload):
+        data["path"] = normalize_tool_file_path(payload.path)
+    elif isinstance(payload, FileEditPayload):
+        data["path"] = normalize_tool_file_path(payload.path)
+    elif isinstance(payload, RunCommandPayload):
+        data["cwd"] = normalize_tool_file_path(payload.cwd)
+    elif isinstance(payload, DefineSubagentPayload) and payload.agent_path is not None:
+        data["agent_path"] = normalize_tool_file_path(payload.agent_path)
+    elif isinstance(payload, GenerateImagePayload):
+        data["image_paths"] = [normalize_tool_file_path(p) for p in payload.image_paths]
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -1582,6 +1691,7 @@ class TrajectoryLedger:
         project_id: AgyProjectId,
         viewed_at_iso: str | None = None,
         source: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
+        lineage: SubagentLineage | None = None,
     ) -> CascadeSummaryProjection:
         """Project `CascadeTrajectorySummary` with 3-way title and sidebar-visibility invariants enforced."""
         created_iso = self.events[0].anchor.timestamp_iso if self.events else "2026-01-01T00:00:00Z"
@@ -1591,6 +1701,12 @@ class TrajectoryLedger:
         )
         annot = self.project_annotation_pbtxt(cascade_id=cascade_id, viewed_at_iso=updated_iso)
         preview = self._derive_preview_text()
+        depth = lineage.nesting_depth if lineage is not None else 0
+        parent_cid = lineage.parent_cascade_id if lineage is not None else None
+        root_cid = (lineage.root_cascade_id or parent_cid) if lineage is not None else None
+        type_name = lineage.agent_type_name if lineage is not None else ""
+        role = lineage.agent_role if lineage is not None else ""
+        agent_name = role or type_name
         return CascadeSummaryProjection(
             cascade_id=cascade_id,
             project_id=project_id,
@@ -1602,7 +1718,12 @@ class TrajectoryLedger:
             created_at_iso=created_iso,
             updated_at_iso=updated_iso,
             annotations=annot,
-            nesting_depth=0,
+            nesting_depth=depth,
+            parent_cascade_id=parent_cid,
+            root_cascade_id=root_cid,
+            agent_name=agent_name,
+            agent_type_name=type_name,
+            agent_role=role,
         )
 
     def project_agy_summary(
@@ -1611,6 +1732,7 @@ class TrajectoryLedger:
         project_id: AgyProjectId,
         viewed_at_iso: str | None = None,
         source: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
+        lineage: SubagentLineage | None = None,
     ) -> CascadeSummaryProjection:
         """Alias for `project_agy_cascade_summary`."""
         return self.project_agy_cascade_summary(
@@ -1618,6 +1740,7 @@ class TrajectoryLedger:
             project_id=project_id,
             viewed_at_iso=viewed_at_iso,
             source=source,
+            lineage=lineage,
         )
 
     def project_agy_hub_summaries_state(
