@@ -1,0 +1,835 @@
+{
+  "antigravity_desktop_2_30": {
+    "conversation_summaries_db_source_column": {
+      "cli_hidden_values": [
+        "CORTEX_TRAJECTORY_SOURCE_CLI"
+      ],
+      "desktop_visible_values": [
+        "",
+        "CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT",
+        "CORTEX_TRAJECTORY_SOURCE_JETBOX",
+        "CORTEX_TRAJECTORY_SOURCE_AGENT_API",
+        "CORTEX_TRAJECTORY_SOURCE_CIDER"
+      ]
+    },
+    "forbidden_project_id_buckets": [
+      "",
+      "default-cli-project",
+      "outside-of-project",
+      "null",
+      "none"
+    ],
+    "hidden_external_trajectory_sources_enum": {
+      "17": "CORTEX_TRAJECTORY_SOURCE_CLI"
+    },
+    "required_project_binding": {
+      "cli_resume_prerequisite": "~/.gemini/{antigravity,antigravity-cli}/brain/<cascade_id>/.system_generated/logs/",
+      "project_config_glob": "~/.gemini/config/projects/<project_id>.json",
+      "project_proto_type": "exa.project_pb.Project",
+      "title_resolution_order": [
+        "~/.gemini/antigravity/annotations/<cascade_id>.pbtxt (ConversationAnnotations.title, field 1)",
+        "CascadeTrajectorySummary.annotations.title (field 15 -> field 1)",
+        "conversation_summaries.title column"
+      ],
+      "trajectory_metadata_fields": {
+        "nesting_depth": {
+          "field_number": 17,
+          "root_value": 0
+        },
+        "project_id": {
+          "field_number": 18,
+          "format": "UUID matching ~/.gemini/config/projects/<project_id>.json"
+        },
+        "workspace_uris": {
+          "field_number": 7,
+          "format": "file:///abs/path"
+        }
+      }
+    },
+    "visible_trajectory_sources_enum": {
+      "0": "CORTEX_TRAJECTORY_SOURCE_UNSPECIFIED",
+      "1": "CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT",
+      "18": "CORTEX_TRAJECTORY_SOURCE_JETBOX",
+      "19": "CORTEX_TRAJECTORY_SOURCE_AGENT_API",
+      "20": "CORTEX_TRAJECTORY_SOURCE_CIDER"
+    }
+  },
+  "asar_evidence": {
+    "app_data_dir_fn_present": true,
+    "asar_sha256": "00153a89ea4d870d192b7beacae2c26057fa6d698ab8ee777017105c582e60ee",
+    "language_server_spawn_flags": [
+      "--api_server_url",
+      "--app_data_dir",
+      "--cloud_code_endpoint",
+      "--csrf_token",
+      "--enable_sidecars",
+      "--exit_on_stdin_close",
+      "--headless",
+      "--https_server_port",
+      "--override_ide_name",
+      "--override_ide_version",
+      "--override_user_agent_name",
+      "--stamp",
+      "--standalone",
+      "--subclient_type"
+    ],
+    "settings_pb_path_fn_present": true,
+    "uses_hub_subclient": true
+  },
+  "codex_desktop_0_166": {
+    "project_binding_sources": [
+      "~/.codex/state_5.sqlite (projects.id + project_roots.path)",
+      "~/.codex/.codex-global-state.json (local-projects, project-order, thread-project-assignments, app-server-project-id-by-legacy-project-id-by-host)"
+    ],
+    "required_threads_predicate": {
+      "archived": 0,
+      "preview_non_empty": true,
+      "project_id_not_null": true,
+      "sql_index_evidence": [
+        "idx_threads_visible_recency_at_ms: ON threads(archived, recency_at_ms DESC, id DESC) WHERE preview <> ''",
+        "idx_threads_project_recency: ON threads(project_id, recency_at_ms DESC) WHERE archived = 0 AND project_id IS NOT NULL"
+      ]
+    }
+  },
+  "schema_version": "sidebar-visibility-rules-v1",
+  "sqlite_schemas": {
+    "antigravity_conversation_summaries_db": {
+      "column_count": 21,
+      "columns": [
+        {
+          "cid": 0,
+          "default": null,
+          "name": "conversation_id",
+          "notnull": false,
+          "pk": true,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "default": "\"\"",
+          "name": "title",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "default": "\"\"",
+          "name": "preview",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 3,
+          "default": "0",
+          "name": "step_count",
+          "notnull": true,
+          "pk": false,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 4,
+          "default": null,
+          "name": "last_modified_time",
+          "notnull": true,
+          "pk": false,
+          "type": "datetime"
+        },
+        {
+          "cid": 5,
+          "default": null,
+          "name": "workspace_uris",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 6,
+          "default": "\"\"",
+          "name": "status",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 7,
+          "default": "\"\"",
+          "name": "source",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 8,
+          "default": "\"\"",
+          "name": "project_id",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 9,
+          "default": "\"\"",
+          "name": "agent_name",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 10,
+          "default": "\"\"",
+          "name": "parent_conversation_id",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 11,
+          "default": "0",
+          "name": "nesting_depth",
+          "notnull": true,
+          "pk": false,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 12,
+          "default": "\"\"",
+          "name": "battle_id",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 13,
+          "default": "\"\"",
+          "name": "winning_conversation_id",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 14,
+          "default": "false",
+          "name": "not_fully_idle",
+          "notnull": true,
+          "pk": false,
+          "type": "numeric"
+        },
+        {
+          "cid": 15,
+          "default": "false",
+          "name": "killed",
+          "notnull": true,
+          "pk": false,
+          "type": "numeric"
+        },
+        {
+          "cid": 16,
+          "default": null,
+          "name": "last_user_input_time",
+          "notnull": true,
+          "pk": false,
+          "type": "datetime"
+        },
+        {
+          "cid": 17,
+          "default": "-1",
+          "name": "last_user_input_step_index",
+          "notnull": true,
+          "pk": false,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 18,
+          "default": "\"\"",
+          "name": "app_data_dir",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        },
+        {
+          "cid": 19,
+          "default": null,
+          "name": "raw_summary",
+          "notnull": false,
+          "pk": false,
+          "type": "BLOB"
+        },
+        {
+          "cid": 20,
+          "default": "\"\"",
+          "name": "group_id",
+          "notnull": true,
+          "pk": false,
+          "type": "TEXT"
+        }
+      ],
+      "table": "conversation_summaries"
+    },
+    "codex_state_5_sqlite": {
+      "project_roots": {
+        "column_count": 3,
+        "columns": [
+          {
+            "cid": 0,
+            "default": null,
+            "name": "project_id",
+            "notnull": true,
+            "pk": true,
+            "type": "TEXT"
+          },
+          {
+            "cid": 1,
+            "default": null,
+            "name": "position",
+            "notnull": true,
+            "pk": true,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 2,
+            "default": null,
+            "name": "path",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          }
+        ],
+        "indexes": []
+      },
+      "projects": {
+        "column_count": 6,
+        "columns": [
+          {
+            "cid": 0,
+            "default": null,
+            "name": "id",
+            "notnull": false,
+            "pk": true,
+            "type": "TEXT"
+          },
+          {
+            "cid": 1,
+            "default": null,
+            "name": "name",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 2,
+            "default": "'{}'",
+            "name": "metadata",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 3,
+            "default": null,
+            "name": "position",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 4,
+            "default": null,
+            "name": "created_at_ms",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 5,
+            "default": null,
+            "name": "updated_at_ms",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "idx_projects_position",
+            "sql": "CREATE INDEX idx_projects_position\n    ON projects(position ASC, id ASC)"
+          }
+        ]
+      },
+      "thread_sections": {
+        "column_count": 3,
+        "columns": [
+          {
+            "cid": 0,
+            "default": null,
+            "name": "id",
+            "notnull": false,
+            "pk": true,
+            "type": "TEXT"
+          },
+          {
+            "cid": 1,
+            "default": null,
+            "name": "name",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 2,
+            "default": null,
+            "name": "appearance",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          }
+        ],
+        "indexes": []
+      },
+      "threads": {
+        "column_count": 43,
+        "columns": [
+          {
+            "cid": 0,
+            "default": null,
+            "name": "id",
+            "notnull": false,
+            "pk": true,
+            "type": "TEXT"
+          },
+          {
+            "cid": 1,
+            "default": null,
+            "name": "rollout_path",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 2,
+            "default": null,
+            "name": "created_at",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 3,
+            "default": null,
+            "name": "updated_at",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 4,
+            "default": null,
+            "name": "source",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 5,
+            "default": null,
+            "name": "model_provider",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 6,
+            "default": null,
+            "name": "cwd",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 7,
+            "default": null,
+            "name": "title",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 8,
+            "default": null,
+            "name": "sandbox_policy",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 9,
+            "default": null,
+            "name": "approval_mode",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 10,
+            "default": "0",
+            "name": "tokens_used",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 11,
+            "default": "0",
+            "name": "has_user_event",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 12,
+            "default": "0",
+            "name": "archived",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 13,
+            "default": null,
+            "name": "archived_at",
+            "notnull": false,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 14,
+            "default": null,
+            "name": "git_sha",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 15,
+            "default": null,
+            "name": "git_branch",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 16,
+            "default": null,
+            "name": "git_origin_url",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 17,
+            "default": "''",
+            "name": "cli_version",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 18,
+            "default": "''",
+            "name": "first_user_message",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 19,
+            "default": null,
+            "name": "agent_nickname",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 20,
+            "default": null,
+            "name": "agent_role",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 21,
+            "default": "'enabled'",
+            "name": "memory_mode",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 22,
+            "default": null,
+            "name": "model",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 23,
+            "default": null,
+            "name": "reasoning_effort",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 24,
+            "default": null,
+            "name": "agent_path",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 25,
+            "default": null,
+            "name": "created_at_ms",
+            "notnull": false,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 26,
+            "default": null,
+            "name": "updated_at_ms",
+            "notnull": false,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 27,
+            "default": null,
+            "name": "thread_source",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 28,
+            "default": "''",
+            "name": "preview",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 29,
+            "default": "0",
+            "name": "recency_at",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 30,
+            "default": "0",
+            "name": "recency_at_ms",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 31,
+            "default": "'legacy'",
+            "name": "history_mode",
+            "notnull": true,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 32,
+            "default": null,
+            "name": "name",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 33,
+            "default": "0",
+            "name": "is_pinned",
+            "notnull": true,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 34,
+            "default": null,
+            "name": "thread_section_id",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 35,
+            "default": null,
+            "name": "section_position",
+            "notnull": false,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 36,
+            "default": null,
+            "name": "section_entered_at_ms",
+            "notnull": false,
+            "pk": false,
+            "type": "INTEGER"
+          },
+          {
+            "cid": 37,
+            "default": null,
+            "name": "project_id",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 38,
+            "default": null,
+            "name": "originator",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 39,
+            "default": null,
+            "name": "daybreak_enabled",
+            "notnull": false,
+            "pk": false,
+            "type": "BOOLEAN"
+          },
+          {
+            "cid": 40,
+            "default": null,
+            "name": "creator_user_id",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 41,
+            "default": null,
+            "name": "creator_account_id",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          },
+          {
+            "cid": 42,
+            "default": null,
+            "name": "attached_thread_parent_id",
+            "notnull": false,
+            "pk": false,
+            "type": "TEXT"
+          }
+        ],
+        "indexes": [
+          {
+            "name": "idx_threads_archive_created_at_ms",
+            "sql": "CREATE INDEX idx_threads_archive_created_at_ms\n    ON threads(archived, created_at_ms DESC, id DESC)\n    WHERE archived = 1"
+          },
+          {
+            "name": "idx_threads_archive_recency_at_ms",
+            "sql": "CREATE INDEX idx_threads_archive_recency_at_ms\n    ON threads(archived, recency_at_ms DESC, id DESC)\n    WHERE archived = 1"
+          },
+          {
+            "name": "idx_threads_archive_updated_at_ms",
+            "sql": "CREATE INDEX idx_threads_archive_updated_at_ms\n    ON threads(archived, updated_at_ms DESC, id DESC)\n    WHERE archived = 1"
+          },
+          {
+            "name": "idx_threads_archived",
+            "sql": "CREATE INDEX idx_threads_archived ON threads(archived)"
+          },
+          {
+            "name": "idx_threads_archived_cwd_created_at_ms",
+            "sql": "CREATE INDEX idx_threads_archived_cwd_created_at_ms ON threads(archived, cwd, created_at_ms DESC, id DESC)"
+          },
+          {
+            "name": "idx_threads_archived_cwd_recency_at_ms",
+            "sql": "CREATE INDEX idx_threads_archived_cwd_recency_at_ms\n    ON threads(archived, cwd, recency_at_ms DESC, id DESC)"
+          },
+          {
+            "name": "idx_threads_archived_cwd_updated_at_ms",
+            "sql": "CREATE INDEX idx_threads_archived_cwd_updated_at_ms ON threads(archived, cwd, updated_at_ms DESC, id DESC)"
+          },
+          {
+            "name": "idx_threads_attached_parent",
+            "sql": "CREATE INDEX idx_threads_attached_parent ON threads(attached_thread_parent_id)\n    WHERE attached_thread_parent_id IS NOT NULL"
+          },
+          {
+            "name": "idx_threads_created_at",
+            "sql": "CREATE INDEX idx_threads_created_at ON threads(created_at DESC, id DESC)"
+          },
+          {
+            "name": "idx_threads_created_at_ms",
+            "sql": "CREATE INDEX idx_threads_created_at_ms ON threads(created_at_ms DESC, id DESC)"
+          },
+          {
+            "name": "idx_threads_pinned_recency_at_ms",
+            "sql": "CREATE INDEX idx_threads_pinned_recency_at_ms\n    ON threads(archived, recency_at_ms DESC, id DESC)\n    WHERE is_pinned = 1 AND preview <> ''"
+          },
+          {
+            "name": "idx_threads_project_id",
+            "sql": "CREATE INDEX idx_threads_project_id\n    ON threads(project_id, archived, created_at_ms DESC, id DESC)\n    WHERE project_id IS NOT NULL"
+          },
+          {
+            "name": "idx_threads_project_recency",
+            "sql": "CREATE INDEX idx_threads_project_recency\n    ON threads(project_id, recency_at_ms DESC)\n    WHERE archived = 0 AND project_id IS NOT NULL"
+          },
+          {
+            "name": "idx_threads_provider",
+            "sql": "CREATE INDEX idx_threads_provider ON threads(model_provider)"
+          },
+          {
+            "name": "idx_threads_recency_at_ms",
+            "sql": "CREATE INDEX idx_threads_recency_at_ms\n    ON threads(recency_at_ms DESC, id DESC)"
+          },
+          {
+            "name": "idx_threads_section_position",
+            "sql": "CREATE INDEX idx_threads_section_position\n    ON threads(archived, thread_section_id, section_position ASC, id ASC)\n    WHERE thread_section_id IS NOT NULL"
+          },
+          {
+            "name": "idx_threads_section_recency_at_ms",
+            "sql": "CREATE INDEX idx_threads_section_recency_at_ms\n    ON threads(archived, thread_section_id, recency_at_ms DESC, id DESC)\n    WHERE thread_section_id IS NOT NULL"
+          },
+          {
+            "name": "idx_threads_source",
+            "sql": "CREATE INDEX idx_threads_source ON threads(source)"
+          },
+          {
+            "name": "idx_threads_updated_at",
+            "sql": "CREATE INDEX idx_threads_updated_at ON threads(updated_at DESC, id DESC)"
+          },
+          {
+            "name": "idx_threads_updated_at_ms",
+            "sql": "CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC)"
+          },
+          {
+            "name": "idx_threads_visible_created_at_ms",
+            "sql": "CREATE INDEX idx_threads_visible_created_at_ms\n    ON threads(archived, created_at_ms DESC)\n    WHERE preview <> ''"
+          },
+          {
+            "name": "idx_threads_visible_recency_at_ms",
+            "sql": "CREATE INDEX idx_threads_visible_recency_at_ms\n    ON threads(archived, recency_at_ms DESC, id DESC)\n    WHERE preview <> ''"
+          },
+          {
+            "name": "idx_threads_visible_updated_at_ms",
+            "sql": "CREATE INDEX idx_threads_visible_updated_at_ms\n    ON threads(archived, updated_at_ms DESC)\n    WHERE preview <> ''"
+          }
+        ]
+      }
+    }
+  }
+}

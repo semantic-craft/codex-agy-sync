@@ -1,1 +1,5 @@
 /out/
+/todo.md
+/.audit/
+__pycache__/
+*.pyc

@@ -39,3 +39,12 @@
 ### Phase 3：在线 RPC 与离线落盘双模同步引擎
 - **在线读取与热接续**：当 `language_server` 或 `codex app-server` 在线时，优先通过 `GetCascadeTrajectory` 与 `thread/read` 无锁读取最新轨迹。
 - **安全落盘与增量游标**：维护 `codex_thread_id <-> agy_cascade_id` 的 `step_index / turn_id` 同步游标，支持把未完成会话的增量轮次单向或双向补齐，检测到目标端已分叉时自动停止覆盖并提示。
+
+## 契约提取与自检入口（Phase 1 已落地）
+
+- `python3 scripts/extract_schema.py`：从本机 `/Applications/Antigravity.app/Contents/Resources/bin/language_server`、`agy` CLI 与 `app.asar` 提取编译态 `FileDescriptorProto` 与侧栏可见性规则，生成：
+  - `schema/antigravity_2_30_schema.json`（9 个核心 `.proto` 描述符闭包：704 个消息、136 个枚举、373 个 `LanguageServerService` RPC）
+  - `schema/antigravity_2_30.proto`（人类可读的 Protobuf 3 定义）
+  - `schema/sidebar_visibility_rules.json`（Antigravity 2.30+ 与 Codex 0.166+ 侧栏可见性与项目绑定契约）
+- `python3 scripts/verify_session_mapping.py`：以 `SQLITE_OPEN_READONLY`（`?mode=ro` + `PRAGMA query_only=ON`）只读解码本机真实 Antigravity `.db` 会话与 Codex `rollout-*.jsonl`，校验 `unknown_wire_fields_count == 0` 与数据库 inode/mtime 零变动，并输出双方在项目绑定、用户输入、思考摘要、工具调用与结果上的精确字段映射报告。
+- `./scripts/check`：一键运行描述提取确定性校验、真实会话只读无损解码、3 项负向控制测试与路径/凭据卫生检查。

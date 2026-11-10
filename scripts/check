@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PYTHONDONTWRITEBYTECODE=1
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+mkdir -p out
+
+echo "[1/4] Verifying binary Protobuf descriptor extraction determinism..."
+python3 scripts/extract_schema.py > out/extract_schema_check.json
+git diff --exit-code schema/antigravity_2_30_schema.json schema/antigravity_2_30.proto schema/sidebar_visibility_rules.json || {
+  echo "ERROR: schema/ files are out of sync with scripts/extract_schema.py output." >&2
+  exit 1
+}
+
+echo "[2/4] Running read-only session decoding, field mapping, and negative controls..."
+python3 scripts/verify_session_mapping.py --output out/session_mapping_report.json > /dev/null
+python3 -c '
+import json
+r = json.load(open("out/session_mapping_report.json"))
+assert r["status"] == "VERIFIED", f"Unexpected status: {r}"
+assert r["negative_controls"]["unknown_wire_field_9999_caught"] is True
+assert r["negative_controls"]["forbidden_project_bucket_caught"] is True
+assert r["negative_controls"]["codex_empty_preview_caught"] is True
+agy = r["antigravity_session"]
+assert agy["readonly_integrity"]["conv_db_unchanged"] is True
+assert agy["readonly_integrity"]["summaries_db_unchanged"] is True
+assert agy["counts"]["unknown_wire_fields_count"] == 0
+assert agy["project_binding"]["is_valid_non_bucket_project"] is True
+codex = r["codex_session"]
+assert codex["readonly_integrity"]["state_5_sqlite_unchanged"] is True
+assert codex["project_binding"]["sidebar_visible_predicate_met"] is True
+assert codex["counts"]["unpaired_tool_calls"] == 0
+print("  AGY session {}: {} steps decoded, 0 unknown wire fields.".format(agy["cascade_id"], agy["counts"]["total_steps"]))
+print("  Codex session {}: {} user msgs, {} reasoning items, {} paired tool calls.".format(codex["thread_id"], codex["counts"]["user_messages"], codex["counts"]["reasoning_items"], codex["counts"]["tool_calls"]))
+'
+
+echo "[3/4] Scanning tracked and untracked repo files (excluding out/) for hardcoded home paths or CSRF token leaks..."
+python3 -c '
+import pathlib, re, subprocess, sys
+
+repo = pathlib.Path(".")
+home_str = str(pathlib.Path.home())
+bad = []
+for p in repo.rglob("*"):
+    if not p.is_file():
+        continue
+    rel = p.relative_to(repo)
+    if rel.parts[0] in (".git", "out") or "__pycache__" in rel.parts or rel.suffix == ".pyc":
+        continue
+    if rel.name in ("todo.md", "decisions.tsv"):
+        continue
+    txt = p.read_text(encoding="utf-8", errors="ignore")
+    if rel.parts[0] == "scripts":
+        for line_no, line in enumerate(txt.splitlines(), start=1):
+            if home_str in line:
+                bad.append(f"{rel}:{line_no}: hardcoded home path {home_str}")
+    # Check for actual CSRF token uuid values from active daemon hub_*.json if any exist
+    daemon_dir = pathlib.Path.home() / ".gemini" / "antigravity" / "daemon"
+    if daemon_dir.is_dir():
+        for hf in daemon_dir.glob("hub_*.json"):
+            try:
+                import json
+                tok = json.loads(hf.read_text()).get("csrfToken", "")
+                if tok and len(tok) > 8 and tok in txt:
+                    bad.append(f"{rel}: leaked live csrfToken from {hf.name}")
+            except Exception:
+                pass
+if bad:
+    for b in bad:
+        print("SECURITY/HYGIENE FAIL:", b, file=sys.stderr)
+    sys.exit(1)
+print("  Hygiene & credential isolation check passed (0 hardcoded user paths in scripts/, 0 csrfToken leaks).")
+'
+
+echo "[4/4] All checks passed."
