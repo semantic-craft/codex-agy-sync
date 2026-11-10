@@ -16,6 +16,28 @@
 - 验证点：运行 `./scripts/check`（含 `test_real_session_isolated_roundtrip_codex_to_agy_and_back` 与 `test_interrogate_adversarial_regressions`）。
 - 复发记录：Seen 1x (2026-11-10)；由 `/interrogate` 对抗审查在 commit `dc32f09` 捕获并于 `837d642` 修复。
 
+### 顶层会话分叉溯源与子智能体血缘必须正交建模并退役旧游标
+
+**顶层会话的冲突分叉（`FORK_NEW_SESSION`）必须保持 `nesting_depth = 0` 并将分叉来源写入 `parent_references`，严禁复用子智能体 `parent_conversation_id` 导致顶层分叉会话从桌面侧栏消失，且写入新配对游标时必须自动退役冲突旧游标。**
+
+- 标签：#状态机 #侧栏可见性 #幂等
+- 起因与后果：提交 `9392c16` 引入 `SubagentLineage` 时将任何非空 `parent_cascade_id` / `parent_codex_thread_id` 一律提升为 `nesting_depth = 1`（`is_subagent = True`），而 `FORK_NEW_SESSION` 在派生顶层分叉会话时直接传入原会话 ID 作为父 ID，且未移除 `cursors/<orig_cid>__<orig_tid>.json`，导致派生出的顶层会话被隐藏进子代理抽屉，并在后续 `sync_workspace` 中触发重复分叉死循环。
+- 修复与证据：提交 `e56b226` 与 `f46aac1` 将 `SubagentLineage.is_subagent` 收紧为显式深度或子代理角色元数据，顶层分叉改写 `conversations/<id>.db` 的 `parent_references` 表并在 `SyncBridge._save_cursor` 中将同会话旧游标移入 `cursors/superseded/`，同时 `sync_workspace` 单趟收敛双分支；已由 `test_top_level_fork_preserves_sidebar_visibility_and_converges_once` 验证通过。
+- 正确做法（Done right）：区分“并发冲突产生的顶层历史分叉”与“工具派发的子代理父子层级”，保存 1 对 1 同步游标时强制清理同工作区占用任一会话 ID 的旧活跃游标。
+- 验证点：运行 `./scripts/check`（核对 `test_top_level_fork_preserves_sidebar_visibility_and_converges_once`）。
+- 复发记录：Seen 1x (2026-11-11)；由全分支二次 `/interrogate` 三模型共识（`R2`/`R3`）在 commit `9392c16` 捕获并于 `e56b226`、`f46aac1` 修复。
+
+### 离线伴生索引必须从已提交主表重解码投影且未就绪写 RPC 必须显式延迟
+
+**多存储宿主的伴生索引必须从主表提交后的真实记录重解码生成，且未接入在线写 RPC 前 `TransportMode.ONLINE_RPC` 与只读查询命令严禁落盘修改活跃 WAL 数据库。**
+
+- 标签：#并发安全 #一致性 #边界校验
+- 起因与后果：`status` 命令与 `sync_session` 预检阶段曾无条件调用 `pair_workspace` 写入 `state_5.sqlite`，`CursorForkStateMachine` 在未实现在线写 RPC 时放行 `ONLINE_RPC` 跳过备份直接裸写 SQLite；同时增量 `Codex -> AGY` 同步直接拿合并后的内存事件投影 `transcript.jsonl` 与 `conversation_summaries.db`，造成步骤号与 `conversations/<id>.db` 的 `steps.idx` 错位。
+- 修复与证据：提交 `f46aac1` 在 `cli.py`（`status`）与 `SyncBridge` 预检入口统一改用纯只读 `resolve_readonly_binding`，在 `CursorForkStateMachine` 与 `DefaultHostTransport` 双重拒绝非 `OFFLINE_STORAGE` 裸写，并在 `apply_to_agy` 提交 `steps` 后按 `idx ASC` 重解码生成全部伴生文件；已由 `test_online_rpc_defers_and_status_is_strictly_readonly` 与 `test_incremental_codex_to_agy_step_indices_match_across_stores` 验证通过。
+- 正确做法（Done right）：只读命令与锁探测阶段零写盘；一切派生视图以已提交主表为单一真相源重投影。
+- 验证点：运行 `./scripts/check`（核对 29 项行为与回归测试全绿）。
+- 复发记录：Seen 1x (2026-11-11)；由全分支二次 `/interrogate`（`R1`/`R6`）捕获并于 `f46aac1` 修复。
+
 ## 记录模板
 
 复制下列模板新增条目，已有同类条目则更新原条。未知的提交、原因或验收结果明确写“待核实”。

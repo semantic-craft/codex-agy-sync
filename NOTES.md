@@ -32,6 +32,9 @@
 - 2026-11-11：吸收 `vshulcz/deja-vu` 对比分析的第 2、3 点，在 Phase 2 转换器架构（`docs/architecture.md`）与实现（`ledger.py`、`codecs.py`、`bridge.py`、`cli.py`）中补齐：
   - **子智能体（Subagent）血缘识别与侧栏隔离**：新增 `SubagentLineage` 值对象，解析 `brain/<parent>/.system_generated/subagents/<child>.json`、`CortexTrajectoryMetadata`（tags 5/6/8/17）、`conversation_summaries.db`（`parent_conversation_id` / `nesting_depth` / `agent_name`）与 Codex `threads`（`attached_thread_parent_id` / `agent_role` / `agent_nickname`）；`list_workspace_sessions` 与 `sync_workspace` 默认 `include_subagents=False` 过滤子会话以防污染 Codex 顶层项目侧栏，显式同步时保留完整父子血缘与伴生 JSON。
   - **工具文件路径 `file://` URI 百分号解码与控制字符注入防护**：新增边界纯函数 `normalize_tool_file_path`，在 `codecs.py` 编解码边界对 `ReadFilePayload.path`、`FileEditPayload.path`（含 `apply_patch` 补丁头）、`RunCommandPayload.cwd`、`DefineSubagentPayload.agent_path`、`GenerateImagePayload.image_paths` 剥离反引号与 `file://` 前缀，仅对带 `file://` 前缀的 URI 执行 `urllib.parse.unquote`（保留普通路径中的字面量 `%`），并剥离 `\n`/`\r`/`\x00` 防止 `%0A` 伪造 `apply_patch` 头注入；`./scripts/check` 5 阶段全绿（17/17 行为与回归测试通过）。
+- 2026-11-11：接管 `main` 分支完成全分支二次多模型 `/interrogate` 对抗审查（`pro`、`flash`、`inherit` 三模型独立审查 `aa6ebb9...9392c16`，复现并修复全部 9 项缺陷 `R1`–`R9`）：
+  - 提交 [`e56b226`](file:///Users/xianweizhang/Projects/codex-agy-sync/src/codex_agy_sync/codecs.py)：修复含未编码空格 `file://` URI 截断、会话 ID 边界校验（`validate_session_id`）、跨端水位线工具参数摘要与框架事件排除、`DELETE` 文件补丁往返保真、Codex `apply_patch.input` / `exec_command.cmd` 及 Antigravity PascalCase 工具参数投影、多行标题空白折叠。
+  - 提交 [`f46aac1`](file:///Users/xianweizhang/Projects/codex-agy-sync/src/codex_agy_sync/bridge.py)：强制 `ONLINE_RPC` 在未接入写 RPC 时返回 `deferred_busy`、`status` 与预检阶段纯只读零落盘、顶层分叉会话保持 `nesting_depth = 0`（血缘记入 `parent_references`）并自动退役旧游标至 `cursors/superseded/`、增量同步后从已提交 `steps` 重解码伴生视图确保 `step_index` 严格一致、游标落盘前崩溃重试自动收敛为 `no_op`、保留既有 `PRAGMA user_version = 1` 并通过 `AF_UNIX` `connect()` 区分死残留 `app-server.sock`；`./scripts/check` 5 阶段全绿（29/29 行为与回归测试通过）。
 
 ## 下一步
 
