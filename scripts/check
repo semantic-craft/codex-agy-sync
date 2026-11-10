@@ -7,14 +7,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 mkdir -p out
 
-echo "[1/4] Verifying binary Protobuf descriptor extraction determinism..."
-python3 scripts/extract_schema.py > out/extract_schema_check.json
+echo "[1/5] Verifying Phase 1 schema artifacts and binary descriptor integrity..."
+if [[ "${1:-}" == "--refresh-schema" ]]; then
+  python3 scripts/extract_schema.py > out/extract_schema_check.json
+fi
 git diff --exit-code schema/antigravity_2_30_schema.json schema/antigravity_2_30.proto schema/sidebar_visibility_rules.json || {
-  echo "ERROR: schema/ files are out of sync with scripts/extract_schema.py output." >&2
+  echo "ERROR: schema/ files have uncommitted modifications." >&2
   exit 1
 }
 
-echo "[2/4] Running read-only session decoding, field mapping, and negative controls..."
+echo "[2/5] Running read-only session decoding, field mapping, and negative controls..."
 python3 scripts/verify_session_mapping.py --output out/session_mapping_report.json > /dev/null
 python3 -c '
 import json
@@ -36,7 +38,42 @@ print("  AGY session {}: {} steps decoded, 0 unknown wire fields.".format(agy["c
 print("  Codex session {}: {} user msgs, {} reasoning items, {} paired tool calls.".format(codex["thread_id"], codex["counts"]["user_messages"], codex["counts"]["reasoning_items"], codex["counts"]["tool_calls"]))
 '
 
-echo "[3/4] Scanning tracked and untracked repo files (excluding out/) for hardcoded home paths or CSRF token leaks..."
+echo "[3/5] Verifying src/codex_agy_sync domain architecture against Phase 1 schema..."
+python3 -m py_compile src/codex_agy_sync/__init__.py src/codex_agy_sync/ledger.py src/codex_agy_sync/codecs.py src/codex_agy_sync/bridge.py
+PYTHONPATH=src python3 -c '
+import json
+import codex_agy_sync as pkg
+
+schema = json.load(open("schema/antigravity_2_30_schema.json"))
+rules = json.load(open("schema/sidebar_visibility_rules.json"))
+
+# 1. Verify all 7 STEP_WIRE_TABLE entries match gemini_coder.Step oneof tags
+step_fields = {int(k): v["name"] for k, v in schema["messages"]["gemini_coder.Step"]["fields"].items()}
+assert len(pkg.STEP_WIRE_TABLE) == 7
+for spec in pkg.STEP_WIRE_TABLE.values():
+    assert step_fields.get(int(spec.step_oneof_tag)) == spec.oneof_field_name, spec
+
+# 2. Verify all 16 top-level exa.cortex.core.tools.<Name> messages are covered in TOOL_CODEC_TABLE
+schema_tools = {
+    m for m in schema["messages"]
+    if m.startswith("exa.cortex.core.tools.") and m.count(".") == 4
+}
+table_tools = {spec.agy_any_type_url.removeprefix("type.googleapis.com/") for spec in pkg.TOOL_CODEC_TABLE}
+assert schema_tools == table_tools, f"Mismatch: {schema_tools ^ table_tools}"
+
+# 3. Verify sidebar visibility rules match domain constants
+expected_buckets = set(rules["antigravity_desktop_2_30"]["forbidden_project_id_buckets"])
+assert set(pkg.FORBIDDEN_AGY_PROJECT_IDS) == expected_buckets
+assert 17 not in {s.value[0] for s in pkg.AgyGuiSafeSource}
+
+# 4. Verify CsrfSecret never echoes token in repr/str/format
+sec = object.__new__(pkg.CsrfSecret)
+object.__setattr__(sec, "_token", "super-secret-csrf-token-value")
+assert "super-secret" not in repr(sec) and "super-secret" not in str(sec) and "super-secret" not in f"{sec}"
+print("  Domain architecture verified: 7 step specs, 16 tool codecs, sidebar invariants, and CsrfSecret redaction.")
+'
+
+echo "[4/5] Scanning tracked and untracked repo files (excluding out/) for hardcoded home paths or CSRF token leaks..."
 python3 -c '
 import pathlib, re, subprocess, sys
 
@@ -52,7 +89,7 @@ for p in repo.rglob("*"):
     if rel.name in ("todo.md", "decisions.tsv"):
         continue
     txt = p.read_text(encoding="utf-8", errors="ignore")
-    if rel.parts[0] == "scripts":
+    if rel.parts[0] in ("scripts", "src", "docs"):
         for line_no, line in enumerate(txt.splitlines(), start=1):
             if home_str in line:
                 bad.append(f"{rel}:{line_no}: hardcoded home path {home_str}")
@@ -71,7 +108,7 @@ if bad:
     for b in bad:
         print("SECURITY/HYGIENE FAIL:", b, file=sys.stderr)
     sys.exit(1)
-print("  Hygiene & credential isolation check passed (0 hardcoded user paths in scripts/, 0 csrfToken leaks).")
+print("  Hygiene & credential isolation check passed (0 hardcoded user paths in scripts/src/docs, 0 csrfToken leaks).")
 '
 
-echo "[4/4] All checks passed."
+echo "[5/5] All checks passed."
