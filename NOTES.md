@@ -35,10 +35,16 @@
 - 2026-11-11：接管 `main` 分支完成全分支二次多模型 `/interrogate` 对抗审查（`pro`、`flash`、`inherit` 三模型独立审查 `aa6ebb9...9392c16`，复现并修复全部 9 项缺陷 `R1`–`R9`）：
   - 提交 [`e56b226`](file:///Users/xianweizhang/Projects/codex-agy-sync/src/codex_agy_sync/codecs.py)：修复含未编码空格 `file://` URI 截断、会话 ID 边界校验（`validate_session_id`）、跨端水位线工具参数摘要与框架事件排除、`DELETE` 文件补丁往返保真、Codex `apply_patch.input` / `exec_command.cmd` 及 Antigravity PascalCase 工具参数投影、多行标题空白折叠。
   - 提交 [`f46aac1`](file:///Users/xianweizhang/Projects/codex-agy-sync/src/codex_agy_sync/bridge.py)：强制 `ONLINE_RPC` 在未接入写 RPC 时返回 `deferred_busy`、`status` 与预检阶段纯只读零落盘、顶层分叉会话保持 `nesting_depth = 0`（血缘记入 `parent_references`）并自动退役旧游标至 `cursors/superseded/`、增量同步后从已提交 `steps` 重解码伴生视图确保 `step_index` 严格一致、游标落盘前崩溃重试自动收敛为 `no_op`、保留既有 `PRAGMA user_version = 1` 并通过 `AF_UNIX` `connect()` 区分死残留 `app-server.sock`；`./scripts/check` 5 阶段全绿（29/29 行为与回归测试通过）。
+- 2026-11-11：完成全仓代码质量、架构一致性与打补丁痕迹专项评审（`pro`、`flash`、`inherit` 三模型独立审查 + 本机真实宿主库只读实测复现），并落地与端到端自证项目本地验收技能 [`skills/verify-codex-agy-sync/SKILL.md`](file:///Users/xianweizhang/Projects/codex-agy-sync/skills/verify-codex-agy-sync/SKILL.md)（含 `.agents/skills/{verify,verify-codex-agy-sync}` 软链、`control_sync_verify.py` 隔离沙盒驱动器与 5 份功能地图，实测保留 26 份证据文件且宿主数据库零变更）。评审确认当前 `src/`（9,120 行）虽通过 29 项既有测试，但存在明显迭代打补丁堆叠、4 套重复 wire 解析器、6 遍重复写管线及多项真实数据正确性缺口，详见下方“下一步”6 个待办可验证单元。
 
 ## 下一步
 
-1. 完成标准第 5 项中的隔离真实会话副本双向往返与 `./scripts/check`（29/29 测试）已全部通过；由于当前活跃会话持有宿主 WAL/守护进程锁且 `DefaultHostTransport.supports_online_rpc_write = False` 按安全契约返回 `deferred_busy`，待宿主桌面端空闲窗口期（关闭活跃会话锁后）执行本机真实 GUI 侧栏双向导入与续聊人工验收，并按需接入在线写 RPC 与守护模式。
+1. **Unit 1（抽离唯一安全 Wire 基元并净化 `ledger.py`）**：新建 `src/codex_agy_sync/_wire.py` 合并全仓 4 套重复 Protobuf varint/wire 解析器并补齐截断越界检查；将 242 行底层字节拼装移出 `ledger.py`，移除 `CascadeSummaryProjection.__post_init__` 缓存失步陷阱与 `decode_summaries_state_proto` 假占位值，清理遗留重复同义参数/方法别名及根目录一次性 `todo.md` / `decisions.tsv`。
+2. **Unit 2（修复有损编解码与真表驱动拆解 `codecs.py`）**：将 `TOOL_CODEC_TABLE` / `STEP_WIRE_TABLE` 改为挂载真实 `(encode_fn, decode_fn)` 并消费 `schema/antigravity_2_30_schema.json` 字段常量，消除 523 行 `if kind == ...` 巨石与 181 处裸数字 tag；修复 6 类工具列表 $2^N$ 指数翻倍（恢复测试严格相等断言）、`UnifiedDiff` 块头前导空格污染（删除合成 `"unified_diff"` JSON 拐杖）、`UserInputEvent.scope_items` 与 `ChatToolCall.thinking_signature` 丢失、`_decode_step_metadata` `" preserved_fields"` 拼写及未知字段丢弃，并补齐本机真实存在的 Codex `response_item.agent_message` 与 Antigravity `step_type = 17`（`ERROR_MESSAGE`）无损保真。
+3. **Unit 3（修正子代理血缘误判与半途回合完成判定）**：收紧 `SubagentLineage.is_subagent` 仅凭真实父子层级/sidecar 判定，防止本机带非空 `agent_name`/`agent_role` 的顶层会话（AGY 273/967 条、Codex 251/4,466 条）被静默过滤或强改 `nesting_depth = 1`；修正 `TrajectoryLedger.from_events` 避免将多步工具循环中段（末尾裸 `ToolResultEvent`）及 `steps.status in {1, 2, 8, 9}` 流式步骤误判为已完成回合；按需设计显式半途快照导入开关。
+4. **Unit 4（持锁事务上下文、自动回滚、伴生自愈与对称分叉）**：将 `PresenceWalGuard` 改为写盘全程持有 `sync.lock` 与 `presence/<id>.lock` 的上下文管理器，消除探后即放 TOCTOU；用单一 `_execute_write_plan` 消除 `sync_session` 527 行 6 遍重复写管线并在写盘异常时自动按备份清单还原；在 `NoOpTransition` 校验并自愈缺失伴生索引（含 `antigravity-cli/brain` 镜像）；使 `sync_session(FORK_NEW_SESSION)` 单次调用内对称完成双分支 UUIDv7 派生，移除 `sync_workspace` 外层补调补丁。
+5. **Unit 5（兑现或收口 Online RPC 与守护模式）**：实现 `GetCascadeTrajectory` Connect RPC 与 `codex app-server` `thread/read` 在线无锁读取客户端（未运行时对 `online_rpc` 如实延迟，不谎报 `transport_used`），或同步收敛文档与枚举声明；并在桌面空闲窗口完成真实 GUI 侧栏人工验收。
+6. **Unit 6（拆分 3,413 行单文件测试并接入验收门禁）**：将 `tests/test_roundtrip_and_sync.py` 按领域模块拆分为 `< 800` 行测试文件，固化上述全部回归用例，并将 `skills/verify-codex-agy-sync` 冒验纳入常规回归。
 
 ## 记录
 
