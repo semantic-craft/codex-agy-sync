@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import io
 import json
@@ -35,12 +36,25 @@ from codex_agy_sync.codecs import (
     TrajectoryWireCodec,
 )
 from codex_agy_sync import validate_session_id
+from codex_agy_sync._wire import (
+    UnknownWireField,
+    encode_bytes_field,
+    encode_fixed32_field,
+    encode_fixed64_field,
+    encode_string_field,
+    encode_varint,
+    encode_varint_field,
+    iter_wire_fields,
+    parse_proto_fields,
+    read_varint,
+)
+from codex_agy_sync.codecs import (
+    decode_cascade_summary_proto,
+    decode_summaries_state_proto,
+    encode_summaries_state_proto,
+)
 from codex_agy_sync.ledger import (
     _canonical_event_digest_payload,
-    _encode_bytes_field,
-    _encode_string_field,
-    _encode_varint,
-    _encode_varint_field,
     AgyGuiSafeSource,
     AgyProjectId,
     AnnotationPbtxtProjection,
@@ -74,6 +88,7 @@ from codex_agy_sync.ledger import (
     SendMessagePayload,
     StepIndex,
     SubagentLineage,
+    SummariesStateProjection,
     SystemEvent,
     TaskBoundaryEvent,
     ThinkingEvent,
@@ -83,9 +98,8 @@ from codex_agy_sync.ledger import (
     ToolResultEvent,
     TrajectoryLedger,
     TurnId,
-    UnknownWireField,
     UserInputEvent,
-    decode_summaries_state_proto,
+    WorkspaceRootUri,
     normalize_tool_file_path,
     parse_workspace_identity,
     resolve_canonical_title,
@@ -713,12 +727,12 @@ class TestCodecBehavior(unittest.TestCase):
         )
 
     def test_unknown_wire_fields_survive_agy_roundtrip(self) -> None:
-        unknown_tag_9999 = _encode_varint((9999 << 3) | 2) + _encode_varint(5) + b"hello"
-        user_body = _encode_string_field(5, "Test unknown field preservation")
+        unknown_tag_9999 = encode_varint((9999 << 3) | 2) + encode_varint(5) + b"hello"
+        user_body = encode_string_field(5, "Test unknown field preservation")
         step_blob = (
-            _encode_varint_field(1, 14)
-            + _encode_varint_field(4, 3)
-            + _encode_bytes_field(19, user_body)
+            encode_varint_field(1, 14)
+            + encode_varint_field(4, 3)
+            + encode_bytes_field(19, user_body)
             + unknown_tag_9999
         )
         ledger = self.codec.decode_agy_steps_to_ledger(
@@ -1806,14 +1820,11 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
         self.assertEqual([s for s in err_steps if s.step_type == 132][0].status, 7)
 
         # 5. Submessage unknown wire fields stay inside inner submessage and do not leak to outer Step
-        from codex_agy_sync.codecs import _iter_wire_fields
-        from codex_agy_sync.ledger import _encode_bytes_field, _encode_string_field, _encode_varint_field
-
-        ui_sub = _encode_string_field(1, "Hello") + _encode_string_field(20, "inner_unknown")
+        ui_sub = encode_string_field(1, "Hello") + encode_string_field(20, "inner_unknown")
         outer_step = (
-            _encode_varint_field(1, 14)
-            + _encode_varint_field(4, 3)
-            + _encode_bytes_field(19, ui_sub)
+            encode_varint_field(1, 14)
+            + encode_varint_field(4, 3)
+            + encode_bytes_field(19, ui_sub)
         )
         unk_ledger = TrajectoryWireCodec.decode_agy_steps_to_ledger(
             self.workspace_dir,
@@ -1821,7 +1832,7 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
             [AgyRawStepRow(StepIndex(0), 14, 3, False, b"", outer_step)],
         )
         reencoded = TrajectoryWireCodec.encode_ledger_to_agy_steps(unk_ledger)
-        outer_tags = [fn for fn, _, _, _ in _iter_wire_fields(reencoded[0].step_payload_blob)]
+        outer_tags = [fn for fn, _, _, _ in iter_wire_fields(reencoded[0].step_payload_blob)]
         self.assertIn(19, outer_tags)
         self.assertNotIn(20, outer_tags)
 
@@ -1866,7 +1877,7 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
             TransportMode.OFFLINE_STORAGE,
         )
         hub_bytes = (self.paths.agy_data_dir / "agyhub_summaries_proto.pb").read_bytes()
-        hub_entries = [raw for fn, wt, _, raw in _iter_wire_fields(hub_bytes) if fn == 1 and wt == 2]
+        hub_entries = [raw for fn, wt, _, raw in iter_wire_fields(hub_bytes) if fn == 1 and wt == 2]
         self.assertEqual(len(hub_entries), 2)
 
     def test_normalize_tool_file_path_percent_decoding_and_injection_guard(self) -> None:
@@ -2500,16 +2511,14 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
             ],
         )
 
-        from codex_agy_sync.codecs import _iter_wire_fields
-
         agy_steps = TrajectoryWireCodec.encode_ledger_to_agy_steps(ledger)
         chat_arg_dicts: list[dict[str, object]] = []
         for row in agy_steps:
-            for fn, wt, _, raw in _iter_wire_fields(row.step_payload_blob):
+            for fn, wt, _, raw in iter_wire_fields(row.step_payload_blob):
                 if fn == 20 and wt == 2:
-                    for p_fn, p_wt, _, p_raw in _iter_wire_fields(raw):
+                    for p_fn, p_wt, _, p_raw in iter_wire_fields(raw):
                         if p_fn == 7 and p_wt == 2:
-                            for c_fn, c_wt, _, c_raw in _iter_wire_fields(p_raw):
+                            for c_fn, c_wt, _, c_raw in iter_wire_fields(p_raw):
                                 if c_fn == 3 and c_wt == 2:
                                     chat_arg_dicts.append(json.loads(c_raw.decode("utf-8")))
         self.assertEqual(len(chat_arg_dicts), 3)
@@ -2908,7 +2917,7 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
             pref_rows = fconn.execute("SELECT idx, data FROM parent_references ORDER BY idx ASC").fetchall()
         finally:
             fconn.close()
-        self.assertEqual(pref_rows, [(0, _encode_string_field(1, str(cid2)))])
+        self.assertEqual(pref_rows, [(0, encode_string_field(1, str(cid2)))])
 
         sconn = sqlite3.connect(
             f"file:{self.paths.agy_data_dir / 'conversation_summaries.db'}?mode=ro",
@@ -3407,6 +3416,173 @@ class TestBridgeAndRoundTripSync(unittest.TestCase):
 
             self.assertTrue(sock_path.exists())
             self.assertIsNone(sguard._discover_codex_daemon())
+
+
+class TestSharedWireAndPureSummaryProjections(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.workspace_dir = Path(self.temp_dir.name) / "unit1-workspace"
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.ws_path, self.ws_uri = parse_workspace_identity(self.workspace_dir)
+        repo_root = Path(__file__).resolve().parent.parent
+        self.schema = json.loads((repo_root / "schema" / "antigravity_2_30_schema.json").read_text())
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_wire_varint_and_parse_proto_fields_reject_truncation_and_overlong_varints(self) -> None:
+        max_u64 = (1 << 64) - 1
+        encoded_max = encode_varint(max_u64)
+        self.assertEqual(len(encoded_max), 10)
+        self.assertEqual(read_varint(encoded_max, 0), (max_u64, 10))
+
+        for bad_val in (-1, 1 << 64):
+            with self.assertRaises(ValueError):
+                encode_varint(bad_val)
+
+        for truncated in (b"", b"\x80", b"\xff\xff\xff\x80"):
+            with self.assertRaises(ValueError):
+                read_varint(truncated, 0)
+
+        for overlong in (b"\x80" * 9 + b"\x02", b"\x80" * 10 + b"\x01", b"\x80" * 12 + b"\x00"):
+            with self.assertRaises(ValueError):
+                read_varint(overlong, 0)
+
+        valid_msg = (
+            encode_varint_field(1, 42)
+            + encode_fixed64_field(2, b"12345678")
+            + encode_bytes_field(3, b"abc")
+            + encode_fixed32_field(4, b"wxyz")
+        )
+        fmap, unknowns = parse_proto_fields(valid_msg, known_tags={1, 3})
+        self.assertEqual(fmap[1], [(0, 42)])
+        self.assertEqual(fmap[3], [(2, b"abc")])
+        self.assertEqual([u.field_tag for u in unknowns], [2, 4])
+
+        malformed_payloads = (
+            b"\x00\x01",
+            b"\x09short",
+            b"\x0dsh",
+            b"\x12\x05abc",
+            encode_varint((1 << 3) | 3),
+            encode_varint((1 << 3) | 4),
+            encode_varint((1 << 3) | 6),
+            encode_varint((1 << 3) | 7),
+            b"\x08" + (b"\x80" * 10) + b"\x01",
+        )
+        for bad_buf in malformed_payloads:
+            with self.assertRaises(ValueError):
+                parse_proto_fields(bad_buf)
+
+    def test_cascade_summary_projection_replace_updates_summary_proto_bytes(self) -> None:
+        events = [
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T01:00:00Z",
+                ),
+                query_text="Initial session prompt",
+            ),
+            AssistantTextEvent(
+                kind="assistant_text",
+                anchor=EventOriginAnchor(
+                    origin_host=HostKind.ANTIGRAVITY,
+                    turn_id=TurnId("turn-1"),
+                    timestamp_iso="2026-11-10T01:00:02Z",
+                ),
+                text="Initial reply",
+            ),
+        ]
+        ledger = TrajectoryLedger.from_events(self.ws_path, self.ws_uri, events)
+        cid = CascadeId("11111111-2222-3333-4444-555555555599")
+        pid = AgyProjectId("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        summary_proj = ledger.project_agy_cascade_summary(cascade_id=cid, project_id=pid)
+        orig_bytes = summary_proj.summary_proto_bytes
+
+        mutated = dataclasses.replace(summary_proj, step_count=99, title="Updated")
+        self.assertNotEqual(mutated.summary_proto_bytes, orig_bytes)
+        self.assertEqual(mutated.annotations.title, "Updated")
+
+        unknowns: list[str] = []
+        decoded_raw = decode_protobuf(
+            mutated.summary_proto_bytes,
+            "exa.jetski_cortex_pb.CascadeTrajectorySummary",
+            self.schema,
+            unknowns,
+        )
+        self.assertEqual(unknowns, [])
+        self.assertEqual(decoded_raw["step_count"], 99)
+        self.assertEqual(decoded_raw["summary"], "Updated")
+        self.assertEqual(decoded_raw["annotations"]["title"], "Updated")
+
+        decoded_proj = decode_cascade_summary_proto(mutated.summary_proto_bytes, fallback_cascade_id=cid)
+        self.assertEqual(decoded_proj.step_count, 99)
+        self.assertEqual(decoded_proj.title, "Updated")
+
+    def test_decode_summaries_state_proto_decodes_real_metadata_and_unknown_fields(self) -> None:
+        cid = CascadeId("99999999-2222-3333-4444-555555555555")
+        pid = AgyProjectId("bbbbbbbb-cccc-dddd-eeee-ffffffffffff")
+        ws_uris = (
+            WorkspaceRootUri("file:///workspace/alpha"),
+            WorkspaceRootUri("file:///workspace/beta"),
+        )
+        annot = AnnotationPbtxtProjection(
+            cascade_id=cid,
+            title="Real Decoded Title",
+            last_user_view_time_iso="2026-11-10T06:30:00Z",
+            unknown_wire_fields=(UnknownWireField(field_tag=12, wire_type=0, raw_bytes=b"\x01"),),
+        )
+        summary_unknowns = (
+            UnknownWireField(field_tag=99, wire_type=0, raw_bytes=b"\x2a"),
+            UnknownWireField(field_tag=105, wire_type=2, raw_bytes=b"future-summary-ext"),
+        )
+        meta_unknowns = (UnknownWireField(field_tag=91, wire_type=2, raw_bytes=b"future-meta-ext"),)
+        summary_proj = dataclasses.replace(
+            TrajectoryLedger.from_events(self.ws_path, ws_uris[0], ()).project_agy_cascade_summary(
+                cascade_id=cid,
+                project_id=pid,
+                viewed_at_iso="2026-11-10T06:30:00Z",
+                source=AgyGuiSafeSource.JETBOX,
+            ),
+            workspace_uris=ws_uris,
+            title="Real Decoded Title",
+            preview="Real Decoded Title",
+            step_count=17,
+            status=2,
+            created_at_iso="2026-11-10T06:00:00Z",
+            updated_at_iso="2026-11-10T06:30:00Z",
+            annotations=annot,
+            trajectory_metadata_unknown_fields=meta_unknowns,
+            unknown_wire_fields=summary_unknowns,
+        )
+        hub_unknowns = (UnknownWireField(field_tag=77, wire_type=2, raw_bytes=b"hub-future-ext"),)
+        state = SummariesStateProjection(
+            summaries={cid: summary_proj},
+            file_mod_times={"/sandbox/conversations/9999.db": 1794300000},
+            unknown_wire_fields=hub_unknowns,
+        )
+        raw_bytes = encode_summaries_state_proto(state)
+
+        decoded_state = decode_summaries_state_proto(raw_bytes)
+        self.assertEqual(decoded_state.file_mod_times, {"/sandbox/conversations/9999.db": 1794300000})
+        self.assertEqual(decoded_state.unknown_wire_fields, hub_unknowns)
+        self.assertIn(cid, decoded_state.summaries)
+
+        got = decoded_state.summaries[cid]
+        self.assertEqual(got.title, "Real Decoded Title")
+        self.assertEqual(got.step_count, 17)
+        self.assertEqual(got.status, 2)
+        self.assertEqual(got.project_id, pid)
+        self.assertEqual(got.workspace_uris, ws_uris)
+        self.assertEqual(got.created_at_iso, "2026-11-10T06:00:00Z")
+        self.assertEqual(got.updated_at_iso, "2026-11-10T06:30:00Z")
+        self.assertEqual(got.source, AgyGuiSafeSource.JETBOX)
+        self.assertEqual(got.unknown_wire_fields, summary_unknowns)
+        self.assertEqual(got.trajectory_metadata_unknown_fields, meta_unknowns)
+        self.assertEqual(got.annotations.unknown_wire_fields, annot.unknown_wire_fields)
+        self.assertEqual(encode_summaries_state_proto(decoded_state), raw_bytes)
 
 
 if __name__ == "__main__":

@@ -39,10 +39,31 @@ print("  Codex session {}: {} user msgs, {} reasoning items, {} paired tool call
 '
 
 echo "[3/5] Verifying src/codex_agy_sync domain architecture against Phase 1 schema..."
-python3 -m py_compile src/codex_agy_sync/__init__.py src/codex_agy_sync/ledger.py src/codex_agy_sync/codecs.py src/codex_agy_sync/bridge.py
+find src/codex_agy_sync -name '*.py' -print0 | sort -z | xargs -0 python3 -m py_compile bin/codex-agy-sync
 PYTHONPATH=src python3 -c '
-import json
+import ast, json, pathlib
 import codex_agy_sync as pkg
+
+ledger_path = pathlib.Path("src/codex_agy_sync/ledger.py")
+ledger_src = ledger_path.read_text(encoding="utf-8")
+ledger_loc = len(ledger_src.splitlines())
+assert ledger_loc < 1000, f"ledger.py must remain < 1000 LOC, got {ledger_loc}"
+ledger_defs = {
+    n.name for n in ast.walk(ast.parse(ledger_src)) if isinstance(n, ast.FunctionDef)
+}
+forbidden_wire_defs = {
+    "_read_varint", "_read_proto_varint", "read_varint",
+    "_encode_varint", "encode_varint", "_encode_varint_field", "encode_varint_field",
+    "_iter_proto_fields", "_iter_wire_fields", "iter_wire_fields",
+}
+assert not (ledger_defs & forbidden_wire_defs), f"Wire primitives leaked into ledger.py: {ledger_defs & forbidden_wire_defs}"
+
+for py_file in list(pathlib.Path("src").rglob("*.py")) + list(pathlib.Path("scripts").glob("*.py")):
+    if py_file.name == "_wire.py":
+        continue
+    fn_defs = {n.name for n in ast.walk(ast.parse(py_file.read_text(encoding="utf-8"))) if isinstance(n, ast.FunctionDef)}
+    dup_wire = fn_defs & {"read_varint", "_read_varint", "_read_proto_varint", "encode_varint", "_encode_varint"}
+    assert not dup_wire, f"Duplicate varint primitive in {py_file}: {dup_wire}"
 
 schema = json.load(open("schema/antigravity_2_30_schema.json"))
 rules = json.load(open("schema/sidebar_visibility_rules.json"))
@@ -85,8 +106,6 @@ for p in repo.rglob("*"):
         continue
     rel = p.relative_to(repo)
     if rel.parts[0] in (".git", "out") or "__pycache__" in rel.parts or rel.suffix == ".pyc":
-        continue
-    if rel.name in ("todo.md", "decisions.tsv"):
         continue
     txt = p.read_text(encoding="utf-8", errors="ignore")
     if rel.parts[0] in ("scripts", "src", "docs", "tests", "bin"):

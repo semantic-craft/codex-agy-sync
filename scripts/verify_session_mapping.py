@@ -5,6 +5,13 @@ import os
 import pathlib
 import re
 import sqlite3
+import sys
+
+_REPO_SRC = pathlib.Path(__file__).resolve().parent.parent / "src"
+if str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
+
+from codex_agy_sync._wire import encode_varint_field, iter_wire_fields, read_varint
 
 FORBIDDEN_AGY_PROJECT_BUCKETS = {"", "default-cli-project", "outside-of-project", "null", "none"}
 
@@ -21,20 +28,6 @@ CANONICAL_TOOL_MAPPING = {
 }
 
 
-def read_varint(buf: bytes, pos: int):
-    res = 0
-    shift = 0
-    while True:
-        b = buf[pos]
-        res |= (b & 0x7F) << shift
-        pos += 1
-        if not (b & 0x80):
-            return res, pos
-        shift += 7
-        if shift > 70:
-            raise ValueError("Varint too long")
-
-
 def decode_protobuf(buf: bytes, msg_name: str, schema: dict, unknown_log: list, depth: int = 0) -> dict:
     msgs = schema["messages"]
     enums = schema["enums"]
@@ -43,27 +36,9 @@ def decode_protobuf(buf: bytes, msg_name: str, schema: dict, unknown_log: list, 
         unknown_log.append(f"missing_message_descriptor:{msg_name}")
         return {}
     fields = md["fields"]
-    pos = 0
-    n = len(buf)
     out = {}
-    while pos < n:
-        tag, pos = read_varint(buf, pos)
-        fn = tag >> 3
-        wt = tag & 7
-        if wt == 0:
-            val, pos = read_varint(buf, pos)
-        elif wt == 2:
-            ln, pos = read_varint(buf, pos)
-            val = buf[pos : pos + ln]
-            pos += ln
-        elif wt == 5:
-            val = buf[pos : pos + 4]
-            pos += 4
-        elif wt == 1:
-            val = buf[pos : pos + 8]
-            pos += 8
-        else:
-            raise ValueError(f"Invalid wire type {wt} in {msg_name}")
+    for fn, wt, ival, raw in iter_wire_fields(buf):
+        val = ival if wt == 0 else raw
 
         finfo = fields.get(str(fn))
         if not finfo:
@@ -719,18 +694,9 @@ def build_bidirectional_mapping_matrix() -> list:
 
 
 def validate_negative_controls(schema: dict, sidebar_rules: dict, agy_report: dict, codex_report: dict) -> dict:
-    # Control 1: Inject an unknown wire field (field_number = 9999, wire_type = 0, value = 42) into CortexTrajectoryMetadata
-    unknown_tag = (9999 << 3) | 0
-    bad_buf = bytearray()
-    val = unknown_tag
-    while val >= 0x80:
-        bad_buf.append((val & 0x7F) | 0x80)
-        val >>= 7
-    bad_buf.append(val)
-    bad_buf.append(42)
-
+    bad_buf = encode_varint_field(9999, 42)
     unknowns = []
-    decode_protobuf(bytes(bad_buf), "exa.cortex_pb.CortexTrajectoryMetadata", schema, unknowns)
+    decode_protobuf(bad_buf, "exa.cortex_pb.CortexTrajectoryMetadata", schema, unknowns)
     caught_unknown_wire = any("9999" in u for u in unknowns)
 
     # Control 2: Mutate the real decoded Antigravity session's project_binding to a CLI bucket / source 17 and verify evaluate_agy_sidebar_visibility rejects both

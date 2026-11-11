@@ -7,6 +7,13 @@ import re
 import shutil
 import sqlite3
 import struct
+import sys
+
+_REPO_SRC = pathlib.Path(__file__).resolve().parent.parent / "src"
+if str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
+
+from codex_agy_sync._wire import iter_wire_fields, read_varint
 
 PROTO_TYPES = {
     1: "double",
@@ -211,20 +218,6 @@ def sha256_file(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
-def read_varint(buf: bytes, pos: int):
-    res = 0
-    shift = 0
-    while True:
-        b = buf[pos]
-        res |= (b & 0x7F) << shift
-        pos += 1
-        if not (b & 0x80):
-            return res, pos
-        shift += 7
-        if shift > 70:
-            raise ValueError("Varint too long")
-
-
 def walk_fdp_length(buf: bytes, start: int) -> int:
     pos = start
     n = len(buf)
@@ -262,28 +255,9 @@ def walk_fdp_length(buf: bytes, start: int) -> int:
 
 
 def parse_wire_message(buf: bytes):
-    pos = 0
     out = {}
-    n = len(buf)
-    while pos < n:
-        tag, pos = read_varint(buf, pos)
-        fn = tag >> 3
-        wt = tag & 7
-        if wt == 0:
-            v, pos = read_varint(buf, pos)
-        elif wt == 2:
-            ln, pos = read_varint(buf, pos)
-            v = buf[pos : pos + ln]
-            pos += ln
-        elif wt == 5:
-            v = buf[pos : pos + 4]
-            pos += 4
-        elif wt == 1:
-            v = buf[pos : pos + 8]
-            pos += 8
-        else:
-            raise ValueError(f"Unsupported wire type {wt} at pos {pos}")
-        out.setdefault(fn, []).append(v)
+    for fn, wt, ival, raw in iter_wire_fields(buf):
+        out.setdefault(fn, []).append(ival if wt == 0 else raw)
     return out
 
 

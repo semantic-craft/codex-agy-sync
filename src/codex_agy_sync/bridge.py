@@ -42,11 +42,16 @@ import time
 from typing import Any, Literal, Mapping, Protocol, Sequence, Tuple, TypeAlias
 import uuid
 
+from ._wire import encode_string_field
 from .codecs import (
     AgyRawStepRow,
     CodexRawRolloutLine,
     TrajectoryWireCodec,
-    _iter_wire_fields,
+    decode_cascade_summary_proto,
+    decode_summaries_state_proto,
+    decode_trajectory_metadata_proto,
+    encode_trajectory_metadata_proto,
+    parse_annotation_pbtxt_title,
 )
 from .ledger import (
     AgyGuiSafeSource,
@@ -67,14 +72,7 @@ from .ledger import (
     TurnId,
     WorkspacePath,
     WorkspaceRootUri,
-    _encode_bytes_field,
-    _encode_string_field,
-    _encode_timestamp_proto,
-    _encode_trajectory_metadata_proto,
-    _encode_varint_field,
-    decode_summaries_state_proto,
     parse_workspace_identity,
-    resolve_canonical_title,
     validate_session_id,
 )
 
@@ -401,33 +399,7 @@ class PairedSessionDescriptor:
 
 def _parse_agy_trajectory_metadata_lineage(raw_blob: bytes) -> dict[str, Any]:
     """Decode subagent lineage fields (5, 6, 7, 8, 17, 18) from `CortexTrajectoryMetadata`."""
-    info: dict[str, Any] = {
-        "parent_conversation_id": "",
-        "root_conversation_id": "",
-        "workspace_uris": [],
-        "agent_type_name": "",
-        "agent_role": "",
-        "nesting_depth": 0,
-        "project_id": "",
-    }
-    for fn, wt, val, raw in _iter_wire_fields(raw_blob):
-        if fn == 5 and wt == 2:
-            info["parent_conversation_id"] = raw.decode("utf-8", errors="replace").strip()
-        elif fn == 6 and wt == 2:
-            info["root_conversation_id"] = raw.decode("utf-8", errors="replace").strip()
-        elif fn == 7 and wt == 2:
-            info["workspace_uris"].append(raw.decode("utf-8", errors="replace").strip())
-        elif fn == 8 and wt == 2:
-            for sfn, swt, _, sraw in _iter_wire_fields(raw):
-                if sfn == 1 and swt == 2:
-                    info["agent_type_name"] = sraw.decode("utf-8", errors="replace").strip()
-                elif sfn == 2 and swt == 2:
-                    info["agent_role"] = sraw.decode("utf-8", errors="replace").strip()
-        elif fn == 17 and wt == 0:
-            info["nesting_depth"] = max(0, int(val))
-        elif fn == 18 and wt == 2:
-            info["project_id"] = raw.decode("utf-8", errors="replace").strip()
-    return info
+    return decode_trajectory_metadata_proto(raw_blob)
 
 
 class ProjectRegistry:
@@ -2106,16 +2078,9 @@ class DefaultHostTransport:
             label="cascade_id",
         )
         if annot_path.is_file():
-            raw = annot_path.read_text(encoding="utf-8", errors="replace")
-            m = re.search(r'title:\s*"((?:[^"\\]|\\.)*)"', raw)
-            if m and m.group(1).strip():
-                pbtxt_title = (
-                    m.group(1)
-                    .replace('\\"', '"')
-                    .replace("\\n", "\n")
-                    .replace("\\\\", "\\")
-                    .strip()
-                )
+            pbtxt_title = parse_annotation_pbtxt_title(
+                annot_path.read_text(encoding="utf-8", errors="replace")
+            )
 
         db_title: str | None = None
         summary_annot_title: str | None = None
@@ -2132,13 +2097,14 @@ class DefaultHostTransport:
                         if row[0] and str(row[0]).strip():
                             db_title = str(row[0]).strip()
                         if row[1]:
-                            for fn, wt, _, raw in _iter_wire_fields(bytes(row[1])):
-                                if fn == 15 and wt == 2:
-                                    for afn, awt, _, araw in _iter_wire_fields(raw):
-                                        if afn == 1 and awt == 2:
-                                            cand = araw.decode("utf-8", errors="replace").strip()
-                                            if cand:
-                                                summary_annot_title = cand
+                            try:
+                                cand = decode_cascade_summary_proto(
+                                    bytes(row[1]), fallback_cascade_id=cascade_id
+                                ).annotations.title.strip()
+                                if cand:
+                                    summary_annot_title = cand
+                            except ValueError:
+                                pass
                 finally:
                     conn.close()
             except sqlite3.OperationalError:
@@ -2401,7 +2367,7 @@ class DefaultHostTransport:
                 if full_ledger.events
                 else _now_iso()
             )
-            tmeta_blob = _encode_trajectory_metadata_proto(
+            tmeta_blob = encode_trajectory_metadata_proto(
                 project_id=binding.agy_project_id,
                 workspace_uris=(binding.workspace_uri,),
                 created_at_iso=created_iso,
@@ -2420,7 +2386,7 @@ class DefaultHostTransport:
                 conn.execute("DELETE FROM parent_references")
                 conn.execute(
                     "INSERT INTO parent_references (idx, data) VALUES (0, ?)",
-                    (_encode_string_field(1, str(forked_from_cascade_id)),),
+                    (encode_string_field(1, str(forked_from_cascade_id)),),
                 )
             conn.commit()
             persisted_rows = conn.execute(

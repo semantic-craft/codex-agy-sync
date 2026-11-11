@@ -20,17 +20,38 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import IntEnum
 import json
 import re
 from typing import Any, Literal, Mapping, Sequence, Tuple
 
+from ._wire import (
+    UnknownWireField,
+    decode_timestamp_proto,
+    encode_bytes_field,
+    encode_string_field,
+    encode_timestamp_proto,
+    encode_unknown_field,
+    encode_unknown_fields,
+    encode_varint,
+    encode_varint_field,
+    iter_wire_fields,
+    parse_iso_to_seconds_nanos,
+    parse_proto_fields,
+    read_varint,
+    signed_int32,
+    signed_int64,
+)
 from .ledger import (
+    AgyGuiSafeSource,
+    AgyProjectId,
+    AnnotationPbtxtProjection,
     AskQuestionPayload,
     AssistantTextEvent,
     CanonicalEvent,
     CanonicalToolPayload,
+    CascadeId,
+    CascadeSummaryProjection,
     CheckpointEvent,
     DefineSubagentPayload,
     EventOriginAnchor,
@@ -57,6 +78,7 @@ from .ledger import (
     SearchWebPayload,
     SendMessagePayload,
     StepIndex,
+    SummariesStateProjection,
     SystemEvent,
     TaskBoundaryEvent,
     ThinkingEvent,
@@ -64,18 +86,13 @@ from .ledger import (
     ToolCallEvent,
     ToolCallId,
     ToolResultEvent,
+    TrajectoryId,
     TrajectoryLedger,
+    TranscriptRowProjection,
     TurnId,
-    UnknownWireField,
     UserInputEvent,
     WorkspacePath,
     WorkspaceRootUri,
-    _encode_bytes_field,
-    _encode_string_field,
-    _encode_timestamp_proto,
-    _encode_varint,
-    _encode_varint_field,
-    _serialize_tool_payload_to_arguments_json,
     normalize_tool_file_path,
 )
 
@@ -375,116 +392,14 @@ class CodexRawRolloutLine:
     raw_json: str
 
 
-# ---------------------------------------------------------------------------
-# Low-Level Protobuf Wire Parser and Builder
-# ---------------------------------------------------------------------------
-
-
-def _read_varint(buf: bytes, pos: int) -> tuple[int, int]:
-    res = 0
-    shift = 0
-    n = len(buf)
-    while pos < n:
-        b = buf[pos]
-        res |= (b & 0x7F) << shift
-        pos += 1
-        if not (b & 0x80):
-            return res, pos
-        shift += 7
-        if shift > 70:
-            raise ValueError("Protobuf varint exceeds 70 bits.")
-    raise ValueError("Truncated protobuf varint.")
-
-
-def _signed_int64(val: int) -> int:
-    if val >= (1 << 63):
-        return val - (1 << 64)
-    return val
-
-
-def _signed_int32(val: int) -> int:
-    val &= 0xFFFFFFFF
-    if val >= (1 << 31):
-        return val - (1 << 32)
-    return val
-
-
-def _iter_wire_fields(buf: bytes) -> list[tuple[int, int, int, bytes]]:
-    """Return list of `(field_num, wire_type, int_val, raw_bytes_val)`."""
-    pos = 0
-    n = len(buf)
-    fields: list[tuple[int, int, int, bytes]] = []
-    while pos < n:
-        tag_start = pos
-        tag, pos = _read_varint(buf, pos)
-        fn = tag >> 3
-        wt = tag & 7
-        if wt == 0:
-            val_start = pos
-            ival, pos = _read_varint(buf, pos)
-            fields.append((fn, wt, ival, buf[val_start:pos]))
-        elif wt == 2:
-            ln, pos = _read_varint(buf, pos)
-            end = pos + ln
-            if end > n:
-                raise ValueError("Truncated length-delimited field.")
-            fields.append((fn, wt, ln, buf[pos:end]))
-            pos = end
-        elif wt == 5:
-            end = pos + 4
-            if end > n:
-                raise ValueError("Truncated fixed32 field.")
-            fields.append((fn, wt, int.from_bytes(buf[pos:end], "little"), buf[pos:end]))
-            pos = end
-        elif wt == 1:
-            end = pos + 8
-            if end > n:
-                raise ValueError("Truncated fixed64 field.")
-            fields.append((fn, wt, int.from_bytes(buf[pos:end], "little"), buf[pos:end]))
-            pos = end
-        else:
-            raise ValueError(f"Unsupported protobuf wire type {wt} at offset {tag_start}.")
-    return fields
-
-
-def _encode_unknown_wire_field(uf: UnknownWireField) -> bytes:
-    tag = (uf.field_tag << 3) | (uf.wire_type & 7)
-    tag_bytes = _encode_varint(tag)
-    if uf.wire_type == 0:
-        if uf.raw_bytes:
-            return tag_bytes + uf.raw_bytes
-        return tag_bytes + b"\x00"
-    if uf.wire_type == 2:
-        return tag_bytes + _encode_varint(len(uf.raw_bytes)) + uf.raw_bytes
-    if uf.wire_type in (1, 5):
-        return tag_bytes + uf.raw_bytes
-    return b""
-
-
-def _decode_timestamp_iso(buf: bytes) -> str:
-    seconds = 0
-    nanos = 0
-    for fn, wt, ival, _ in _iter_wire_fields(buf):
-        if fn == 1 and wt == 0:
-            seconds = _signed_int64(ival)
-        elif fn == 2 and wt == 0:
-            nanos = _signed_int32(ival)
-    if seconds <= 0:
-        return "2026-01-01T00:00:00Z"
-    dt = datetime.fromtimestamp(seconds + (nanos / 1_000_000_000.0), tz=timezone.utc)
-    if nanos:
-        return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _decode_duration_ms(buf: bytes) -> int:
     seconds = 0
     nanos = 0
-    for fn, wt, ival, _ in _iter_wire_fields(buf):
+    for fn, wt, ival, _ in iter_wire_fields(buf):
         if fn == 1 and wt == 0:
-            seconds = _signed_int64(ival)
+            seconds = signed_int64(ival)
         elif fn == 2 and wt == 0:
-            nanos = _signed_int32(ival)
+            nanos = signed_int32(ival)
     return int(seconds * 1000 + (nanos // 1_000_000))
 
 
@@ -495,15 +410,15 @@ def _encode_duration_proto(duration_ms: int) -> bytes:
     nanos = (duration_ms % 1000) * 1_000_000
     out = bytearray()
     if seconds:
-        out.extend(_encode_varint_field(1, seconds))
+        out.extend(encode_varint_field(1, seconds))
     if nanos:
-        out.extend(_encode_varint_field(2, nanos))
+        out.extend(encode_varint_field(2, nanos))
     return bytes(out)
 
 
 def _decode_chat_tool_call(buf: bytes) -> dict[str, Any]:
     out: dict[str, Any] = {"id": "", "name": "", "arguments_json": "{}"}
-    for fn, wt, _, raw in _iter_wire_fields(buf):
+    for fn, wt, _, raw in iter_wire_fields(buf):
         if fn == 1 and wt == 2:
             out["id"] = raw.decode("utf-8", errors="replace")
         elif fn == 2 and wt == 2:
@@ -517,9 +432,9 @@ def _decode_chat_tool_call(buf: bytes) -> dict[str, Any]:
 
 def _encode_chat_tool_call(call_id: str, name: str, arguments_json: str) -> bytes:
     buf = bytearray()
-    buf.extend(_encode_string_field(1, call_id))
-    buf.extend(_encode_string_field(2, name))
-    buf.extend(_encode_string_field(3, arguments_json))
+    buf.extend(encode_string_field(1, call_id))
+    buf.extend(encode_string_field(2, name))
+    buf.extend(encode_string_field(3, arguments_json))
     return bytes(buf)
 
 
@@ -537,18 +452,18 @@ def _decode_step_metadata(buf: bytes) -> tuple[dict[str, Any], list[UnknownWireF
         " preserved_fields": [],
     }
     unknowns: list[UnknownWireField] = []
-    for fn, wt, ival, raw in _iter_wire_fields(buf):
+    for fn, wt, ival, raw in iter_wire_fields(buf):
         if fn not in known_tags:
             unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
             continue
         if fn == 1 and wt == 2:
-            meta["created_at_iso"] = _decode_timestamp_iso(raw)
+            meta["created_at_iso"] = decode_timestamp_proto(raw)
         elif fn == 3 and wt == 0:
             meta["source"] = ival
         elif fn == 4 and wt == 2:
             meta["tool_call"] = _decode_chat_tool_call(raw)
         elif fn == 9 and wt == 2:
-            for ufn, uwt, uival, _ in _iter_wire_fields(raw):
+            for ufn, uwt, uival, _ in iter_wire_fields(raw):
                 if ufn == 2 and uwt == 0:
                     meta["input_tokens"] = uival
                 elif ufn == 3 and uwt == 0:
@@ -575,35 +490,35 @@ def _encode_step_metadata(
     extra_fields: Sequence[UnknownWireField] = (),
 ) -> bytes:
     buf = bytearray()
-    ts_bytes = _encode_timestamp_proto(created_at_iso)
+    ts_bytes = encode_timestamp_proto(created_at_iso)
     if ts_bytes:
-        buf.extend(_encode_bytes_field(1, ts_bytes))
+        buf.extend(encode_bytes_field(1, ts_bytes))
     if source_enum:
-        buf.extend(_encode_varint_field(3, source_enum))
+        buf.extend(encode_varint_field(3, source_enum))
     if tool_call is not None:
         tc_bytes = _encode_chat_tool_call(
             tool_call.get("id", ""),
             tool_call.get("name", ""),
             tool_call.get("arguments_json", "{}"),
         )
-        buf.extend(_encode_bytes_field(4, tc_bytes))
+        buf.extend(encode_bytes_field(4, tc_bytes))
     if token_usage is not None and (
         token_usage.input_tokens or token_usage.output_tokens or token_usage.cache_read_tokens
     ):
         usage_buf = bytearray()
         if token_usage.input_tokens:
-            usage_buf.extend(_encode_varint_field(2, token_usage.input_tokens))
+            usage_buf.extend(encode_varint_field(2, token_usage.input_tokens))
         if token_usage.output_tokens:
-            usage_buf.extend(_encode_varint_field(3, token_usage.output_tokens))
+            usage_buf.extend(encode_varint_field(3, token_usage.output_tokens))
         if token_usage.cache_read_tokens:
-            usage_buf.extend(_encode_varint_field(5, token_usage.cache_read_tokens))
-        buf.extend(_encode_bytes_field(9, bytes(usage_buf)))
+            usage_buf.extend(encode_varint_field(5, token_usage.cache_read_tokens))
+        buf.extend(encode_bytes_field(9, bytes(usage_buf)))
     if generator_model and generator_model.isdigit():
-        buf.extend(_encode_varint_field(11, int(generator_model)))
+        buf.extend(encode_varint_field(11, int(generator_model)))
     if tool_summary:
-        buf.extend(_encode_string_field(30, tool_summary))
+        buf.extend(encode_string_field(30, tool_summary))
     for uf in extra_fields:
-        buf.extend(_encode_unknown_wire_field(uf))
+        buf.extend(encode_unknown_field(uf))
     return bytes(buf)
 
 
@@ -627,7 +542,7 @@ def _safe_json_dict(raw_json: str) -> dict[str, Any]:
 def _decode_any_envelope(buf: bytes) -> tuple[str, bytes]:
     type_url = ""
     value_bytes = b""
-    for fn, wt, _, raw in _iter_wire_fields(buf):
+    for fn, wt, _, raw in iter_wire_fields(buf):
         if fn == 1 and wt == 2:
             type_url = raw.decode("utf-8", errors="replace")
         elif fn == 2 and wt == 2:
@@ -636,18 +551,18 @@ def _decode_any_envelope(buf: bytes) -> tuple[str, bytes]:
 
 
 def _encode_any_envelope(type_url: str, value_bytes: bytes) -> bytes:
-    return _encode_string_field(1, type_url) + _encode_bytes_field(2, value_bytes)
+    return encode_string_field(1, type_url) + encode_bytes_field(2, value_bytes)
 
 
 def _decode_unified_diff_block(diff_block_bytes: bytes) -> str:
     lines_out: list[str] = []
-    for fn, wt, _, raw in _iter_wire_fields(diff_block_bytes):
+    for fn, wt, _, raw in iter_wire_fields(diff_block_bytes):
         if fn == 3 and wt == 2:
-            for ufn, uwt, _, uraw in _iter_wire_fields(raw):
+            for ufn, uwt, _, uraw in iter_wire_fields(raw):
                 if ufn == 3 and uwt == 2:
                     l_text = ""
                     l_type = 0
-                    for lfn, lwt, lival, lraw in _iter_wire_fields(uraw):
+                    for lfn, lwt, lival, lraw in iter_wire_fields(uraw):
                         if lfn == 1 and lwt == 2:
                             l_text = lraw.decode("utf-8", errors="replace")
                         elif lfn == 2 and lwt == 0:
@@ -671,9 +586,9 @@ def _encode_unified_diff_block(unified_diff: str) -> bytes:
         else:
             l_type = 3
             l_text = line[1:] if line.startswith(" ") else line
-        line_msg = _encode_string_field(1, l_text) + _encode_varint_field(2, l_type)
-        ud_buf.extend(_encode_bytes_field(3, line_msg))
-    return _encode_bytes_field(3, bytes(ud_buf))
+        line_msg = encode_string_field(1, l_text) + encode_varint_field(2, l_type)
+        ud_buf.extend(encode_bytes_field(3, line_msg))
+    return encode_bytes_field(3, bytes(ud_buf))
 
 
 def _decode_tool_any_bytes(
@@ -683,7 +598,7 @@ def _decode_tool_any_bytes(
     any_value: bytes,
 ) -> CanonicalToolPayload:
     kind = spec.payload_kind
-    f_items = _iter_wire_fields(any_value) if any_value else []
+    f_items = iter_wire_fields(any_value) if any_value else []
 
     if kind == "read_file":
         path = str(args_dict.get("Path") or args_dict.get("path") or "")
@@ -712,9 +627,9 @@ def _decode_tool_any_bytes(
             elif fn == 3 and wt == 2:
                 path = raw.decode("utf-8", errors="replace") or path
             elif fn == 4 and wt == 0:
-                start_line = _signed_int32(ival)
+                start_line = signed_int32(ival)
             elif fn == 5 and wt == 0:
-                end_line = _signed_int32(ival)
+                end_line = signed_int32(ival)
         return ReadFilePayload(
             kind="read_file",
             path=normalize_tool_file_path(path),
@@ -762,13 +677,13 @@ def _decode_tool_any_bytes(
                 if decoded_diff and not has_canonical_diff:
                     unified_diff = decoded_diff
             elif fn == 4 and wt == 2:
-                for sfn, swt, sival, _ in _iter_wire_fields(raw):
+                for sfn, swt, sival, _ in iter_wire_fields(raw):
                     if sfn == 1 and swt == 0:
-                        additions = _signed_int32(sival)
+                        additions = signed_int32(sival)
                     elif sfn == 2 and swt == 0:
-                        deletions = _signed_int32(sival)
+                        deletions = signed_int32(sival)
             elif fn == 5 and wt == 2:
-                for afn, awt, _, araw in _iter_wire_fields(raw):
+                for afn, awt, _, araw in iter_wire_fields(raw):
                     if afn == 2 and awt == 2:
                         artifact_summary = araw.decode("utf-8", errors="replace")
             elif fn == 6 and wt == 0:
@@ -821,11 +736,11 @@ def _decode_tool_any_bytes(
 
         for fn, wt, ival, raw in f_items:
             if fn == 1 and wt == 0:
-                exit_code = _signed_int32(ival)
+                exit_code = signed_int32(ival)
             elif fn == 2 and wt == 0:
                 timed_out = bool(ival)
             elif fn == 3 and wt == 2:
-                for sfn, swt, sival, sraw in _iter_wire_fields(raw):
+                for sfn, swt, sival, sraw in iter_wire_fields(raw):
                     if sfn == 1 and swt == 0:
                         ran_in_sandbox = bool(sival)
                     elif sfn == 2 and swt == 2:
@@ -878,7 +793,7 @@ def _decode_tool_any_bytes(
                 d_title = ""
                 d_url = ""
                 d_text = ""
-                for dfn, dwt, _, draw in _iter_wire_fields(raw):
+                for dfn, dwt, _, draw in iter_wire_fields(raw):
                     if dfn == 2 and dwt == 2:
                         d_text = draw.decode("utf-8", errors="replace")
                     elif dfn == 3 and dwt == 2:
@@ -911,7 +826,7 @@ def _decode_tool_any_bytes(
 
         for fn, wt, ival, raw in f_items:
             if fn == 1 and wt == 2:
-                for sfn, swt, _, sraw in _iter_wire_fields(raw):
+                for sfn, swt, _, sraw in iter_wire_fields(raw):
                     if sfn == 1 and swt == 2:
                         sub_type = sraw.decode("utf-8", errors="replace") or sub_type
                     elif sfn == 2 and swt == 2:
@@ -923,7 +838,7 @@ def _decode_tool_any_bytes(
                     elif sfn == 10 and swt == 2:
                         ws_mode = "share"
             elif fn == 2 and wt == 2:
-                for rfn, rwt, _, rraw in _iter_wire_fields(raw):
+                for rfn, rwt, _, rraw in iter_wire_fields(raw):
                     if rfn == 1 and rwt == 2:
                         spawned_cid = rraw.decode("utf-8", errors="replace")
             elif fn == 3 and wt == 0:
@@ -1050,13 +965,13 @@ def _decode_tool_any_bytes(
                 q_opts: list[QuestionOption] = []
                 q_multi = False
                 q_ans: list[str] = []
-                for qfn, qwt, qival, qraw in _iter_wire_fields(raw):
+                for qfn, qwt, qival, qraw in iter_wire_fields(raw):
                     if qfn == 1 and qwt == 2:
                         q_text = qraw.decode("utf-8", errors="replace")
                     elif qfn == 2 and qwt == 2:
                         opt_id = ""
                         opt_txt = ""
-                        for ofn, owt, _, oraw in _iter_wire_fields(qraw):
+                        for ofn, owt, _, oraw in iter_wire_fields(qraw):
                             if ofn == 1 and owt == 2:
                                 opt_id = oraw.decode("utf-8", errors="replace")
                             elif ofn == 2 and owt == 2:
@@ -1104,7 +1019,7 @@ def _decode_tool_any_bytes(
             if fn == 1 and wt == 2:
                 server_name = raw.decode("utf-8", errors="replace") or server_name
             elif fn == 2 and wt == 2:
-                for rfn, rwt, _, rraw in _iter_wire_fields(raw):
+                for rfn, rwt, _, rraw in iter_wire_fields(raw):
                     if rfn == 1 and rwt == 2:
                         uris.append(rraw.decode("utf-8", errors="replace"))
         return ListResourcesPayload(
@@ -1123,9 +1038,9 @@ def _decode_tool_any_bytes(
             elif fn == 2 and wt == 2:
                 uri = raw.decode("utf-8", errors="replace") or uri
             elif fn == 3 and wt == 2:
-                for cfn, cwt, _, craw in _iter_wire_fields(raw):
+                for cfn, cwt, _, craw in iter_wire_fields(raw):
                     if cfn == 2 and cwt == 2:
-                        for tfn, twt, _, traw in _iter_wire_fields(craw):
+                        for tfn, twt, _, traw in iter_wire_fields(craw):
                             if tfn == 1 and twt == 2:
                                 texts.append(traw.decode("utf-8", errors="replace"))
         return ReadResourcePayload(
@@ -1214,162 +1129,162 @@ def _encode_tool_payload_to_any(payload: CanonicalToolPayload) -> bytes:
     inner = bytearray()
     if isinstance(payload, ReadFilePayload):
         if payload.file_num_lines:
-            inner.extend(_encode_varint_field(1, payload.file_num_lines))
+            inner.extend(encode_varint_field(1, payload.file_num_lines))
         if payload.file_num_bytes:
-            inner.extend(_encode_varint_field(2, payload.file_num_bytes))
-        inner.extend(_encode_string_field(3, normalize_tool_file_path(payload.path)))
+            inner.extend(encode_varint_field(2, payload.file_num_bytes))
+        inner.extend(encode_string_field(3, normalize_tool_file_path(payload.path)))
         if payload.start_line is not None:
-            inner.extend(_encode_varint_field(4, payload.start_line))
+            inner.extend(encode_varint_field(4, payload.start_line))
         if payload.end_line is not None:
-            inner.extend(_encode_varint_field(5, payload.end_line))
+            inner.extend(encode_varint_field(5, payload.end_line))
 
     elif isinstance(payload, FileEditPayload):
         kind_code = 1 if payload.edit_op == "CREATE" else 3
-        inner.extend(_encode_varint_field(1, kind_code))
-        inner.extend(_encode_string_field(2, normalize_tool_file_path(payload.path)))
+        inner.extend(encode_varint_field(1, kind_code))
+        inner.extend(encode_string_field(2, normalize_tool_file_path(payload.path)))
         if payload.unified_diff:
             diff_block = _encode_unified_diff_block(payload.unified_diff)
             if diff_block:
-                inner.extend(_encode_bytes_field(3, diff_block))
+                inner.extend(encode_bytes_field(3, diff_block))
         adds, dels = payload.diff_stats
         if adds or dels:
-            stats_buf = _encode_varint_field(1, adds) + _encode_varint_field(2, dels)
-            inner.extend(_encode_bytes_field(4, stats_buf))
+            stats_buf = encode_varint_field(1, adds) + encode_varint_field(2, dels)
+            inner.extend(encode_bytes_field(4, stats_buf))
         if payload.artifact_summary:
-            art_buf = _encode_string_field(2, payload.artifact_summary)
-            inner.extend(_encode_bytes_field(5, art_buf))
+            art_buf = encode_string_field(2, payload.artifact_summary)
+            inner.extend(encode_bytes_field(5, art_buf))
         if payload.is_artifact:
-            inner.extend(_encode_varint_field(6, 1))
+            inner.extend(encode_varint_field(6, 1))
 
     elif isinstance(payload, RunCommandPayload):
         if payload.exit_code is not None:
-            inner.extend(_encode_varint_field(1, payload.exit_code))
+            inner.extend(encode_varint_field(1, payload.exit_code))
         else:
-            inner.extend(_encode_varint_field(8, 1))
+            inner.extend(encode_varint_field(8, 1))
         if payload.timed_out:
-            inner.extend(_encode_varint_field(2, 1))
+            inner.extend(encode_varint_field(2, 1))
         if payload.ran_in_sandbox or payload.sandbox_policy:
             sb_buf = bytearray()
             if payload.ran_in_sandbox:
-                sb_buf.extend(_encode_varint_field(1, 1))
+                sb_buf.extend(encode_varint_field(1, 1))
             if payload.sandbox_policy:
-                sb_buf.extend(_encode_string_field(2, payload.sandbox_policy))
-            inner.extend(_encode_bytes_field(3, bytes(sb_buf)))
+                sb_buf.extend(encode_string_field(2, payload.sandbox_policy))
+            inner.extend(encode_bytes_field(3, bytes(sb_buf)))
         if payload.shell_name:
-            inner.extend(_encode_string_field(5, payload.shell_name))
-        inner.extend(_encode_string_field(6, payload.command_line))
-        inner.extend(_encode_string_field(7, normalize_tool_file_path(payload.cwd)))
+            inner.extend(encode_string_field(5, payload.shell_name))
+        inner.extend(encode_string_field(6, payload.command_line))
+        inner.extend(encode_string_field(7, normalize_tool_file_path(payload.cwd)))
 
     elif isinstance(payload, SearchWebPayload):
-        inner.extend(_encode_string_field(1, payload.query))
+        inner.extend(encode_string_field(1, payload.query))
         if payload.domain_filter:
-            inner.extend(_encode_string_field(2, payload.domain_filter))
+            inner.extend(encode_string_field(2, payload.domain_filter))
         for doc in payload.documents:
             doc_buf = (
-                _encode_string_field(2, doc.snippet)
-                + _encode_string_field(3, doc.url)
-                + _encode_string_field(4, doc.title)
+                encode_string_field(2, doc.snippet)
+                + encode_string_field(3, doc.url)
+                + encode_string_field(4, doc.title)
             )
-            inner.extend(_encode_bytes_field(3, doc_buf))
+            inner.extend(encode_bytes_field(3, doc_buf))
         if payload.summary:
-            inner.extend(_encode_string_field(4, payload.summary))
+            inner.extend(encode_string_field(4, payload.summary))
 
     elif isinstance(payload, InvokeSubagentPayload):
         sub_buf = (
-            _encode_string_field(1, payload.subagent_type)
-            + _encode_string_field(2, payload.role)
-            + _encode_string_field(3, payload.prompt)
+            encode_string_field(1, payload.subagent_type)
+            + encode_string_field(2, payload.role)
+            + encode_string_field(3, payload.prompt)
         )
         if payload.workspace_mode == "branch":
-            sub_buf += _encode_string_field(5, "branch")
+            sub_buf += encode_string_field(5, "branch")
         elif payload.workspace_mode == "share":
-            sub_buf += _encode_string_field(10, "share")
+            sub_buf += encode_string_field(10, "share")
         else:
-            sub_buf += _encode_varint_field(4, 1)
-        inner.extend(_encode_bytes_field(1, sub_buf))
+            sub_buf += encode_varint_field(4, 1)
+        inner.extend(encode_bytes_field(1, sub_buf))
         if payload.spawned_conversation_id:
-            res_buf = _encode_string_field(1, payload.spawned_conversation_id)
-            inner.extend(_encode_bytes_field(2, res_buf))
+            res_buf = encode_string_field(1, payload.spawned_conversation_id)
+            inner.extend(encode_bytes_field(2, res_buf))
         if payload.task_mode:
-            inner.extend(_encode_varint_field(3, 1))
+            inner.extend(encode_varint_field(3, 1))
 
     elif isinstance(payload, DefineSubagentPayload):
-        inner.extend(_encode_string_field(1, payload.name))
+        inner.extend(encode_string_field(1, payload.name))
         for tname in payload.tool_names:
-            inner.extend(_encode_string_field(2, tname))
+            inner.extend(encode_string_field(2, tname))
         if payload.agent_path:
-            inner.extend(_encode_string_field(3, normalize_tool_file_path(payload.agent_path)))
+            inner.extend(encode_string_field(3, normalize_tool_file_path(payload.agent_path)))
 
     elif isinstance(payload, ManageSubagentsPayload):
-        inner.extend(_encode_string_field(1, payload.action))
+        inner.extend(encode_string_field(1, payload.action))
         for cid in payload.target_conversation_ids:
-            inner.extend(_encode_string_field(2, cid))
+            inner.extend(encode_string_field(2, cid))
 
     elif isinstance(payload, ManageTaskPayload):
-        inner.extend(_encode_string_field(1, payload.action))
+        inner.extend(encode_string_field(1, payload.action))
         if payload.task_id:
-            inner.extend(_encode_string_field(2, payload.task_id))
+            inner.extend(encode_string_field(2, payload.task_id))
         if payload.input_text:
-            inner.extend(_encode_string_field(3, payload.input_text))
+            inner.extend(encode_string_field(3, payload.input_text))
 
     elif isinstance(payload, SendMessagePayload):
-        inner.extend(_encode_string_field(1, payload.recipient_id))
+        inner.extend(encode_string_field(1, payload.recipient_id))
         if payload.recipient_name:
-            inner.extend(_encode_string_field(2, payload.recipient_name))
-        inner.extend(_encode_string_field(3, payload.message_body))
+            inner.extend(encode_string_field(2, payload.recipient_name))
+        inner.extend(encode_string_field(3, payload.message_body))
 
     elif isinstance(payload, SchedulePayload):
         mode = "cron" if payload.cron_expression else "timer"
-        inner.extend(_encode_string_field(1, mode))
-        inner.extend(_encode_string_field(2, payload.prompt))
+        inner.extend(encode_string_field(1, mode))
+        inner.extend(encode_string_field(2, payload.prompt))
 
     elif isinstance(payload, AskQuestionPayload):
         for q in payload.questions:
             q_buf = bytearray()
-            q_buf.extend(_encode_string_field(1, q.question))
+            q_buf.extend(encode_string_field(1, q.question))
             for opt in q.options:
-                opt_buf = _encode_string_field(1, opt.description or opt.label) + _encode_string_field(2, opt.label)
-                q_buf.extend(_encode_bytes_field(2, opt_buf))
+                opt_buf = encode_string_field(1, opt.description or opt.label) + encode_string_field(2, opt.label)
+                q_buf.extend(encode_bytes_field(2, opt_buf))
             if q.is_multi_select:
-                q_buf.extend(_encode_varint_field(3, 1))
+                q_buf.extend(encode_varint_field(3, 1))
             for ans in q.user_answers:
-                q_buf.extend(_encode_string_field(4, ans))
-            inner.extend(_encode_bytes_field(1, bytes(q_buf)))
+                q_buf.extend(encode_string_field(4, ans))
+            inner.extend(encode_bytes_field(1, bytes(q_buf)))
 
     elif isinstance(payload, ListResourcesPayload):
-        inner.extend(_encode_string_field(1, payload.server_name))
+        inner.extend(encode_string_field(1, payload.server_name))
         for uri in payload.resource_uris:
-            res_buf = _encode_string_field(1, uri)
-            inner.extend(_encode_bytes_field(2, res_buf))
+            res_buf = encode_string_field(1, uri)
+            inner.extend(encode_bytes_field(2, res_buf))
 
     elif isinstance(payload, ReadResourcePayload):
-        inner.extend(_encode_string_field(1, payload.server_name))
-        inner.extend(_encode_string_field(2, payload.uri))
+        inner.extend(encode_string_field(1, payload.server_name))
+        inner.extend(encode_string_field(2, payload.uri))
         for txt in payload.contents_text:
-            text_data = _encode_string_field(1, txt)
-            content_item = _encode_string_field(1, payload.uri) + _encode_bytes_field(2, text_data)
-            inner.extend(_encode_bytes_field(3, content_item))
+            text_data = encode_string_field(1, txt)
+            content_item = encode_string_field(1, payload.uri) + encode_bytes_field(2, text_data)
+            inner.extend(encode_bytes_field(3, content_item))
 
     elif isinstance(payload, GenerateImagePayload):
-        inner.extend(_encode_string_field(1, payload.prompt))
+        inner.extend(encode_string_field(1, payload.prompt))
         for p in payload.image_paths:
-            inner.extend(_encode_string_field(2, normalize_tool_file_path(p)))
-        inner.extend(_encode_string_field(3, payload.aspect_ratio))
+            inner.extend(encode_string_field(2, normalize_tool_file_path(p)))
+        inner.extend(encode_string_field(3, payload.aspect_ratio))
         if payload.image_uri:
-            inner.extend(_encode_string_field(4, payload.image_uri))
+            inner.extend(encode_string_field(4, payload.image_uri))
         if payload.model_name:
-            inner.extend(_encode_string_field(6, payload.model_name))
+            inner.extend(encode_string_field(6, payload.model_name))
 
     elif isinstance(payload, MomaSearchPayload):
-        inner.extend(_encode_string_field(1, payload.query))
+        inner.extend(encode_string_field(1, payload.query))
         for idx in range(payload.result_count):
-            res_buf = _encode_string_field(2, f"result-{idx}")
-            inner.extend(_encode_bytes_field(2, res_buf))
+            res_buf = encode_string_field(2, f"result-{idx}")
+            inner.extend(encode_bytes_field(2, res_buf))
 
     elif isinstance(payload, FinishPayload):
-        inner.extend(_encode_string_field(1, payload.arguments_json))
+        inner.extend(encode_string_field(1, payload.arguments_json))
         if payload.has_result_schema:
-            inner.extend(_encode_varint_field(2, 1))
+            inner.extend(encode_varint_field(2, 1))
 
     return _encode_any_envelope(spec.agy_any_type_url, bytes(inner))
 
@@ -1379,7 +1294,7 @@ def _serialize_agy_chat_tool_arguments(payload: CanonicalToolPayload) -> str:
         return payload.raw_arguments_json or "{}"
     if isinstance(payload, FinishPayload):
         return payload.arguments_json or "{}"
-    data = _safe_json_dict(_serialize_tool_payload_to_arguments_json(payload))
+    data = _safe_json_dict(serialize_tool_payload_arguments_json(payload))
     if isinstance(payload, RunCommandPayload):
         data["CommandLine"] = payload.command_line
         data["Cwd"] = normalize_tool_file_path(payload.cwd)
@@ -1482,7 +1397,7 @@ class TrajectoryWireCodec:
                 HostExtensionEnvelope(
                     host=HostKind.ANTIGRAVITY,
                     extension_type="agy_submessage_unknowns",
-                    raw_payload=b"".join(_encode_unknown_wire_field(u) for u in sub_unknowns),
+                    raw_payload=b"".join(encode_unknown_field(u) for u in sub_unknowns),
                 ),
             )
 
@@ -1505,7 +1420,7 @@ class TrajectoryWireCodec:
                     [],
                 )
             )
-            step_fields = _iter_wire_fields(row.step_payload_blob) if row.step_payload_blob else []
+            step_fields = iter_wire_fields(row.step_payload_blob) if row.step_payload_blob else []
             step_unknowns: list[UnknownWireField] = []
 
             spec: StepWireSpec | None = None
@@ -1546,7 +1461,7 @@ class TrajectoryWireCodec:
                 known_ui_tags = set(range(1, 20))
                 ui_unknowns: list[UnknownWireField] = []
 
-                for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
+                for fn, wt, _, raw in iter_wire_fields(oneof_bytes):
                     if fn not in known_ui_tags:
                         ui_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
@@ -1554,7 +1469,7 @@ class TrajectoryWireCodec:
                     elif fn == 2 and wt == 2:
                         user_resp = raw.decode("utf-8", errors="replace")
                     elif fn == 3 and wt == 2:
-                        for ifn, iwt, _, iraw in _iter_wire_fields(raw):
+                        for ifn, iwt, _, iraw in iter_wire_fields(raw):
                             if ifn == 1 and iwt == 2:
                                 item_texts.append(iraw.decode("utf-8", errors="replace"))
                             elif ifn == 2 and iwt == 2:
@@ -1562,7 +1477,7 @@ class TrajectoryWireCodec:
                     elif fn == 9 and wt == 2:
                         m_mime = ""
                         m_uri = ""
-                        for mfn, mwt, _, mraw in _iter_wire_fields(raw):
+                        for mfn, mwt, _, mraw in iter_wire_fields(raw):
                             if mfn == 1 and mwt == 2:
                                 m_mime = mraw.decode("utf-8", errors="replace")
                             elif mfn == 5 and mwt == 2:
@@ -1606,7 +1521,7 @@ class TrajectoryWireCodec:
                 known_pr_tags = set(range(1, 21))
                 pr_unknowns: list[UnknownWireField] = []
 
-                for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
+                for fn, wt, ival, raw in iter_wire_fields(oneof_bytes):
                     if fn not in known_pr_tags:
                         pr_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
@@ -1722,13 +1637,13 @@ class TrajectoryWireCodec:
                 known_gen_tags = {1, 2}
                 gen_unknowns: list[UnknownWireField] = []
 
-                for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
+                for fn, wt, _, raw in iter_wire_fields(oneof_bytes):
                     if fn not in known_gen_tags:
                         gen_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
                         k_str = ""
                         v_str = ""
-                        for afn, awt, _, araw in _iter_wire_fields(raw):
+                        for afn, awt, _, araw in iter_wire_fields(raw):
                             if afn == 1 and awt == 2:
                                 k_str = araw.decode("utf-8", errors="replace")
                             elif afn == 2 and awt == 2:
@@ -1736,7 +1651,7 @@ class TrajectoryWireCodec:
                         if k_str:
                             args_map[k_str] = v_str
                     elif fn == 2 and wt == 2:
-                        for rfn, rwt, _, rraw in _iter_wire_fields(raw):
+                        for rfn, rwt, _, rraw in iter_wire_fields(raw):
                             if rfn == 1 and rwt == 2:
                                 result_text = rraw.decode("utf-8", errors="replace")
                             elif rfn == 6 and rwt == 2:
@@ -1799,7 +1714,7 @@ class TrajectoryWireCodec:
                 known_cp_tags = set(range(1, 32))
                 cp_unknowns: list[UnknownWireField] = []
 
-                for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
+                for fn, wt, ival, raw in iter_wire_fields(oneof_bytes):
                     if fn not in known_cp_tags:
                         cp_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 0:
@@ -1841,7 +1756,7 @@ class TrajectoryWireCodec:
                 known_tb_tags = set(range(1, 8))
                 tb_unknowns: list[UnknownWireField] = []
 
-                for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
+                for fn, wt, ival, raw in iter_wire_fields(oneof_bytes):
                     if fn not in known_tb_tags:
                         tb_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
@@ -1889,7 +1804,7 @@ class TrajectoryWireCodec:
                 known_nu_tags = set(range(1, 9))
                 nu_unknowns: list[UnknownWireField] = []
 
-                for fn, wt, ival, raw in _iter_wire_fields(oneof_bytes):
+                for fn, wt, ival, raw in iter_wire_fields(oneof_bytes):
                     if fn not in known_nu_tags:
                         nu_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
@@ -1926,7 +1841,7 @@ class TrajectoryWireCodec:
                 known_sm_tags = set(range(1, 7))
                 sm_unknowns: list[UnknownWireField] = []
 
-                for fn, wt, _, raw in _iter_wire_fields(oneof_bytes):
+                for fn, wt, _, raw in iter_wire_fields(oneof_bytes):
                     if fn not in known_sm_tags:
                         sm_unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
                     elif fn == 1 and wt == 2:
@@ -2023,17 +1938,17 @@ class TrajectoryWireCodec:
 
                 pr_buf = bytearray()
                 if text_ev is not None and text_ev.text:
-                    pr_buf.extend(_encode_string_field(1, text_ev.text))
+                    pr_buf.extend(encode_string_field(1, text_ev.text))
                 if thinking_ev is not None and thinking_ev.summary_text:
-                    pr_buf.extend(_encode_string_field(3, thinking_ev.summary_text))
+                    pr_buf.extend(encode_string_field(3, thinking_ev.summary_text))
                 if text_ev is not None and text_ev.message_id:
-                    pr_buf.extend(_encode_string_field(6, text_ev.message_id))
+                    pr_buf.extend(encode_string_field(6, text_ev.message_id))
                 for tc_ev in tool_evs:
                     spec_for_call = TOOL_SPEC_BY_PAYLOAD_KIND.get(tc_ev.payload.kind)
                     agy_tname = spec_for_call.agy_tool_name if spec_for_call else tc_ev.tool_name
                     args_json = _serialize_agy_chat_tool_arguments(tc_ev.payload)
                     pr_buf.extend(
-                        _encode_bytes_field(
+                        encode_bytes_field(
                             7,
                             _encode_chat_tool_call(str(tc_ev.call_id), agy_tname, args_json),
                         )
@@ -2041,13 +1956,13 @@ class TrajectoryWireCodec:
                 if token_usage.thinking_duration_ms:
                     dur_bytes = _encode_duration_proto(token_usage.thinking_duration_ms)
                     if dur_bytes:
-                        pr_buf.extend(_encode_bytes_field(11, dur_bytes))
+                        pr_buf.extend(encode_bytes_field(11, dur_bytes))
                 if text_ev is not None and text_ev.stop_reason and text_ev.stop_reason.isdigit():
-                    pr_buf.extend(_encode_varint_field(12, int(text_ev.stop_reason)))
+                    pr_buf.extend(encode_varint_field(12, int(text_ev.stop_reason)))
                 if thinking_ev is not None and thinking_ev.thinking_signature:
-                    pr_buf.extend(_encode_bytes_field(14, thinking_ev.thinking_signature))
+                    pr_buf.extend(encode_bytes_field(14, thinking_ev.thinking_signature))
                 if thinking_ev is not None and thinking_ev.raw_thinking:
-                    pr_buf.extend(_encode_string_field(16, thinking_ev.raw_thinking))
+                    pr_buf.extend(encode_string_field(16, thinking_ev.raw_thinking))
                 for ext in first_ev.anchor.host_extensions:
                     if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
                         pr_buf.extend(ext.raw_payload)
@@ -2059,12 +1974,12 @@ class TrajectoryWireCodec:
                     generator_model=gen_model,
                 )
                 step_buf = bytearray()
-                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.PLANNER_RESPONSE)))
-                step_buf.extend(_encode_varint_field(4, 3))
-                step_buf.extend(_encode_bytes_field(5, meta_blob))
-                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.PLANNER_RESPONSE_TAG), bytes(pr_buf)))
+                step_buf.extend(encode_varint_field(1, int(CortexStepTypeCode.PLANNER_RESPONSE)))
+                step_buf.extend(encode_varint_field(4, 3))
+                step_buf.extend(encode_bytes_field(5, meta_blob))
+                step_buf.extend(encode_bytes_field(int(GeminiStepWireTag.PLANNER_RESPONSE_TAG), bytes(pr_buf)))
                 for uf in unknowns:
-                    step_buf.extend(_encode_unknown_wire_field(uf))
+                    step_buf.extend(encode_unknown_field(uf))
 
                 rows.append(
                     AgyRawStepRow(
@@ -2081,15 +1996,15 @@ class TrajectoryWireCodec:
 
             if isinstance(ev, UserInputEvent):
                 ui_buf = bytearray()
-                ui_buf.extend(_encode_string_field(1, ev.query_text))
-                ui_buf.extend(_encode_string_field(2, ev.query_text))
-                item_msg = _encode_string_field(1, ev.query_text)
-                ui_buf.extend(_encode_bytes_field(3, item_msg))
+                ui_buf.extend(encode_string_field(1, ev.query_text))
+                ui_buf.extend(encode_string_field(2, ev.query_text))
+                item_msg = encode_string_field(1, ev.query_text)
+                ui_buf.extend(encode_bytes_field(3, item_msg))
                 for m in ev.media:
-                    m_msg = _encode_string_field(1, m.mime_type) + _encode_string_field(5, m.uri)
-                    ui_buf.extend(_encode_bytes_field(9, m_msg))
+                    m_msg = encode_string_field(1, m.mime_type) + encode_string_field(5, m.uri)
+                    ui_buf.extend(encode_bytes_field(9, m_msg))
                 if ev.anchor.client_message_id:
-                    ui_buf.extend(_encode_string_field(19, ev.anchor.client_message_id))
+                    ui_buf.extend(encode_string_field(19, ev.anchor.client_message_id))
                 for ext in ev.anchor.host_extensions:
                     if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
                         ui_buf.extend(ext.raw_payload)
@@ -2099,12 +2014,12 @@ class TrajectoryWireCodec:
                     source_enum=4,
                 )
                 step_buf = bytearray()
-                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.USER_INPUT)))
-                step_buf.extend(_encode_varint_field(4, 3))
-                step_buf.extend(_encode_bytes_field(5, meta_blob))
-                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.USER_INPUT_TAG), bytes(ui_buf)))
+                step_buf.extend(encode_varint_field(1, int(CortexStepTypeCode.USER_INPUT)))
+                step_buf.extend(encode_varint_field(4, 3))
+                step_buf.extend(encode_bytes_field(5, meta_blob))
+                step_buf.extend(encode_bytes_field(int(GeminiStepWireTag.USER_INPUT_TAG), bytes(ui_buf)))
                 for uf in ev.anchor.unknown_wire_fields:
-                    step_buf.extend(_encode_unknown_wire_field(uf))
+                    step_buf.extend(encode_unknown_field(uf))
 
                 rows.append(
                     AgyRawStepRow(
@@ -2133,17 +2048,17 @@ class TrajectoryWireCodec:
                         if isinstance(args_dict[k], str)
                         else json.dumps(args_dict[k], ensure_ascii=False)
                     )
-                    entry = _encode_string_field(1, str(k)) + _encode_string_field(2, str(val_str))
-                    gen_buf.extend(_encode_bytes_field(1, entry))
+                    entry = encode_string_field(1, str(k)) + encode_string_field(2, str(val_str))
+                    gen_buf.extend(encode_bytes_field(1, entry))
 
                 res_buf = bytearray()
-                res_buf.extend(_encode_string_field(1, ev.output_text))
+                res_buf.extend(encode_string_field(1, ev.output_text))
                 any_bytes = _encode_tool_payload_to_any(ev.payload)
                 if any_bytes:
-                    res_buf.extend(_encode_bytes_field(6, any_bytes))
+                    res_buf.extend(encode_bytes_field(6, any_bytes))
                 if ev.full_output_uri:
-                    res_buf.extend(_encode_string_field(7, ev.full_output_uri))
-                gen_buf.extend(_encode_bytes_field(2, bytes(res_buf)))
+                    res_buf.extend(encode_string_field(7, ev.full_output_uri))
+                gen_buf.extend(encode_bytes_field(2, bytes(res_buf)))
                 for ext in ev.anchor.host_extensions:
                     if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
                         gen_buf.extend(ext.raw_payload)
@@ -2160,12 +2075,12 @@ class TrajectoryWireCodec:
                 )
                 status_code = 7 if ev.is_error else 3
                 step_buf = bytearray()
-                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.GENERIC)))
-                step_buf.extend(_encode_varint_field(4, status_code))
-                step_buf.extend(_encode_bytes_field(5, meta_blob))
-                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.GENERIC_TAG), bytes(gen_buf)))
+                step_buf.extend(encode_varint_field(1, int(CortexStepTypeCode.GENERIC)))
+                step_buf.extend(encode_varint_field(4, status_code))
+                step_buf.extend(encode_bytes_field(5, meta_blob))
+                step_buf.extend(encode_bytes_field(int(GeminiStepWireTag.GENERIC_TAG), bytes(gen_buf)))
                 for uf in ev.anchor.unknown_wire_fields:
-                    step_buf.extend(_encode_unknown_wire_field(uf))
+                    step_buf.extend(encode_unknown_field(uf))
 
                 rows.append(
                     AgyRawStepRow(
@@ -2184,12 +2099,12 @@ class TrajectoryWireCodec:
             if isinstance(ev, CheckpointEvent):
                 cp_buf = bytearray()
                 if ev.checkpoint_index:
-                    cp_buf.extend(_encode_varint_field(1, ev.checkpoint_index))
-                cp_buf.extend(_encode_string_field(4, ev.user_intent))
-                cp_buf.extend(_encode_string_field(5, ev.session_summary))
-                cp_buf.extend(_encode_string_field(6, ev.code_change_summary))
+                    cp_buf.extend(encode_varint_field(1, ev.checkpoint_index))
+                cp_buf.extend(encode_string_field(4, ev.user_intent))
+                cp_buf.extend(encode_string_field(5, ev.session_summary))
+                cp_buf.extend(encode_string_field(6, ev.code_change_summary))
                 if ev.conversation_title:
-                    cp_buf.extend(_encode_string_field(10, ev.conversation_title))
+                    cp_buf.extend(encode_string_field(10, ev.conversation_title))
                 for ext in ev.anchor.host_extensions:
                     if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
                         cp_buf.extend(ext.raw_payload)
@@ -2199,12 +2114,12 @@ class TrajectoryWireCodec:
                     source_enum=5,
                 )
                 step_buf = bytearray()
-                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.CHECKPOINT)))
-                step_buf.extend(_encode_varint_field(4, 3))
-                step_buf.extend(_encode_bytes_field(5, meta_blob))
-                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.CHECKPOINT_TAG), bytes(cp_buf)))
+                step_buf.extend(encode_varint_field(1, int(CortexStepTypeCode.CHECKPOINT)))
+                step_buf.extend(encode_varint_field(4, 3))
+                step_buf.extend(encode_bytes_field(5, meta_blob))
+                step_buf.extend(encode_bytes_field(int(GeminiStepWireTag.CHECKPOINT_TAG), bytes(cp_buf)))
                 for uf in ev.anchor.unknown_wire_fields:
-                    step_buf.extend(_encode_unknown_wire_field(uf))
+                    step_buf.extend(encode_unknown_field(uf))
 
                 rows.append(
                     AgyRawStepRow(
@@ -2229,35 +2144,35 @@ class TrajectoryWireCodec:
                 if ev.boundary_kind == "notify_user":
                     nu_buf = bytearray()
                     for ruri in ev.review_uris:
-                        nu_buf.extend(_encode_string_field(1, ruri))
-                    nu_buf.extend(_encode_string_field(2, ev.task_summary))
+                        nu_buf.extend(encode_string_field(1, ruri))
+                    nu_buf.extend(encode_string_field(2, ev.task_summary))
                     if ev.blocked_on_user:
-                        nu_buf.extend(_encode_varint_field(3, 1))
+                        nu_buf.extend(encode_varint_field(3, 1))
                     for ext in ev.anchor.host_extensions:
                         if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
                             nu_buf.extend(ext.raw_payload)
                     step_type_int = int(CortexStepTypeCode.NOTIFY_USER)
-                    step_buf.extend(_encode_varint_field(1, step_type_int))
-                    step_buf.extend(_encode_varint_field(4, 3))
-                    step_buf.extend(_encode_bytes_field(5, meta_blob))
-                    step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.NOTIFY_USER_TAG), bytes(nu_buf)))
+                    step_buf.extend(encode_varint_field(1, step_type_int))
+                    step_buf.extend(encode_varint_field(4, 3))
+                    step_buf.extend(encode_bytes_field(5, meta_blob))
+                    step_buf.extend(encode_bytes_field(int(GeminiStepWireTag.NOTIFY_USER_TAG), bytes(nu_buf)))
                 else:
                     tb_buf = bytearray()
-                    tb_buf.extend(_encode_string_field(1, ev.task_name))
-                    tb_buf.extend(_encode_string_field(2, ev.task_status))
-                    tb_buf.extend(_encode_string_field(3, ev.task_summary))
+                    tb_buf.extend(encode_string_field(1, ev.task_name))
+                    tb_buf.extend(encode_string_field(2, ev.task_status))
+                    tb_buf.extend(encode_string_field(3, ev.task_summary))
                     if ev.mode and ev.mode.isdigit():
-                        tb_buf.extend(_encode_varint_field(5, int(ev.mode)))
+                        tb_buf.extend(encode_varint_field(5, int(ev.mode)))
                     for ext in ev.anchor.host_extensions:
                         if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
                             tb_buf.extend(ext.raw_payload)
                     step_type_int = int(CortexStepTypeCode.TASK_BOUNDARY)
-                    step_buf.extend(_encode_varint_field(1, step_type_int))
-                    step_buf.extend(_encode_varint_field(4, 3))
-                    step_buf.extend(_encode_bytes_field(5, meta_blob))
-                    step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.TASK_BOUNDARY_TAG), bytes(tb_buf)))
+                    step_buf.extend(encode_varint_field(1, step_type_int))
+                    step_buf.extend(encode_varint_field(4, 3))
+                    step_buf.extend(encode_bytes_field(5, meta_blob))
+                    step_buf.extend(encode_bytes_field(int(GeminiStepWireTag.TASK_BOUNDARY_TAG), bytes(tb_buf)))
                 for uf in ev.anchor.unknown_wire_fields:
-                    step_buf.extend(_encode_unknown_wire_field(uf))
+                    step_buf.extend(encode_unknown_field(uf))
 
                 rows.append(
                     AgyRawStepRow(
@@ -2274,7 +2189,7 @@ class TrajectoryWireCodec:
                 continue
 
             if isinstance(ev, SystemEvent):
-                sm_buf = bytearray(_encode_string_field(1, ev.message_text) + _encode_string_field(3, ev.event_type))
+                sm_buf = bytearray(encode_string_field(1, ev.message_text) + encode_string_field(3, ev.event_type))
                 for ext in ev.anchor.host_extensions:
                     if ext.extension_type == "agy_submessage_unknowns" and ext.raw_payload:
                         sm_buf.extend(ext.raw_payload)
@@ -2283,12 +2198,12 @@ class TrajectoryWireCodec:
                     source_enum=5,
                 )
                 step_buf = bytearray()
-                step_buf.extend(_encode_varint_field(1, int(CortexStepTypeCode.SYSTEM_MESSAGE)))
-                step_buf.extend(_encode_varint_field(4, 3))
-                step_buf.extend(_encode_bytes_field(5, meta_blob))
-                step_buf.extend(_encode_bytes_field(int(GeminiStepWireTag.SYSTEM_MESSAGE_TAG), bytes(sm_buf)))
+                step_buf.extend(encode_varint_field(1, int(CortexStepTypeCode.SYSTEM_MESSAGE)))
+                step_buf.extend(encode_varint_field(4, 3))
+                step_buf.extend(encode_bytes_field(5, meta_blob))
+                step_buf.extend(encode_bytes_field(int(GeminiStepWireTag.SYSTEM_MESSAGE_TAG), bytes(sm_buf)))
                 for uf in ev.anchor.unknown_wire_fields:
-                    step_buf.extend(_encode_unknown_wire_field(uf))
+                    step_buf.extend(encode_unknown_field(uf))
 
                 rows.append(
                     AgyRawStepRow(
@@ -3000,12 +2915,12 @@ class TrajectoryWireCodec:
 
                 if isinstance(ev.payload, RunCommandPayload):
                     norm_cwd = normalize_tool_file_path(ev.payload.cwd)
-                    cmd_args = _safe_json_dict(_serialize_tool_payload_to_arguments_json(ev.payload))
+                    cmd_args = _safe_json_dict(serialize_tool_payload_arguments_json(ev.payload))
                     cmd_args["cmd"] = ev.payload.command_line
                     cmd_args["workdir"] = norm_cwd
                     args_json = json.dumps(cmd_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 else:
-                    args_json = _serialize_tool_payload_to_arguments_json(ev.payload)
+                    args_json = serialize_tool_payload_arguments_json(ev.payload)
 
                 call_pl: dict[str, Any] = {
                     "type": c_kind,
@@ -3139,3 +3054,373 @@ class TrajectoryWireCodec:
             session_id=session_id,
             cwd=effective_cwd,
         )
+
+
+_GUI_SOURCE_BY_ENUM: Mapping[int, AgyGuiSafeSource] = {
+    src.proto_enum_value: src for src in AgyGuiSafeSource
+}
+_PBTXT_TITLE_RE = re.compile(r'title:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def serialize_tool_payload_arguments_json(payload: CanonicalToolPayload) -> str:
+    """Serialize a `CanonicalToolPayload` into deterministic JSON arguments."""
+    if isinstance(payload, OpaqueToolPayload):
+        return payload.raw_arguments_json or "{}"
+    if isinstance(payload, FinishPayload):
+        return payload.arguments_json or "{}"
+    data = dataclasses.asdict(payload)
+    data.pop("kind", None)
+    if isinstance(payload, (ReadFilePayload, FileEditPayload)):
+        data["path"] = normalize_tool_file_path(payload.path)
+    elif isinstance(payload, RunCommandPayload):
+        data["cwd"] = normalize_tool_file_path(payload.cwd)
+    elif isinstance(payload, DefineSubagentPayload) and payload.agent_path is not None:
+        data["agent_path"] = normalize_tool_file_path(payload.agent_path)
+    elif isinstance(payload, GenerateImagePayload):
+        data["image_paths"] = [normalize_tool_file_path(p) for p in payload.image_paths]
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def render_transcript_row_jsonl(row: TranscriptRowProjection) -> str:
+    """Render one compact JSONL line matching Antigravity `transcript.jsonl` format."""
+    obj: dict[str, object] = {
+        "step_index": int(row.step_index),
+        "source": row.source,
+        "type": row.step_type_name,
+        "status": row.status_name,
+        "created_at": row.created_at,
+        "content": row.content,
+    }
+    if row.thinking is not None:
+        obj["thinking"] = row.thinking
+    if row.tool_calls_json:
+        obj["tool_calls"] = list(row.tool_calls_json)
+    if row.media_uris:
+        obj["media"] = list(row.media_uris)
+    if row.input_tokens or row.output_tokens or row.cache_read_tokens:
+        obj["input_tokens"] = row.input_tokens
+        obj["cache_read_tokens"] = row.cache_read_tokens
+        obj["output_tokens"] = row.output_tokens
+    if row.truncated_fields:
+        obj["truncated_fields"] = list(row.truncated_fields)
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def render_annotation_pbtxt(proj: AnnotationPbtxtProjection) -> str:
+    """Serialize `exa.jetski_cortex_pb.ConversationAnnotations` textproto."""
+    single_line_title = " ".join(proj.title.split())
+    escaped_title = single_line_title.replace("\\", "\\\\").replace('"', '\\"')
+    seconds, nanos = parse_iso_to_seconds_nanos(proj.last_user_view_time_iso)
+    if nanos > 0:
+        return (
+            f'title: "{escaped_title}"\n'
+            f"last_user_view_time {{\n"
+            f"  seconds: {seconds}\n"
+            f"  nanos: {nanos}\n"
+            f"}}\n"
+        )
+    return (
+        f'title: "{escaped_title}"\n'
+        f"last_user_view_time {{\n"
+        f"  seconds: {seconds}\n"
+        f"}}\n"
+    )
+
+
+def parse_annotation_pbtxt_title(raw_text: str) -> str | None:
+    """Extract unescaped `title` string from `ConversationAnnotations` textproto."""
+    m = _PBTXT_TITLE_RE.search(raw_text or "")
+    if not m or not m.group(1).strip():
+        return None
+    return (
+        m.group(1)
+        .replace('\\"', '"')
+        .replace("\\n", "\n")
+        .replace("\\\\", "\\")
+        .strip()
+    ) or None
+
+
+def encode_workspace_info_proto(uri: WorkspaceRootUri) -> bytes:
+    """Encode `exa.cortex_pb.CortexWorkspaceMetadata` wire bytes."""
+    text = str(uri)
+    return encode_string_field(1, text) + encode_string_field(2, text)
+
+
+def encode_annotations_proto(proj: AnnotationPbtxtProjection) -> bytes:
+    """Encode `exa.jetski_cortex_pb.ConversationAnnotations` wire bytes."""
+    buf = bytearray()
+    if proj.title:
+        buf.extend(encode_string_field(1, proj.title))
+    ts_bytes = encode_timestamp_proto(proj.last_user_view_time_iso)
+    if ts_bytes:
+        buf.extend(encode_bytes_field(7, ts_bytes))
+    if proj.unknown_wire_fields:
+        buf.extend(encode_unknown_fields(proj.unknown_wire_fields))
+    return bytes(buf)
+
+
+def _last_str(field_map: Mapping[int, Sequence[tuple[int, int | bytes]]], tag: int, strip: bool = False) -> str:
+    val = ""
+    for wt, raw in field_map.get(tag, ()):
+        if wt == 2 and isinstance(raw, bytes):
+            val = raw.decode("utf-8", errors="replace")
+    return val.strip() if strip else val
+
+
+def _last_varint(field_map: Mapping[int, Sequence[tuple[int, int | bytes]]], tag: int) -> int | None:
+    out: int | None = None
+    for wt, raw in field_map.get(tag, ()):
+        if wt == 0 and isinstance(raw, int):
+            out = int(raw)
+    return out
+
+
+def _last_timestamp(field_map: Mapping[int, Sequence[tuple[int, int | bytes]]], tag: int, default_iso: str = "") -> str:
+    out = default_iso
+    for wt, raw in field_map.get(tag, ()):
+        if wt == 2 and isinstance(raw, bytes):
+            out = decode_timestamp_proto(raw, default_iso=default_iso)
+    return out
+
+
+def decode_annotations_proto(
+    raw_bytes: bytes,
+    cascade_id: CascadeId,
+    default_view_iso: str = "2026-01-01T00:00:00Z",
+) -> AnnotationPbtxtProjection:
+    """Decode `exa.jetski_cortex_pb.ConversationAnnotations` wire bytes preserving unknown fields."""
+    field_map, unknowns = parse_proto_fields(raw_bytes, known_tags={1, 7})
+    return AnnotationPbtxtProjection(
+        cascade_id=cascade_id,
+        title=_last_str(field_map, 1),
+        last_user_view_time_iso=_last_timestamp(field_map, 7, default_iso=default_view_iso),
+        unknown_wire_fields=tuple(unknowns),
+    )
+
+
+def encode_trajectory_metadata_proto(
+    project_id: AgyProjectId,
+    workspace_uris: Sequence[WorkspaceRootUri],
+    created_at_iso: str,
+    nesting_depth: int = 0,
+    parent_conversation_id: str = "",
+    root_conversation_id: str = "",
+    agent_type_name: str = "",
+    agent_role: str = "",
+    unknown_wire_fields: Sequence[UnknownWireField] = (),
+) -> bytes:
+    """Encode `exa.cortex_pb.CortexTrajectoryMetadata` wire bytes."""
+    buf = bytearray()
+    for uri in workspace_uris:
+        buf.extend(encode_bytes_field(1, encode_workspace_info_proto(uri)))
+    if ts_bytes := encode_timestamp_proto(created_at_iso):
+        buf.extend(encode_bytes_field(2, ts_bytes))
+    if parent_conversation_id:
+        buf.extend(encode_string_field(5, parent_conversation_id))
+    if root_conversation_id:
+        buf.extend(encode_string_field(6, root_conversation_id))
+    for uri in workspace_uris:
+        buf.extend(encode_string_field(7, str(uri)))
+    if agent_type_name or agent_role:
+        buf.extend(encode_bytes_field(8, encode_string_field(1, agent_type_name) + encode_string_field(2, agent_role)))
+    if nesting_depth != 0:
+        buf.extend(encode_varint_field(17, nesting_depth))
+    if str(project_id):
+        buf.extend(encode_string_field(18, str(project_id)))
+    if unknown_wire_fields:
+        buf.extend(encode_unknown_fields(unknown_wire_fields))
+    return bytes(buf)
+
+
+def decode_trajectory_metadata_proto(raw_bytes: bytes) -> dict[str, Any]:
+    """Decode `exa.cortex_pb.CortexTrajectoryMetadata` wire bytes preserving unknown fields."""
+    field_map, unknowns = parse_proto_fields(raw_bytes, known_tags={1, 2, 5, 6, 7, 8, 17, 18})
+    workspace_uris: list[str] = []
+    for wt, val in field_map.get(1, ()):
+        if wt == 2 and isinstance(val, bytes):
+            for sfn, swt, _, sraw in iter_wire_fields(val):
+                if sfn == 1 and swt == 2 and (u := sraw.decode("utf-8", errors="replace").strip()) and u not in workspace_uris:
+                    workspace_uris.append(u)
+    for wt, val in field_map.get(7, ()):
+        if wt == 2 and isinstance(val, bytes) and (u := val.decode("utf-8", errors="replace").strip()) and u not in workspace_uris:
+            workspace_uris.append(u)
+    agent_type_name = agent_role = ""
+    for wt, val in field_map.get(8, ()):
+        if wt == 2 and isinstance(val, bytes):
+            for sfn, swt, _, sraw in iter_wire_fields(val):
+                if sfn == 1 and swt == 2:
+                    agent_type_name = sraw.decode("utf-8", errors="replace").strip()
+                elif sfn == 2 and swt == 2:
+                    agent_role = sraw.decode("utf-8", errors="replace").strip()
+    raw_depth = _last_varint(field_map, 17)
+    return {
+        "project_id": _last_str(field_map, 18, strip=True),
+        "workspace_uris": workspace_uris,
+        "created_at_iso": _last_timestamp(field_map, 2),
+        "parent_conversation_id": _last_str(field_map, 5, strip=True),
+        "root_conversation_id": _last_str(field_map, 6, strip=True),
+        "agent_type_name": agent_type_name,
+        "agent_role": agent_role,
+        "nesting_depth": max(0, signed_int32(raw_depth)) if raw_depth is not None else 0,
+        "unknown_wire_fields": tuple(unknowns),
+    }
+
+
+def encode_cascade_summary_proto(proj: CascadeSummaryProjection) -> bytes:
+    """Encode `exa.jetski_cortex_pb.CascadeTrajectorySummary` wire bytes."""
+    buf = bytearray()
+    if proj.title:
+        buf.extend(encode_string_field(1, proj.title))
+    if proj.step_count > 0:
+        buf.extend(encode_varint_field(2, proj.step_count))
+    if mod_ts := encode_timestamp_proto(proj.updated_at_iso):
+        buf.extend(encode_bytes_field(3, mod_ts))
+    if traj_id_str := (str(proj.trajectory_id) if proj.trajectory_id is not None else str(proj.cascade_id)):
+        buf.extend(encode_string_field(4, traj_id_str))
+    if proj.status > 0:
+        buf.extend(encode_varint_field(5, proj.status))
+    if created_ts := encode_timestamp_proto(proj.created_at_iso):
+        buf.extend(encode_bytes_field(7, created_ts))
+    for uri in proj.workspace_uris:
+        buf.extend(encode_bytes_field(9, encode_workspace_info_proto(uri)))
+    if user_ts := encode_timestamp_proto(proj.last_user_input_time_iso or proj.updated_at_iso):
+        buf.extend(encode_bytes_field(10, user_ts))
+    if annot_bytes := encode_annotations_proto(proj.annotations):
+        buf.extend(encode_bytes_field(15, annot_bytes))
+    if proj.last_user_input_step_index is not None and proj.last_user_input_step_index >= 0:
+        buf.extend(encode_varint_field(16, proj.last_user_input_step_index))
+    traj_meta_bytes = encode_trajectory_metadata_proto(
+        project_id=proj.project_id, workspace_uris=proj.workspace_uris, created_at_iso=proj.created_at_iso,
+        nesting_depth=proj.nesting_depth, parent_conversation_id=str(proj.parent_cascade_id or ""),
+        root_conversation_id=str(proj.root_cascade_id or ""), agent_type_name=proj.agent_type_name,
+        agent_role=proj.agent_role, unknown_wire_fields=proj.trajectory_metadata_unknown_fields,
+    )
+    if traj_meta_bytes:
+        buf.extend(encode_bytes_field(17, traj_meta_bytes))
+    if proj.source.proto_enum_value != 0:
+        buf.extend(encode_varint_field(20, proj.source.proto_enum_value))
+    if proj.trajectory_type > 0:
+        buf.extend(encode_varint_field(22, proj.trajectory_type))
+    if proj.unknown_wire_fields:
+        buf.extend(encode_unknown_fields(proj.unknown_wire_fields))
+    return bytes(buf)
+
+
+def decode_cascade_summary_proto(
+    raw_bytes: bytes,
+    fallback_cascade_id: CascadeId | None = None,
+) -> CascadeSummaryProjection:
+    """Decode `exa.jetski_cortex_pb.CascadeTrajectorySummary` wire bytes faithfully."""
+    field_map, unknowns = parse_proto_fields(raw_bytes, known_tags={1, 2, 3, 4, 5, 7, 9, 10, 15, 16, 17, 20, 22})
+    summary_str = _last_str(field_map, 1)
+    traj_id_str = _last_str(field_map, 4, strip=True)
+    updated_iso, created_iso, last_user_iso = _last_timestamp(field_map, 3), _last_timestamp(field_map, 7), _last_timestamp(field_map, 10)
+    effective_cid = fallback_cascade_id or CascadeId(traj_id_str or "unknown-cascade")
+
+    ws_uris: list[WorkspaceRootUri] = []
+    for wt, val in field_map.get(9, ()):
+        if wt == 2 and isinstance(val, bytes):
+            for sfn, swt, _, sraw in iter_wire_fields(val):
+                if sfn == 1 and swt == 2 and (u_str := sraw.decode("utf-8", errors="replace").strip()) and WorkspaceRootUri(u_str) not in ws_uris:
+                    ws_uris.append(WorkspaceRootUri(u_str))
+
+    tmeta = decode_trajectory_metadata_proto(b"")
+    for wt, val in field_map.get(17, ()):
+        if wt == 2 and isinstance(val, bytes):
+            tmeta = decode_trajectory_metadata_proto(val)
+            for u_str in tmeta["workspace_uris"]:
+                if u_str and WorkspaceRootUri(u_str) not in ws_uris:
+                    ws_uris.append(WorkspaceRootUri(u_str))
+
+    eff_created = created_iso or str(tmeta["created_at_iso"] or "")
+    eff_updated = updated_iso or last_user_iso or eff_created
+    annot = AnnotationPbtxtProjection(cascade_id=effective_cid, title="", last_user_view_time_iso=eff_updated)
+    for wt, val in field_map.get(15, ()):
+        if wt == 2 and isinstance(val, bytes):
+            annot = decode_annotations_proto(val, effective_cid, default_view_iso=eff_updated)
+
+    source = AgyGuiSafeSource.UNSPECIFIED
+    if (raw_source := _last_varint(field_map, 20)) is not None:
+        if (mapped := _GUI_SOURCE_BY_ENUM.get(raw_source)) is not None:
+            source = mapped
+        else:
+            unknowns.append(UnknownWireField(field_tag=20, wire_type=0, raw_bytes=encode_varint(raw_source)))
+
+    resolved_title = annot.title or summary_str
+    agent_type, agent_role = str(tmeta["agent_type_name"] or ""), str(tmeta["agent_role"] or "")
+    fields_dict: dict[str, Any] = {
+        "cascade_id": effective_cid, "project_id": AgyProjectId(str(tmeta["project_id"] or "")),
+        "workspace_uris": tuple(ws_uris), "source": source,
+        "title": resolved_title, "preview": summary_str or resolved_title,
+        "step_count": _last_varint(field_map, 2) or 0,
+        "created_at_iso": eff_created, "updated_at_iso": eff_updated, "annotations": annot,
+        "nesting_depth": int(tmeta["nesting_depth"]),
+        "parent_cascade_id": CascadeId(tmeta["parent_conversation_id"]) if tmeta["parent_conversation_id"] else None,
+        "root_cascade_id": CascadeId(tmeta["root_conversation_id"]) if tmeta["root_conversation_id"] else None,
+        "agent_name": agent_role or agent_type, "agent_type_name": agent_type, "agent_role": agent_role,
+        "status": _last_varint(field_map, 5) or 0,
+        "trajectory_id": TrajectoryId(traj_id_str) if traj_id_str else None,
+        "trajectory_type": _last_varint(field_map, 22) or 0,
+        "last_user_input_time_iso": last_user_iso, "last_user_input_step_index": _last_varint(field_map, 16),
+        "trajectory_metadata_unknown_fields": tuple(tmeta["unknown_wire_fields"]),
+        "unknown_wire_fields": tuple(unknowns),
+    }
+    try:
+        return CascadeSummaryProjection(**fields_dict)
+    except ValueError:
+        return CascadeSummaryProjection._from_wire_fields(**fields_dict)
+
+
+def encode_summaries_state_proto(state: SummariesStateProjection) -> bytes:
+    """Encode `jetbox_summaries_pb.SummariesState` wire bytes."""
+    buf = bytearray()
+    for cid in sorted(state.summaries.keys()):
+        summary_proj = state.summaries[cid]
+        entry = encode_string_field(1, str(cid)) + encode_bytes_field(2, summary_proj.summary_proto_bytes)
+        buf.extend(encode_bytes_field(1, entry))
+    for path_key in sorted(state.file_mod_times.keys()):
+        mtime_val = state.file_mod_times[path_key]
+        entry = encode_string_field(1, path_key) + encode_varint_field(2, int(mtime_val))
+        buf.extend(encode_bytes_field(2, entry))
+    if state.unknown_wire_fields:
+        buf.extend(encode_unknown_fields(state.unknown_wire_fields))
+    return bytes(buf)
+
+
+def decode_summaries_state_proto(raw_bytes: bytes) -> SummariesStateProjection:
+    """Decode `jetbox_summaries_pb.SummariesState` wire bytes faithfully."""
+    field_map, unknowns = parse_proto_fields(raw_bytes, known_tags={1, 2})
+    summaries: dict[CascadeId, CascadeSummaryProjection] = {}
+    file_mod_times: dict[str, int] = {}
+
+    for wt, payload in field_map.get(1, ()):
+        if wt == 2 and isinstance(payload, bytes):
+            cid_str = ""
+            sum_bytes = b""
+            for efn, ewt, _, epayload in iter_wire_fields(payload):
+                if efn == 1 and ewt == 2:
+                    cid_str = epayload.decode("utf-8", errors="replace")
+                elif efn == 2 and ewt == 2:
+                    sum_bytes = bytes(epayload)
+            if cid_str:
+                cid = CascadeId(cid_str)
+                summaries[cid] = decode_cascade_summary_proto(sum_bytes, fallback_cascade_id=cid)
+
+    for wt, payload in field_map.get(2, ()):
+        if wt == 2 and isinstance(payload, bytes):
+            pkey = ""
+            mval = 0
+            for efn, ewt, eval_int, epayload in iter_wire_fields(payload):
+                if efn == 1 and ewt == 2:
+                    pkey = epayload.decode("utf-8", errors="replace")
+                elif efn == 2 and ewt == 0:
+                    mval = signed_int64(eval_int)
+            if pkey:
+                file_mod_times[pkey] = mval
+
+    return SummariesStateProjection(
+        summaries=summaries,
+        file_mod_times=file_mod_times,
+        unknown_wire_fields=tuple(unknowns),
+    )
