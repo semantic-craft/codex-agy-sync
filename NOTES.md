@@ -34,11 +34,11 @@
   - **Unit 4** 将桥接层拆分为 `src/codex_agy_sync/bridge/` 子包，实现 RFC 9562 单调 UUIDv7、`acquire_offline_write_locks` 全程持锁临界区、写盘异常自动 `BackupManifest.restore()` 回滚、`NoOpTransition` 伴生索引自愈（含 `antigravity-cli/brain` 镜像）及单次 `sync_session(FORK_NEW_SESSION)` 对称双分支派生。
   - **Unit 5** 新增 `src/codex_agy_sync/bridge/rpc.py`，兑现 `A2` 在线回环只读 RPC（Antigravity `LanguageServerService/GetCascadeTrajectory` Protobuf 客户端与 Codex `app-server` Unix Socket WebSocket `thread/read` 客户端，支持 macOS 软链套接字解析与超长扩展帧），确保活跃运行回合严格返回 `deferred_busy` 且 `SyncReceipt.transport_used` 如实报告实际传输通道，并同步对齐 `C1` 纯按需 CLI 文档。
   - **Unit 6** 将单体测试文件拆解为 11 个 `< 800` 行的专题模块（覆盖率与断言完全保留），新增 `skills/verify-codex-agy-sync/scripts/_suite.py` 7 场景隔离沙盒验证套件，完成三模型对抗审阅（`pro`、`flash`、`inherit`）9 项缺陷修复（`27d1ffd`）与跨平台 32 字节 Linux flock 对齐及 `zstandard` 回退（`9a87882`），全仓 60 项测试与沙盒验收全部通过。
+  - **发布与分发** 完成标准 `pyproject.toml`、MIT `LICENSE`、`0.1.0` 版本号声明与控制台入口，推送到 GitHub 远程仓库 `semantic-craft/codex-agy-sync` 并发布首个 Release 标签 `v0.1.0`。
 
 ## 下一步
 
 1. **桌面空闲窗口真实侧栏目视抽验** 在本机 Codex Desktop 与 Antigravity Desktop 2.30+ 空闲窗口执行一次真实项目的同步与侧栏目视确认。
-2. **发布与分发打包（若需对外发布）** 配置标准 `pyproject.toml`（声明依赖、`project.scripts` CLI 入口与版本号），添加远程 Git 仓库（`git remote`）并打版本 Tag（如 `v0.1.0`）。
 
 ## 记录
 
