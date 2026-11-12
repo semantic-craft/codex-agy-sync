@@ -39,6 +39,7 @@ from .rollout import (
     encode_codex_rollout,
     encode_events_to_codex_rollout,
     encode_ledger_to_codex_rollout,
+    iter_codex_rollout_lines,
     read_codex_rollout_lines,
 )
 from .schema_tags import (
@@ -183,6 +184,7 @@ __all__ = [
     "project_ledger_cascade_summary",
     "project_ledger_codex_thread_summary",
     "project_ledger_transcript_rows",
+    "iter_codex_rollout_lines",
     "read_codex_rollout_lines",
     "render_annotation_pbtxt",
     "render_transcript_row_jsonl",

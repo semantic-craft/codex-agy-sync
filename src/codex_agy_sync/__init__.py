@@ -12,6 +12,7 @@ from .bridge import (
     CsrfSecret,
     CursorForkStateMachine,
     CursorTransition,
+    DefaultHostTransport,
     DeferredBusyTransition,
     DivergedConflictTransition,
     FORBIDDEN_AGY_PROJECT_IDS,
@@ -31,6 +32,7 @@ from .bridge import (
     SyncReceipt,
     TransportMode,
     WorkspaceProjectBinding,
+    generate_uuid7,
 )
 from .codecs import (
     STEP_TAG_TO_SPEC,
@@ -135,6 +137,7 @@ __all__ = [
     "CsrfSecret",
     "CursorForkStateMachine",
     "CursorTransition",
+    "DefaultHostTransport",
     "DeferredBusyTransition",
     "DefineSubagentPayload",
     "DivergedConflictTransition",
@@ -206,6 +209,7 @@ __all__ = [
     "WorkspacePath",
     "WorkspaceProjectBinding",
     "WorkspaceRootUri",
+    "generate_uuid7",
     "normalize_tool_file_path",
     "parse_workspace_identity",
     "rescue_interrupted_ledger",

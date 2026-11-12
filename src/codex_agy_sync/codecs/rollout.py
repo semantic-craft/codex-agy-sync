@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
-from typing import Any, Callable, Literal, Mapping, Sequence, Tuple
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, Tuple
 
 from ..ledger import (
     INTERRUPTED_TOOL_OUTPUT, AssistantTextEvent, CanonicalEvent, CanonicalToolPayload,
@@ -81,11 +81,26 @@ def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
         return proc.stdout.decode("utf-8", errors="replace")
 
 
+def iter_codex_rollout_lines(path: Path) -> Iterator[CodexRawRolloutLine]:
+    """Stream `.jsonl` or `.jsonl.zst` Codex rollout lines splitting strictly on LF."""
+    with path.open("rb") as fh:
+        magic = fh.read(4)
+        fh.seek(0)
+        if path.name.endswith(".zst") or magic == _ZSTD_MAGIC:
+            text = decompress_zstd_rollout_bytes(fh.read())
+            for i, ln in enumerate(text.split("\n")):
+                if ln.strip():
+                    yield CodexRawRolloutLine(line_no=RolloutLineNo(i + 1), raw_json=ln)
+            return
+        for i, raw_line in enumerate(fh):
+            ln = raw_line.rstrip(b"\n").decode("utf-8", errors="replace")
+            if ln.strip():
+                yield CodexRawRolloutLine(line_no=RolloutLineNo(i + 1), raw_json=ln)
+
+
 def read_codex_rollout_lines(path: Path) -> Tuple[CodexRawRolloutLine, ...]:
     """Read `.jsonl` or `.jsonl.zst` Codex rollout lines splitting strictly on LF."""
-    raw_bytes = path.read_bytes()
-    text = decompress_zstd_rollout_bytes(raw_bytes) if (path.name.endswith(".zst") or raw_bytes.startswith(_ZSTD_MAGIC)) else raw_bytes.decode("utf-8", errors="replace")
-    return tuple(CodexRawRolloutLine(line_no=RolloutLineNo(i + 1), raw_json=ln) for i, ln in enumerate(text.split("\n")) if ln.strip())
+    return tuple(iter_codex_rollout_lines(path))
 
 
 def _extract_content_blocks(content_blocks: Any) -> tuple[str, tuple[MediaAttachment, ...]]:

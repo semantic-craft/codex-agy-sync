@@ -65,16 +65,22 @@ forbidden_wire_defs = {
 assert not (ledger_defs & forbidden_wire_defs), f"Wire primitives leaked into ledger.py: {ledger_defs & forbidden_wire_defs}"
 
 assert not pathlib.Path("src/codex_agy_sync/codecs.py").exists(), "Monolithic codecs.py must not exist"
+assert not pathlib.Path("src/codex_agy_sync/bridge.py").exists(), "Monolithic bridge.py must not exist"
 codecs_dir = pathlib.Path("src/codex_agy_sync/codecs")
+bridge_dir = pathlib.Path("src/codex_agy_sync/bridge")
 codecs_files = sorted(codecs_dir.glob("*.py"))
+bridge_files = sorted(bridge_dir.glob("*.py"))
 assert {p.name for p in codecs_files} >= {
-    "__init__.py", "projections.py", "rollout.py", "schema_tags.py", "steps.py", "tools.py",
+    "__init__.py", "projections.py", "rollout.py", "schema_tags.py", "steps.py", "tool_payloads.py", "tools.py",
 }, f"Missing codecs submodules: {[p.name for p in codecs_files]}"
-for mod_path in [wire_path, payloads_path, ledger_path, cli_path, *codecs_files]:
+assert {p.name for p in bridge_files} >= {
+    "__init__.py", "paths_and_locks.py", "registry.py", "state_machine.py", "sync.py", "transport.py",
+}, f"Missing bridge submodules: {[p.name for p in bridge_files]}"
+for mod_path in sorted(pathlib.Path("src/codex_agy_sync").rglob("*.py")):
     mod_src = mod_path.read_text(encoding="utf-8")
     mod_loc = len(mod_src.splitlines())
     assert mod_loc < 800, f"{mod_path} must remain < 800 LOC, got {mod_loc}"
-    if mod_path.parent == codecs_dir:
+    if mod_path.parent in (codecs_dir, bridge_dir):
         assert mod_loc < 700, f"{mod_path} must remain < 700 LOC, got {mod_loc}"
     for node in ast.walk(ast.parse(mod_src)):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

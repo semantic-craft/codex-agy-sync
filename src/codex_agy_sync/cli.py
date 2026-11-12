@@ -113,6 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Same-directory bidirectional session bridge between Codex Desktop 0.166+ and Antigravity 2.30+.",
     )
     parser.add_argument("--agy-data-dir", type=Path, default=None, help="Override Antigravity data directory (defaults to $ANTIGRAVITY_DATA_DIR or ~/.gemini/antigravity).")
+    parser.add_argument("--agy-cli-data-dir", type=Path, default=None, help="Override Antigravity CLI data directory (defaults to $ANTIGRAVITY_CLI_DATA_DIR or ~/.gemini/antigravity-cli if present).")
     parser.add_argument("--gemini-config-dir", type=Path, default=None, help="Override Gemini config directory (defaults to $GEMINI_CONFIG_DIR or ~/.gemini/config).")
     parser.add_argument("--codex-home-dir", type=Path, default=None, help="Override Codex home directory (defaults to $CODEX_HOME or ~/.codex).")
     parser.add_argument("--sync-state-dir", type=Path, default=None, help="Override sync cursor and backup state directory.")
@@ -146,12 +147,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_paths(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> HostEnvironmentPaths:
-    discovered = HostEnvironmentPaths.discover(env=env)
+    source_env = env if env is not None else os.environ
+    discovered = HostEnvironmentPaths.discover(env=source_env)
+    agy_dir = args.agy_data_dir.resolve() if args.agy_data_dir else discovered.agy_data_dir
+    if getattr(args, "agy_cli_data_dir", None) is not None:
+        cli_dir: Path | None = args.agy_cli_data_dir.resolve()
+    elif args.agy_data_dir is not None and not source_env.get("ANTIGRAVITY_CLI_DATA_DIR"):
+        sibling_cli = (agy_dir.parent / "antigravity-cli").resolve(strict=False)
+        cli_dir = sibling_cli if sibling_cli.is_dir() else None
+    else:
+        cli_dir = discovered.agy_cli_data_dir
     return HostEnvironmentPaths(
         gemini_config_dir=(args.gemini_config_dir.resolve() if args.gemini_config_dir else discovered.gemini_config_dir),
-        agy_data_dir=(args.agy_data_dir.resolve() if args.agy_data_dir else discovered.agy_data_dir),
+        agy_data_dir=agy_dir,
         codex_home_dir=(args.codex_home_dir.resolve() if args.codex_home_dir else discovered.codex_home_dir),
         sync_state_dir=(args.sync_state_dir.resolve() if args.sync_state_dir else discovered.sync_state_dir),
+        agy_cli_data_dir=cli_dir,
     )
 
 
