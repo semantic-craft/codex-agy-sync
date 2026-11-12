@@ -267,8 +267,29 @@ class TestRoundtripAndCli(BridgeSandboxBase):
         )
 
     def test_cli_entrypoints_end_to_end(self) -> None:
+        import codex_agy_sync
+
+        self.assertEqual(codex_agy_sync.__version__, "0.1.0")
+
         src_tid = self._copy_real_codex_session_into_temp("01a1ae7d-d56f-7650-8336-aa848b9f2a5a")
         cli_bin = self.repo_root / "bin" / "codex-agy-sync"
+
+        ver_res = subprocess.run(
+            [sys.executable, str(cli_bin), "--version"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(ver_res.stdout.strip(), "codex-agy-sync 0.1.0")
+
+        short_v_res = subprocess.run(
+            [sys.executable, str(cli_bin), "-V"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(short_v_res.stdout.strip(), "codex-agy-sync 0.1.0")
+
         base_args = [
             sys.executable,
             str(cli_bin),

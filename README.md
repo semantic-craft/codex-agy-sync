@@ -30,7 +30,8 @@
    - 默认仅在工具调用全部闭合的已完成回合边界推进同步游标，自动跳过流式未完结回合。
    - 显式传入 `--include-interrupted` 时，若源宿主已停止运行（非活跃流式状态），按 `txcript` 风格为悬空工具调用补齐原生取消错误结果并闭合半途回合，保持重跑幂等并在对端续聊回传时平滑替换抢救锚点。
 3. **`C1` 纯按需显式 CLI 触发（零后台轮询守护进程）**
-   - 通过 `bin/codex-agy-sync` 提供五个确定性子命令（`pair`、`status`、`inspect`、`sync-session`、`sync-workspace`），按需显式执行，不驻留任何后台轮询守护进程。
+   - 支持通过 `pip install .` 或 `pipx install .` 安装标准控制台命令 `codex-agy-sync`，亦可直接执行仓库内 `bin/codex-agy-sync`。
+   - 提供五个确定性子命令（`pair`、`status`、`inspect`、`sync-session`、`sync-workspace`），按需显式执行，不驻留任何后台轮询守护进程。
 
 ## 模块化代码结构
 

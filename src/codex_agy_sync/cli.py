@@ -17,6 +17,7 @@ from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
 
+from . import __version__
 from .bridge import (
     ForkResolutionPolicy,
     HostEnvironmentPaths,
@@ -115,6 +116,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-agy-sync",
         description="Same-directory bidirectional session bridge between Codex Desktop 0.166+ and Antigravity 2.30+.",
+    )
+    parser.add_argument(
+        "--version",
+        "-V",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument("--agy-data-dir", type=Path, default=None, help="Override Antigravity data directory (defaults to $ANTIGRAVITY_DATA_DIR or ~/.gemini/antigravity).")
     parser.add_argument("--agy-cli-data-dir", type=Path, default=None, help="Override Antigravity CLI data directory (defaults to $ANTIGRAVITY_CLI_DATA_DIR or ~/.gemini/antigravity-cli if present).")

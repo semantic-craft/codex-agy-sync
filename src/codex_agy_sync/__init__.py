@@ -5,6 +5,8 @@ the `SyncBridge` facade are exported here. Wire-level SQLite/protobuf envelopes
 (`AgyRawStepRow`, `CodexRawRolloutLine`) remain private to `codecs` and `bridge` adapters.
 """
 
+__version__: str = "0.1.0"
+
 from .bridge import (
     AgyDaemonEndpoint,
     AgyRpcReadResult,
@@ -123,6 +125,7 @@ from .ledger import (
 )
 
 __all__ = [
+    "__version__",
     "AgyDaemonEndpoint",
     "AgyGuiSafeSource",
     "AgyProjectId",
