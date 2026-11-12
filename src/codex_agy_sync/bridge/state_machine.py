@@ -133,6 +133,10 @@ class DivergedConflictTransition:
     selected_transport: TransportMode = TransportMode.AUTO
 
 
+class EmptySessionError(ValueError):
+    """Raised when a session has zero completed turns and no active in-flight turn."""
+
+
 @dataclass(frozen=True)
 class DeferredBusyTransition:
     """Target host has an in-flight turn or holds a lock incompatible with the requested mode."""
@@ -141,6 +145,13 @@ class DeferredBusyTransition:
     blocking_host: HostKind
     reason: str
     retry_after_ms: int = 1500
+    agy_busy: bool = False
+    codex_busy: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.agy_busy and not self.codex_busy:
+            object.__setattr__(self, "agy_busy", self.blocking_host == HostKind.ANTIGRAVITY)
+            object.__setattr__(self, "codex_busy", self.blocking_host == HostKind.CODEX)
 
 
 CursorTransition: TypeAlias = (
@@ -225,7 +236,7 @@ class CursorForkStateMachine:
         if source_ledger is None or source_head is None:
             if source_ledger is not None and source_ledger.has_inflight_turn:
                 return DeferredBusyTransition("deferred_busy", source_host, f"Source {host_label} only has an uncompleted in-flight turn.")
-            raise ValueError(f"Source {host_label} has no completed turns to sync.")
+            raise EmptySessionError(f"Source {host_label} has no completed turns to sync.")
         sel = CursorForkStateMachine._select_transport_or_defer(
             target_host, lock_snapshot, transport_mode, online_rpc_write_supported=online_rpc_write_supported
         )
@@ -243,6 +254,14 @@ class CursorForkStateMachine:
         direction: SyncDirection, lock_snapshot: HostLockSnapshot, transport_mode: TransportMode,
         fork_policy: ForkResolutionPolicy, online_rpc_write_supported: bool,
     ) -> CursorTransition:
+        if agy_head is None and codex_head is None:
+            agy_inf = bool(agy_ledger is not None and agy_ledger.has_inflight_turn)
+            codex_inf = bool(codex_ledger is not None and codex_ledger.has_inflight_turn)
+            if agy_inf or codex_inf:
+                blocking = HostKind.ANTIGRAVITY if agy_inf else HostKind.CODEX
+                return DeferredBusyTransition(
+                    "deferred_busy", blocking, "deferred_busy", agy_busy=agy_inf, codex_busy=codex_inf,
+                )
         if codex_head is None and (direction == SyncDirection.AGY_TO_CODEX or (direction == SyncDirection.AUTO_INCREMENTAL and agy_head is not None)):
             return CursorForkStateMachine._build_initial_import(
                 HostKind.ANTIGRAVITY, HostKind.CODEX, agy_ledger, agy_head, lock_snapshot, transport_mode, online_rpc_write_supported
@@ -280,7 +299,7 @@ class CursorForkStateMachine:
                 lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
             )
 
-        raise ValueError("Neither Antigravity nor Codex has any completed turns to synchronize.")
+        raise EmptySessionError("Neither Antigravity nor Codex has any completed turns to synchronize.")
 
     @staticmethod
     def _converged_noop(
@@ -298,6 +317,46 @@ class CursorForkStateMachine:
         ), deferred_inflight_host=inflight)
 
     @staticmethod
+    def _evaluate_missing_peer_with_cursor(
+        agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
+        agy_head: CompletedTurnWatermark | None, codex_head: CompletedTurnWatermark | None,
+        cursor: SessionSyncCursor, direction: SyncDirection, lock_snapshot: HostLockSnapshot,
+        transport_mode: TransportMode, fork_policy: ForkResolutionPolicy, online_rpc_write_supported: bool,
+    ) -> CursorTransition:
+        if agy_ledger is None and codex_ledger is None:
+            return NoOpTransition("no_op", cursor)
+        surviving_host = HostKind.CODEX if agy_ledger is None else HostKind.ANTIGRAVITY
+        missing_host = HostKind.ANTIGRAVITY if agy_ledger is None else HostKind.CODEX
+        surviving_ledger = codex_ledger if agy_ledger is None else agy_ledger
+        surviving_head = codex_head if agy_ledger is None else agy_head
+        assert surviving_ledger is not None
+        if surviving_head is None:
+            if surviving_ledger.has_inflight_turn:
+                return DeferredBusyTransition("deferred_busy", surviving_host, "deferred_busy")
+            return NoOpTransition("no_op", cursor)
+        from_missing = (agy_ledger is None and direction == SyncDirection.AGY_TO_CODEX) or (
+            codex_ledger is None and direction == SyncDirection.CODEX_TO_AGY
+        )
+        if from_missing and fork_policy != ForkResolutionPolicy.FORK_NEW_SESSION:
+            if fork_policy == ForkResolutionPolicy.HALT_ON_DIVERGENCE:
+                return CursorForkStateMachine._plan_divergence(
+                    surviving_host, surviving_ledger, cursor, None, agy_head, codex_head,
+                    "Source peer session was deleted since last sync.",
+                    lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
+                )
+            raise EmptySessionError("Cannot overwrite surviving session from a deleted peer.")
+        if fork_policy == ForkResolutionPolicy.FORK_NEW_SESSION:
+            return CursorForkStateMachine._plan_divergence(
+                surviving_host, surviving_ledger, cursor, None, agy_head, codex_head,
+                "Peer session missing; re-materializing onto missing host.",
+                lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
+            )
+        return CursorForkStateMachine._build_initial_import(
+            surviving_host, missing_host, surviving_ledger, surviving_head,
+            lock_snapshot, transport_mode, online_rpc_write_supported,
+        )
+
+    @staticmethod
     def evaluate(
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
         cursor: SessionSyncCursor | None, direction: SyncDirection, lock_snapshot: HostLockSnapshot,
@@ -309,6 +368,11 @@ class CursorForkStateMachine:
         if cursor is None:
             return CursorForkStateMachine._evaluate_without_cursor(
                 agy_ledger, codex_ledger, agy_head, codex_head,
+                direction, lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
+            )
+        if agy_ledger is None or codex_ledger is None:
+            return CursorForkStateMachine._evaluate_missing_peer_with_cursor(
+                agy_ledger, codex_ledger, agy_head, codex_head, cursor,
                 direction, lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
             )
 

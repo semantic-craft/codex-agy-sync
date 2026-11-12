@@ -16,6 +16,8 @@ import shutil
 import socket
 import sqlite3
 import stat
+import struct
+import sys
 from typing import Iterator, Mapping, Sequence, Tuple
 
 from ..ledger import CascadeId, CodexThreadId, HostKind, validate_session_id
@@ -304,6 +306,38 @@ def _can_tcp_connect_loopback(port: int) -> bool:
         return False
 
 
+def _has_nonempty_wal(db_path: Path) -> bool:
+    wal_path = Path(f"{db_path}-wal")
+    try:
+        return wal_path.is_file() and wal_path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _is_sqlite_shm_wal_locked(db_path: Path) -> bool:
+    shm_path = Path(f"{db_path}-shm")
+    if not shm_path.is_file():
+        return False
+    try:
+        fd = os.open(str(shm_path), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        if sys.platform == "darwin":
+            req = struct.pack("qqihh", 120, 8, 0, fcntl.F_WRLCK, os.SEEK_SET)
+            l_type = struct.unpack("qqihh", fcntl.fcntl(fd, fcntl.F_GETLK, req))[3]
+        elif sys.platform.startswith("linux"):
+            req = struct.pack("hhqqih", fcntl.F_WRLCK, os.SEEK_SET, 120, 8, 0, 0)
+            l_type = struct.unpack("hhqqih", fcntl.fcntl(fd, fcntl.F_GETLK, req))[0]
+        else:
+            return False
+        return int(l_type) != fcntl.F_UNLCK
+    except (OSError, struct.error):
+        return False
+    finally:
+        os.close(fd)
+
+
 class PresenceWalGuard:
     """Enforces read-only SQLite access, held `flock` critical sections, and `BackupManifest` creation."""
 
@@ -422,24 +456,29 @@ class PresenceWalGuard:
         codex_daemon = self._discover_codex_daemon()
 
         agy_presence_locked = False
-        agy_wal_active = False
-        sum_wal = self._paths.agy_data_dir / "conversation_summaries.db-wal"
-        if sum_wal.exists() and sum_wal.stat().st_size > 0 and agy_daemon is not None:
-            agy_wal_active = True
+        agy_dbs: list[Path] = [self._paths.agy_data_dir / "conversation_summaries.db"]
+        conv_db: Path | None = None
         if cascade_id is not None:
             lock_path = _validated_child_path(
                 self._paths.agy_data_dir, "presence", f"{cascade_id}.lock", label="cascade_id"
             )
             if not ignore_held_agy_presence:
                 agy_presence_locked = self._probe_flock_locked(lock_path)
-            conv_wal = _validated_child_path(
-                self._paths.agy_data_dir, "conversations", f"{cascade_id}.db-wal", label="cascade_id"
+            conv_db = _validated_child_path(
+                self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id"
             )
-            if conv_wal.exists() and conv_wal.stat().st_size > 0 and (agy_daemon is not None or agy_presence_locked):
-                agy_wal_active = True
+            agy_dbs.append(conv_db)
+        agy_wal_active = (
+            (agy_daemon is not None and any(_has_nonempty_wal(db) for db in agy_dbs))
+            or (conv_db is not None and agy_presence_locked and _has_nonempty_wal(conv_db))
+            or any(_is_sqlite_shm_wal_locked(db) for db in agy_dbs)
+        )
 
-        state_wal = self._paths.codex_home_dir / "state_5.sqlite-wal"
-        codex_wal_active = bool(state_wal.exists() and state_wal.stat().st_size > 0 and codex_daemon is not None)
+        codex_state = self._paths.codex_home_dir / "state_5.sqlite"
+        codex_wal_active = bool(
+            (codex_daemon is not None and _has_nonempty_wal(codex_state))
+            or _is_sqlite_shm_wal_locked(codex_state)
+        )
 
         return HostLockSnapshot(
             agy_daemon=agy_daemon,
@@ -479,9 +518,12 @@ class PresenceWalGuard:
                     self._paths.agy_data_dir, "presence", f"{cascade_id}.lock", label="cascade_id"
                 )
                 if candidate_lock.exists():
-                    presence_fd = _open_nonblocking_ex_flock(candidate_lock, create=False)
-                    presence_lock_path = candidate_lock
-                elif presence_dir.is_dir():
+                    try:
+                        presence_fd = _open_nonblocking_ex_flock(candidate_lock, create=False)
+                        presence_lock_path = candidate_lock
+                    except FileNotFoundError:
+                        pass
+                if presence_fd is None and presence_dir.is_dir():
                     presence_fd = _open_nonblocking_ex_flock(candidate_lock, create=True)
                     presence_lock_path = candidate_lock
                     created_temp_presence = True

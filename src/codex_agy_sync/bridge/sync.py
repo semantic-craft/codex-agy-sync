@@ -16,8 +16,7 @@ import uuid
 from ..ledger import (
     AgyGuiSafeSource, CanonicalEvent, CascadeId, CodexThreadId, CompletedTurnWatermark,
     ContentDigest, HostKind, RolloutLineNo, StepIndex, SubagentLineage,
-    TaskBoundaryEvent, TrajectoryLedger, TurnId, WorkspaceRootUri,
-    rescue_interrupted_ledger, validate_session_id,
+    TrajectoryLedger, TurnId, WorkspaceRootUri, validate_session_id,
 )
 from .paths_and_locks import (
     BackupManifest, HostEnvironmentPaths, HostLockSnapshot, PresenceWalGuard, TransportMode,
@@ -27,11 +26,15 @@ from .registry import (
     ProjectRegistry, WorkspaceProjectBinding,
     _parse_agy_trajectory_metadata_lineage, _parse_codex_thread_source_lineage, _safe_valid_session_id,
 )
+from .rescue_and_fork import (
+    compute_codex_nesting_depth, expand_existing_with_sidecars,
+    guarded_pair_workspace, is_source_actively_running, reconcile_and_rescue_ledgers,
+)
 from .rpc import ProbedSyncLedgers, probe_sync_ledgers
 from .state_machine import (
-    CursorForkStateMachine, DeferredBusyTransition, DivergedConflictTransition, ForkResolutionPolicy,
-    IncrementalAppendTransition, InitialImportTransition, NoOpTransition, SessionSyncCursor,
-    SyncDirection, _NULL_CID, _NULL_TID, generate_uuid7,
+    CursorForkStateMachine, DeferredBusyTransition, DivergedConflictTransition, EmptySessionError,
+    ForkResolutionPolicy, IncrementalAppendTransition, InitialImportTransition, NoOpTransition,
+    SessionSyncCursor, SyncDirection, _NULL_CID, _NULL_TID, generate_uuid7,
 )
 from .transport import DefaultHostTransport, HostTransportPort
 
@@ -56,6 +59,8 @@ class SyncReceipt:
     forked_from_cascade_id: CascadeId | None = None
     forked_from_codex_thread_id: CodexThreadId | None = None
     backup_manifest: BackupManifest | None = None
+    peer_fork_cascade_id: CascadeId | None = None
+    peer_fork_codex_thread_id: CodexThreadId | None = None
 
 
 @dataclass(frozen=True)
@@ -238,28 +243,23 @@ class SyncBridge:
                 resolved_sroot = sroot.resolve(strict=False)
                 for pat in (f"*{codex_thread_id}.jsonl", f"*{codex_thread_id}.jsonl.zst"):
                     files.extend(m for m in sroot.rglob(pat) if m.resolve(strict=False).is_relative_to(resolved_sroot))
-        return files, [(self._paths.codex_home_dir / "sessions", f"*{codex_thread_id}.jsonl")]
+        return files, [
+            (self._paths.codex_home_dir / "sessions", f"*{codex_thread_id}.jsonl"),
+            (self._paths.codex_home_dir / "sessions", f"*{codex_thread_id}.jsonl.zst"),
+        ]
 
     @staticmethod
     def _expand_existing_with_sidecars(candidates: Sequence[Path]) -> list[Path]:
-        expanded: list[Path] = []
-        for p in candidates:
-            if p.is_file():
-                expanded.append(p)
-                if p.suffix in (".db", ".sqlite"):
-                    expanded.extend(sc for sfx in ("-wal", "-shm") if (sc := p.with_name(f"{p.name}{sfx}")).is_file())
-        return expanded
+        return expand_existing_with_sidecars(candidates)
 
     def _target_files_for_backup(
         self, target_host: HostKind, cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
     ) -> list[Path]:
-        return self._expand_existing_with_sidecars(self._candidate_target_paths(target_host, cascade_id, codex_thread_id)[0])
+        return expand_existing_with_sidecars(self._candidate_target_paths(target_host, cascade_id, codex_thread_id)[0])
 
     def pair_workspace(self, workspace: str | Path, *, prefer_online_rpc: bool = True) -> WorkspaceProjectBinding:
         """Ensure both Antigravity and Codex have paired, sidebar-visible project entries for `workspace`."""
-        if not self._guard.probe_locks(None, None).can_write_codex_offline():
-            raise RuntimeError("Cannot raw-write Codex state_5.sqlite while Codex daemon or WAL lock is active.")
-        return self._registry.ensure_workspace_binding(workspace, prefer_online_rpc=prefer_online_rpc)
+        return guarded_pair_workspace(self._paths, self._guard, self._registry, workspace, prefer_online_rpc=prefer_online_rpc)
 
     def inspect_session_ledger(
         self, workspace: str | Path, *, cascade_id: CascadeId | None = None,
@@ -311,12 +311,11 @@ class SyncBridge:
         )
         if not row:
             return "", 0, "", ""
-        src_is_sub, src_parent_tid, src_depth, src_type, src_nick = _parse_codex_thread_source_lineage(
-            str(row[3]) if row[3] is not None else None
-        )
+        raw_src = str(row[3]) if row[3] is not None else None
+        src_is_sub, src_parent_tid, src_depth, src_type, src_nick = _parse_codex_thread_source_lineage(raw_src)
         c_parent, c_type, c_nick = (str(row[0] or "").strip() or src_parent_tid), (str(row[1] or "").strip() or src_type), (str(row[2] or "").strip() or src_nick)
-        c_depth = max(1, src_depth) if src_is_sub else (1 if (c_parent and (c_type or c_nick)) else 0)
-        return c_parent, c_depth, c_type, c_nick
+        c_depth = compute_codex_nesting_depth(raw_src, src_is_sub, src_depth, c_parent, c_type, c_nick)
+        return (c_parent if c_depth > 0 else ""), c_depth, c_type, c_nick
 
     def _resolve_session_lineage(
         self, binding: WorkspaceProjectBinding, cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
@@ -348,20 +347,7 @@ class SyncBridge:
     def _is_source_actively_running(
         host: HostKind, ledger: TrajectoryLedger | None, locks: HostLockSnapshot, *, rpc_active: bool = False,
     ) -> bool:
-        if rpc_active:
-            return True
-        if host == HostKind.ANTIGRAVITY:
-            return locks.agy_presence_locked or locks.agy_wal_active or bool(
-                locks.agy_daemon is not None and ledger is not None and any(
-                    ext.extension_type == "agy_step_status" and dict(ext.metadata).get("status") in {"1", "2", "8"}
-                    for ev in ledger.events for ext in ev.anchor.host_extensions
-                )
-            )
-        return locks.codex_wal_active or bool(
-            locks.codex_daemon is not None and ledger is not None and any(
-                isinstance(ev, TaskBoundaryEvent) and ev.task_status.lower() == "in_progress" for ev in ledger.events
-            )
-        )
+        return is_source_actively_running(host, ledger, locks, rpc_active=rpc_active)
 
     def _unpaired_det_cid(self, ws_uri: WorkspaceRootUri, tid: CodexThreadId) -> CascadeId | None:
         det = CascadeId(_deterministic_uuid("paired-cascade", str(tid)))
@@ -383,39 +369,6 @@ class SyncBridge:
             direction, mode, probe_cid=probe_cid, probe_tid=probe_tid,
         )
 
-    def _reconcile_and_rescue_ledgers(
-        self, cursor: SessionSyncCursor | None, probed: ProbedSyncLedgers,
-        direction: SyncDirection, include_interrupted: bool,
-    ) -> tuple[TrajectoryLedger | None, TrajectoryLedger | None, bool, bool, bool, bool, bool]:
-        agy_ledger, codex_ledger, initial_locks = probed.agy_ledger, probed.codex_ledger, probed.initial_locks
-        agy_reconciled, codex_reconciled = False, False
-        if cursor is not None and cursor.rescued_inflight_turn and cursor.pre_rescue_source_host in (HostKind.ANTIGRAVITY.value, HostKind.CODEX.value):
-            is_pre_agy = cursor.pre_rescue_source_host == HostKind.ANTIGRAVITY.value
-            cand_host = HostKind.ANTIGRAVITY if is_pre_agy else HostKind.CODEX
-            cand_ledger = agy_ledger if is_pre_agy else codex_ledger
-            cand_digest = cursor.agy_boundary_digest if is_pre_agy else cursor.codex_boundary_digest
-            cand_active = probed.agy_rpc_active if is_pre_agy else probed.codex_rpc_active
-            if cand_ledger is not None and cand_ledger.has_inflight_turn and not self._is_source_actively_running(cand_host, cand_ledger, initial_locks, rpc_active=cand_active):
-                rescued_cand, did_probe = rescue_interrupted_ledger(cand_ledger)
-                p_wm = rescued_cand.find_watermark(cursor.last_synced_turn_id) if did_probe else None
-                if p_wm is not None and p_wm.boundary_digest == cand_digest:
-                    if is_pre_agy:
-                        agy_ledger, agy_reconciled = rescued_cand, True
-                    else:
-                        codex_ledger, codex_reconciled = rescued_cand, True
-
-        was_agy_rescued, was_codex_rescued = False, False
-        if include_interrupted:
-            if direction in (SyncDirection.AGY_TO_CODEX, SyncDirection.AUTO_INCREMENTAL) and agy_ledger and agy_ledger.has_inflight_turn:
-                if self._is_source_actively_running(HostKind.ANTIGRAVITY, agy_ledger, initial_locks, rpc_active=probed.agy_rpc_active):
-                    return agy_ledger, codex_ledger, agy_reconciled, codex_reconciled, False, False, True
-                agy_ledger, was_agy_rescued = rescue_interrupted_ledger(agy_ledger)
-            if direction in (SyncDirection.CODEX_TO_AGY, SyncDirection.AUTO_INCREMENTAL) and codex_ledger and codex_ledger.has_inflight_turn:
-                if self._is_source_actively_running(HostKind.CODEX, codex_ledger, initial_locks, rpc_active=probed.codex_rpc_active):
-                    return agy_ledger, codex_ledger, agy_reconciled, codex_reconciled, False, False, True
-                codex_ledger, was_codex_rescued = rescue_interrupted_ledger(codex_ledger)
-        return agy_ledger, codex_ledger, agy_reconciled, codex_reconciled, was_agy_rescued, was_codex_rescued, False
-
     def _apply_and_verify_target(
         self, binding: WorkspaceProjectBinding, held_locks: HostLockSnapshot, plan: _WritePlan,
     ) -> tuple[WorkspaceProjectBinding, CascadeId, CodexThreadId, CompletedTurnWatermark, CompletedTurnWatermark]:
@@ -435,7 +388,8 @@ class SyncBridge:
                 binding = self._registry.ensure_codex_binding(binding.workspace_path)
             written_tid = self._transport.apply_to_codex(
                 binding=binding, thread_id=plan.target_tid, events=plan.events, full_ledger=plan.full_ledger,
-                lock_snapshot=held_locks, mode=plan.selected_transport, parent_thread_id=plan.lineage.parent_codex_thread_id,
+                lock_snapshot=held_locks, mode=plan.selected_transport,
+                parent_thread_id=plan.lineage.parent_codex_thread_id or plan.forked_from_codex_thread_id,
                 incremental=plan.incremental, lineage=plan.lineage,
             )
             agy_wm, written_cid = plan.source_ledger.latest_watermark(), plan.target_cid
@@ -532,12 +486,16 @@ class SyncBridge:
         assert src_ledger is not None
         target_cid = CascadeId(transition.preallocated_fork_session_id or str(uuid.uuid4())) if (is_fork and is_agy) else orig_cid
         target_tid = CodexThreadId(transition.preallocated_fork_session_id or generate_uuid7()) if (is_fork and not is_agy) else orig_tid
+        eff_lineage = (
+            dataclasses.replace(lineage, parent_cascade_id=None, parent_codex_thread_id=None)
+            if (is_fork and not lineage.is_subagent) else lineage
+        )
         return _make_write_plan(
             binding, transition.target_host, target_cid, target_tid, transition.fork_events_to_apply,
             transition.fork_events_to_apply, src_ledger,
             f"{src_ledger.title} (Fork)" if is_fork else src_ledger.title,
             transition.selected_transport, "diverged_forked" if is_fork else "diverged_overwritten",
-            lineage, source_tag, receipt_transport=receipt_transport,
+            eff_lineage, source_tag, receipt_transport=receipt_transport,
             was_source_rescued=(was_codex_rescued if is_agy else was_agy_rescued),
             forked_from_cascade_id=(orig_cid if (is_fork and is_agy and orig_cid != _NULL_CID) else None),
             forked_from_codex_thread_id=(orig_tid if (not is_agy and is_fork and orig_tid != _NULL_TID) else None),
@@ -551,7 +509,7 @@ class SyncBridge:
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
         locks: HostLockSnapshot, lineage: SubagentLineage, source_tag: AgyGuiSafeSource,
         was_agy_rescued: bool, was_codex_rescued: bool,
-    ) -> None:
+    ) -> tuple[CascadeId | None, CodexThreadId | None]:
         to_agy = primary_receipt.forked_from_codex_thread_id is not None
         src_ledger = codex_ledger if to_agy else agy_ledger
         can_write = locks.can_write_agy_offline() if to_agy else locks.can_write_codex_offline()
@@ -563,9 +521,9 @@ class SyncBridge:
             (to_agy or primary_receipt.forked_from_cascade_id is not None)
             and src_ledger is not None and src_ledger.latest_watermark() is not None and can_write and orphan_free
         ):
-            return
+            return None, None
         peer_evs = src_ledger.slice_after_watermark(None)
-        self._execute_write_plan(binding, None, _make_write_plan(
+        peer_rec = self._execute_write_plan(binding, None, _make_write_plan(
             binding, HostKind.ANTIGRAVITY if to_agy else HostKind.CODEX,
             CascadeId(str(uuid.uuid4())) if to_agy else orig_cid,
             orig_tid if to_agy else CodexThreadId(generate_uuid7()),
@@ -576,6 +534,7 @@ class SyncBridge:
             forked_from_cascade_id=(orig_cid if (to_agy and orig_cid != _NULL_CID) else None),
             forked_from_codex_thread_id=(orig_tid if (not to_agy and orig_tid != _NULL_TID) else None),
         ))
+        return (peer_rec.cascade_id, peer_rec.codex_thread_id) if peer_rec.transition_kind == "diverged_forked" else (None, None)
 
     def _finalize_noop(
         self, binding: WorkspaceProjectBinding, cursor: SessionSyncCursor | None,
@@ -596,6 +555,35 @@ class SyncBridge:
         if cursor is None or dataclasses.replace(cursor, updated_at_iso="") != dataclasses.replace(fixed_cursor, updated_at_iso=""):
             self._save_cursor(fixed_cursor)
         return SyncReceipt(binding, final_cid, final_tid, "no_op", receipt_transport, 0, fixed_cursor)
+
+    def _execute_diverged_transition(
+        self, binding: WorkspaceProjectBinding, cursor: SessionSyncCursor | None,
+        transition: DivergedConflictTransition, cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
+        agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
+        locks: HostLockSnapshot, direction: SyncDirection, fork_policy: ForkResolutionPolicy,
+        lineage: SubagentLineage, source_tag: AgyGuiSafeSource, receipt_tr: TransportMode,
+        was_agy_rescued: bool, was_codex_rescued: bool,
+    ) -> SyncReceipt:
+        orig_cid, orig_tid = (cascade_id or transition.cursor.cascade_id), (codex_thread_id or transition.cursor.codex_thread_id)
+        if fork_policy == ForkResolutionPolicy.HALT_ON_DIVERGENCE:
+            return SyncReceipt(binding, orig_cid, orig_tid, "diverged_halted", receipt_tr, 0, cursor)
+        div_plan = self._build_divergence_write_plan(
+            binding, transition, orig_cid, orig_tid, agy_ledger, codex_ledger,
+            lineage, source_tag, receipt_tr, fork_policy, was_agy_rescued, was_codex_rescued,
+        )
+        receipt = self._execute_write_plan(binding, cursor, div_plan)
+        if (
+            receipt.transition_kind == "diverged_forked"
+            and direction == SyncDirection.AUTO_INCREMENTAL
+            and transition.selected_transport == TransportMode.OFFLINE_STORAGE
+        ):
+            peer_cid, peer_tid = self._materialize_symmetric_fork_peer(
+                binding, receipt, orig_cid, orig_tid, agy_ledger, codex_ledger,
+                locks, lineage, source_tag, was_agy_rescued, was_codex_rescued,
+            )
+            if peer_cid is not None or peer_tid is not None:
+                receipt = dataclasses.replace(receipt, peer_fork_cascade_id=peer_cid, peer_fork_codex_thread_id=peer_tid)
+        return receipt
 
     def sync_session(
         self, workspace: str | Path, *,
@@ -620,8 +608,8 @@ class SyncBridge:
         if probed.rpc_required_unavailable:
             return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
 
-        agy_ledger, codex_ledger, agy_rec, codex_rec, was_agy_rescued, was_codex_rescued, busy_src = (
-            self._reconcile_and_rescue_ledgers(cursor, probed, direction, include_interrupted)
+        agy_ledger, codex_ledger, cursor, agy_rec, codex_rec, was_agy_rescued, was_codex_rescued, busy_src = (
+            reconcile_and_rescue_ledgers(cursor, probed, direction, include_interrupted)
         )
         if busy_src:
             return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", probed.resolve_receipt_transport(mode, is_deferred=True), 0, cursor)
@@ -655,24 +643,10 @@ class SyncBridge:
             )
             return self._execute_write_plan(binding, cursor, plan)
 
-        orig_cid, orig_tid = (cascade_id or transition.cursor.cascade_id), (codex_thread_id or transition.cursor.codex_thread_id)
-        if fork_policy == ForkResolutionPolicy.HALT_ON_DIVERGENCE:
-            return SyncReceipt(binding, orig_cid, orig_tid, "diverged_halted", receipt_tr, 0, cursor)
-        div_plan = self._build_divergence_write_plan(
-            binding, transition, orig_cid, orig_tid, agy_ledger, codex_ledger,
-            lineage, source_tag, receipt_tr, fork_policy, was_agy_rescued, was_codex_rescued,
+        return self._execute_diverged_transition(
+            binding, cursor, transition, cascade_id, codex_thread_id, agy_ledger, codex_ledger,
+            locks, direction, fork_policy, lineage, source_tag, receipt_tr, was_agy_rescued, was_codex_rescued,
         )
-        receipt = self._execute_write_plan(binding, cursor, div_plan)
-        if (
-            receipt.transition_kind == "diverged_forked"
-            and direction == SyncDirection.AUTO_INCREMENTAL
-            and transition.selected_transport == TransportMode.OFFLINE_STORAGE
-        ):
-            self._materialize_symmetric_fork_peer(
-                binding, receipt, orig_cid, orig_tid, agy_ledger, codex_ledger,
-                locks, lineage, source_tag, was_agy_rescued, was_codex_rescued,
-            )
-        return receipt
 
     def sync_workspace(
         self, workspace: str | Path, *,
@@ -689,8 +663,11 @@ class SyncBridge:
                 direction == SyncDirection.CODEX_TO_AGY and desc.codex_thread_id is None
             ):
                 continue
-            receipts.append(self.sync_session(
-                binding.workspace_path, cascade_id=desc.cascade_id, codex_thread_id=desc.codex_thread_id,
-                direction=direction, mode=mode, fork_policy=fork_policy, include_interrupted=include_interrupted,
-            ))
+            try:
+                receipts.append(self.sync_session(
+                    binding.workspace_path, cascade_id=desc.cascade_id, codex_thread_id=desc.codex_thread_id,
+                    direction=direction, mode=mode, fork_policy=fork_policy, include_interrupted=include_interrupted,
+                ))
+            except EmptySessionError:
+                continue
         return tuple(receipts)

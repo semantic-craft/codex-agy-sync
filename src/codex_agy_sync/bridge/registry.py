@@ -585,12 +585,16 @@ class ProjectRegistry:
             parent_tid_str = _safe_valid_session_id(str(parent_tid or "").strip() or src_parent_tid, "parent_codex_thread_id")
             eff_c_type = str(agent_role or "").strip() or src_type
             eff_c_role = str(agent_nickname or "").strip() or src_nick
-            c_depth = max(1, src_depth) if src_is_sub else (1 if (parent_tid_str and (eff_c_type or eff_c_role)) else 0)
+            raw_src_lc = str(raw_source or "").strip().lower()
+            c_depth = (
+                max(1, src_depth) if src_is_sub
+                else (0 if raw_src_lc in ("desktop", "vscode", "cli", "exec") else (1 if (parent_tid_str and (eff_c_type or eff_c_role)) else 0))
+            )
             codex_sessions[tid_str] = {
                 "codex_thread_id": CodexThreadId(tid_str),
                 "title": str(title or preview or "").strip() or "Untitled Session",
                 "turn_count": _count_codex_rollout_user_turns(rpath),
-                "parent_codex_thread_id": CodexThreadId(parent_tid_str) if parent_tid_str else None,
+                "parent_codex_thread_id": CodexThreadId(parent_tid_str) if (parent_tid_str and c_depth > 0) else None,
                 "nesting_depth": c_depth, "agent_type_name": eff_c_type, "agent_role": eff_c_role,
             }
         return codex_sessions

@@ -14,6 +14,7 @@ from .paths_and_locks import (
     _atomic_write_bytes,
     _atomic_write_text,
     _deterministic_uuid,
+    _is_sqlite_shm_wal_locked,
     _now_iso,
     _open_readonly_sqlite,
     _validated_child_path,
@@ -28,6 +29,7 @@ from .registry import (
     _ensure_agy_summaries_db_schema,
     _ensure_codex_state_db_schema,
 )
+from .rescue_and_fork import SyncBusyLockError
 from .rpc import (
     AgyRpcReadResult,
     CodexRpcReadResult,
@@ -40,6 +42,7 @@ from .state_machine import (
     CursorTransition,
     DeferredBusyTransition,
     DivergedConflictTransition,
+    EmptySessionError,
     ForkResolutionPolicy,
     IncrementalAppendTransition,
     InitialImportTransition,
@@ -49,7 +52,7 @@ from .state_machine import (
     generate_uuid7,
 )
 from .sync import SyncBridge, SyncReceipt
-from .transport import DefaultHostTransport, HostTransportPort
+from .transport import DefaultHostTransport, HostTransportPort, _atomic_write_rollout
 
 __all__ = [
     "AgyDaemonEndpoint",
@@ -63,6 +66,7 @@ __all__ = [
     "DefaultHostTransport",
     "DeferredBusyTransition",
     "DivergedConflictTransition",
+    "EmptySessionError",
     "FORBIDDEN_AGY_PROJECT_IDS",
     "ForkResolutionPolicy",
     "HostEnvironmentPaths",
@@ -77,16 +81,19 @@ __all__ = [
     "ProjectRegistry",
     "SessionSyncCursor",
     "SyncBridge",
+    "SyncBusyLockError",
     "SyncDirection",
     "SyncReceipt",
     "TransportMode",
     "WorkspaceProjectBinding",
     "_atomic_write_bytes",
+    "_atomic_write_rollout",
     "_atomic_write_text",
     "_deterministic_uuid",
     "_ensure_agy_conversation_db_schema",
     "_ensure_agy_summaries_db_schema",
     "_ensure_codex_state_db_schema",
+    "_is_sqlite_shm_wal_locked",
     "_now_iso",
     "_open_readonly_sqlite",
     "_validated_child_path",

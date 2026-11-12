@@ -102,6 +102,7 @@ Five grafts from Candidate 1 were folded into the Candidate 2 base.
 - Eagerly building four O(1) secondary indices in `TrajectoryLedger.from_events` trades linear construction work for O(1) tool-call correlation, `transcript.jsonl` coalescing, and turn-watermark slicing.
 - Maintaining 16 typed `CanonicalToolPayload` variants plus `OpaqueToolPayload` trades schema maintenance surface for native desktop UI rendering of diffs, command exit codes, and citations.
 - Under `A2`, deferring target writes whenever the target host holds an active daemon or WAL lock trades live hot-injection into an open target window for zero SQLite WAL corruption and zero Hub cache races.
+- Deriving a deterministic UUIDv5 target slot before cursor creation on first unpaired import trades random UUIDv7 sorting on initial import for crash-retry idempotency, while occupied slots and `FORK_NEW_SESSION` allocate fresh UUIDv7 identifiers.
 
 ## Alternatives considered
 
@@ -111,12 +112,13 @@ Five grafts from Candidate 1 were folded into the Candidate 2 base.
 
 ## Implementation reconciliation
 
-All five implementation units are reconciled with the modular package layout and enforced by `./scripts/check`.
+All six implementation units are reconciled with the modular package layout and enforced by `./scripts/check`.
 - **Unit 1 (`_wire.py`, `payloads.py`, `ledger.py`).** Consolidated all Protobuf wire primitives into `_wire.py` (`< 220` LOC) and purified `ledger.py` summary projections.
-- **Unit 2 (`codecs/`).** Split the codec layer into 7 submodules (`< 700` LOC each) with true `(encode_fn, decode_fn)` dispatch, lossless `scope_items` / `thinking_signature` / `step_type = 17` preservation, and `.jsonl.zst` streaming.
+- **Unit 2 (`codecs/`).** Split the codec layer into focused submodules (`< 700` LOC each) with true `(encode_fn, decode_fn)` dispatch, lossless `scope_items` / `thinking_signature` / `step_type = 17` preservation, and `.jsonl.zst` streaming.
 - **Unit 3 (`ledger.py`, `bridge/registry.py`, `bridge/sync.py`, `cli.py`).** Tightened orthogonal `SubagentLineage.is_subagent` detection and added `B2` `--include-interrupted` turn sealing with peer sync-back cursor reconciliation.
-- **Unit 4 (`bridge/paths_and_locks.py`, `bridge/state_machine.py`, `bridge/transport.py`, `bridge/sync.py`).** Added held `flock` write critical sections, automatic `BackupManifest.restore()` rollback, `NoOpTransition` companion self-heal (including `antigravity-cli/brain`), and single-call symmetric UUIDv7 `FORK_NEW_SESSION` branching.
-- **Unit 5 (`bridge/rpc.py`, `bridge/paths_and_locks.py`, `bridge/state_machine.py`, `bridge/transport.py`, `bridge/sync.py`).** Implemented `A2` loopback Connect RPC (`GetCascadeTrajectory`) and Unix-socket WebSocket JSON-RPC (`codex app-server` `thread/read`), active-run deferral (`cascade_run_status in {2, 3, 4}` and active Codex threads), honest `SyncReceipt.transport_used` reporting, and `C1` CLI documentation alignment.
+- **Unit 4 (`bridge/paths_and_locks.py`, `bridge/state_machine.py`, `bridge/transport.py`, `bridge/sync.py`, `bridge/rescue_and_fork.py`).** Added held `flock` write critical sections, automatic `BackupManifest.restore()` rollback, `NoOpTransition` companion self-heal (including `antigravity-cli/brain`), and single-call symmetric UUIDv7 `FORK_NEW_SESSION` branching.
+- **Unit 5 (`bridge/rpc.py`, `codecs/rpc_thread.py`, `bridge/paths_and_locks.py`, `bridge/state_machine.py`, `bridge/transport.py`, `bridge/sync.py`).** Implemented `A2` loopback Connect RPC (`GetCascadeTrajectory`) and Unix-socket WebSocket JSON-RPC (`codex app-server` `thread/read`), active-run deferral (`cascade_run_status in {2, 3, 4}`, active Codex threads, and POSIX `F_GETLK` `-shm` WAL locks), honest `SyncReceipt.transport_used` reporting, and `C1` CLI documentation alignment.
+- **Unit 6 (`tests/`, `skills/verify-codex-agy-sync/`, `scripts/check`).** Decomposed the test suite into modular `< 800` LOC files, added the 7-scenario isolated sandbox `suite` runner, and hardened all 9 multi-model adversarial review edge cases.
 
 ## Open questions and risks
 

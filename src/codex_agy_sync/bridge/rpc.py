@@ -16,7 +16,10 @@ import urllib.error
 import urllib.request
 
 from .._wire import encode_string_field, iter_wire_fields
-from ..codecs import AgyRawStepRow, TrajectoryWireCodec, decode_codex_rpc_thread_to_ledger, read_codex_rollout_lines
+from ..codecs import (
+    AgyRawStepRow, TrajectoryWireCodec, decode_codex_rpc_thread_to_ledger,
+    read_codex_rollout_lines, splice_rollout_completed_prefix,
+)
 from ..ledger import CascadeId, CodexThreadId, HostKind, StepIndex, TrajectoryLedger, validate_session_id
 from .paths_and_locks import (
     AgyDaemonEndpoint, CodexDaemonEndpoint, HostLockSnapshot, PresenceWalGuard,
@@ -320,16 +323,20 @@ def read_codex_ledger_dual_mode(
             binding.workspace_path, binding.workspace_uri, rpc_res.thread, explicit_title_override=rpc_title,
         )
         raw_path = str(rpc_res.thread.get("path") or "").strip()
-        if not rpc_res.is_active and raw_path and (cand := resolve_rollout_fn(raw_path, codex_home_dir.resolve(strict=False))) is not None:
-            disk_ledger = codec.decode_codex_rollout_to_ledger(
-                binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(cand), explicit_title_override=rpc_title,
+        disk_ledger: TrajectoryLedger | None = None
+        if raw_path:
+            if (cand := resolve_rollout_fn(raw_path, codex_home_dir.resolve(strict=False))) is not None:
+                disk_ledger = codec.decode_codex_rollout_to_ledger(
+                    binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(cand), explicit_title_override=rpc_title,
+                )
+        else:
+            with contextlib.suppress(FileNotFoundError, OSError):
+                disk_ledger = read_disk_fn()
+        if disk_ledger is not None:
+            rpc_ledger = splice_rollout_completed_prefix(
+                disk_ledger, rpc_ledger, rpc_is_active=rpc_res.is_active, explicit_title_override=rpc_title,
             )
-            if (
-                len(disk_ledger.completed_turn_watermarks) >= len(rpc_ledger.completed_turn_watermarks)
-                and disk_ledger.has_inflight_turn == rpc_ledger.has_inflight_turn
-            ):
-                rpc_ledger = disk_ledger
-        if rpc_res.is_active and not rpc_ledger.has_inflight_turn:
+        elif rpc_res.is_active and not rpc_ledger.has_inflight_turn:
             rpc_ledger = dataclasses.replace(rpc_ledger, has_inflight_turn=True)
         return rpc_ledger, TransportMode.ONLINE_RPC, rpc_res.is_active
 

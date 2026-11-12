@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any, Literal, Mapping, NewType, Sequence, Tuple, TypeAlias
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlsplit
 
 from ._wire import UnknownWireField
 from .payloads import (
@@ -42,7 +42,7 @@ ContentDigest = NewType("ContentDigest", str)
 
 _FORBIDDEN_PROJECT_BUCKETS = frozenset({"", "default-cli-project", "outside-of-project", "null", "none"})
 _LINE_ANNOT_RE = re.compile(r"\s+\((?:lines?|L)\b[^)]*\)\s*$", flags=re.IGNORECASE)
-_MD_FILE_LINK_RE = re.compile(r"^\[[^\]]*\]\(\s*(file://.+?)\s*\)$", flags=re.IGNORECASE)
+_MD_FILE_LINK_RE = re.compile(r"^\[[^\]]*\]\(\s*(file://.+?|/[^)]+?)\s*\)$", flags=re.IGNORECASE)
 
 
 def parse_workspace_identity(raw_path_or_uri: str | Path) -> tuple[WorkspacePath, WorkspaceRootUri]:
@@ -53,7 +53,9 @@ def parse_workspace_identity(raw_path_or_uri: str | Path) -> tuple[WorkspacePath
     if not raw_text:
         raise ValueError("Workspace path cannot be empty.")
     if raw_text.startswith("file://"):
-        parsed = urlparse(raw_text)
+        parsed = urlsplit(raw_text)
+        if parsed.netloc.lower() not in ("", "localhost"):
+            raise ValueError(f"Unsupported non-local file URI authority: {parsed.netloc!r}")
         unquoted = unquote(parsed.path)
         if parsed.scheme != "file" or not unquoted.startswith("/"):
             raise ValueError(f"Invalid file URI {raw_path_or_uri!r}.")
@@ -95,12 +97,16 @@ def normalize_tool_file_path(raw_path: str) -> str:
     if md_match := _MD_FILE_LINK_RE.match(cleaned):
         cleaned = md_match.group(1).strip()
     if cleaned.lower().startswith("file://"):
-        rest = _LINE_ANNOT_RE.sub("", cleaned)[7:]
-        if rest.lower().startswith("localhost/"):
-            rest = rest[9:]
-        if len(rest) >= 3 and rest[0] == "/" and rest[1].isalpha() and rest[2] == ":":
-            rest = rest[1:]
-        return unquote(rest).replace("\r", "").replace("\n", "").replace("\x00", "").strip()
+        split = urlsplit(_LINE_ANNOT_RE.sub("", cleaned))
+        netloc = split.netloc
+        unquoted_path = unquote(split.path)
+        if netloc.lower() not in ("", "localhost"):
+            raw_out = f"//{netloc}{unquoted_path}"
+        elif len(unquoted_path) >= 3 and unquoted_path[0] == "/" and unquoted_path[1].isalpha() and unquoted_path[2] == ":":
+            raw_out = unquoted_path[1:]
+        else:
+            raw_out = unquoted_path
+        return raw_out.replace("\r", "").replace("\n", "").replace("\x00", "").strip()
     return cleaned
 
 
@@ -403,20 +409,13 @@ class CodexThreadSummaryProjection:
 
 
 def _normalize_single_line_query(query_text: str, limit: int = 80) -> str:
-    lines = [
-        stripped
-        for raw_line in query_text.splitlines()
-        if (stripped := raw_line.strip()) and stripped not in ("<USER_REQUEST>", "</USER_REQUEST>")
-    ]
+    lines = [s for raw in query_text.splitlines() if (s := raw.strip()) and s not in ("<USER_REQUEST>", "</USER_REQUEST>")]
     return " ".join(" ".join(lines).split())[:limit].strip()
 
 
 def resolve_canonical_title(
-    events: Sequence[CanonicalEvent],
-    *,
-    explicit_title_override: str | None = None,
-    annotation_pbtxt_title: str | None = None,
-    cascade_summary_annotation_title: str | None = None,
+    events: Sequence[CanonicalEvent], *, explicit_title_override: str | None = None,
+    annotation_pbtxt_title: str | None = None, cascade_summary_annotation_title: str | None = None,
     db_summary_row_title: str | None = None,
 ) -> str:
     """Resolve session title enforcing `sidebar_visibility_rules.json` `title_resolution_order`."""
@@ -474,7 +473,10 @@ def _canonical_event_digest_payload(ev: CanonicalEvent) -> Mapping[str, object]:
 
     base: dict[str, object] = {"kind": ev.kind, "turn_id": str(ev.anchor.turn_id)}
     if isinstance(ev, UserInputEvent):
-        return {**base, "query_text": ev.query_text, "scope_items": list(ev.scope_items)}
+        out: dict[str, object] = {**base, "query_text": ev.query_text, "scope_items": list(ev.scope_items)}
+        if ev.media:
+            out["media"] = [{"mime_type": m.mime_type, "uri": m.uri} for m in ev.media]
+        return out
     if isinstance(ev, ThinkingEvent):
         return {**base, "summary_text": ev.summary_text}
     if isinstance(ev, AssistantTextEvent):
@@ -561,6 +563,25 @@ def _index_ledger_events(
     return normalized, by_step, by_call, by_turn
 
 
+def _is_turn_completed(
+    turn_events: Sequence[CanonicalEvent],
+    by_call: Mapping[ToolCallId, tuple[LedgerSeqNo, LedgerSeqNo | None]],
+) -> bool:
+    if not turn_events:
+        return True
+    all_calls_resolved = all(
+        (pair := by_call.get(tev.call_id)) is not None and pair[1] is not None
+        for tev in turn_events if isinstance(tev, ToolCallEvent)
+    )
+    has_active_agy = any(
+        ext.extension_type == "agy_step_status"
+        for tev in turn_events for ext in tev.anchor.host_extensions
+    )
+    last_work = max((i for i, tev in enumerate(turn_events) if _is_nonterminal_work_or_abort_event(tev)), default=-1)
+    last_comp = max((i for i, tev in enumerate(turn_events) if _is_terminal_completion_event(tev)), default=-1)
+    return all_calls_resolved and not has_active_agy and last_work <= last_comp
+
+
 def _build_turn_watermarks(
     normalized_events: Sequence[CanonicalEvent],
     by_turn: Mapping[TurnId, Sequence[LedgerSeqNo]],
@@ -572,19 +593,8 @@ def _build_turn_watermarks(
 
     for turn_pos, (turn_id, seq_list) in enumerate(turn_items):
         turn_events = [normalized_events[int(s)] for s in seq_list]
-        if turn_pos == len(turn_items) - 1:
-            all_calls_resolved = all(
-                (pair := by_call.get(tev.call_id)) is not None and pair[1] is not None
-                for tev in turn_events if isinstance(tev, ToolCallEvent)
-            )
-            has_active_agy = any(
-                ext.extension_type == "agy_step_status"
-                for tev in turn_events for ext in tev.anchor.host_extensions
-            )
-            last_work = max((i for i, tev in enumerate(turn_events) if _is_nonterminal_work_or_abort_event(tev)), default=-1)
-            last_comp = max((i for i, tev in enumerate(turn_events) if _is_terminal_completion_event(tev)), default=-1)
-            if not all_calls_resolved or has_active_agy or last_work > last_comp:
-                return tuple(watermarks), True
+        if turn_pos == len(turn_items) - 1 and not _is_turn_completed(turn_events, by_call):
+            return tuple(watermarks), True
 
         max_step_idx, max_line_no = StepIndex(0), RolloutLineNo(1)
         for tev in turn_events:
@@ -605,52 +615,74 @@ def _build_turn_watermarks(
     return tuple(watermarks), False
 
 
-def rescue_interrupted_ledger(ledger: TrajectoryLedger) -> tuple[TrajectoryLedger, bool]:
-    """Seal a stopped trailing incomplete turn with canceled tool outputs and an interruption notice."""
-    if not ledger.has_inflight_turn or not ledger.events or not ledger.by_turn_id:
+def rescue_interrupted_turn(
+    ledger: TrajectoryLedger,
+    target_turn_id: TurnId | None = None,
+) -> tuple[TrajectoryLedger, bool]:
+    """Seal an incomplete turn (final or targeted `target_turn_id`) with canceled tool outputs and interruption text."""
+    if not ledger.events or not ledger.by_turn_id:
         return ledger, False
-    last_turn_id = list(ledger.by_turn_id.keys())[-1]
-    tail_seqs = {int(s) for s in ledger.by_turn_id[last_turn_id]}
+    if target_turn_id is None:
+        if not ledger.has_inflight_turn:
+            return ledger, False
+        target_tid = list(ledger.by_turn_id.keys())[-1]
+    else:
+        if target_turn_id not in ledger.by_turn_id:
+            return ledger, False
+        target_tid = target_turn_id
+    raw_target = [ledger.events[int(s)] for s in ledger.by_turn_id[target_tid]]
+    if _is_turn_completed(raw_target, ledger.by_call_id):
+        return ledger, False
+
+    target_seqs = {int(s) for s in ledger.by_turn_id[target_tid]}
+    max_target_seq = max(target_seqs)
     rescued_events: list[CanonicalEvent] = []
-    tail_events: list[CanonicalEvent] = []
+    turn_slice: list[CanonicalEvent] = []
     stripped_on_asst = False
-    for idx, ev in enumerate(ledger.events):
-        if idx in tail_seqs and any(ext.extension_type == "agy_step_status" for ext in ev.anchor.host_extensions):
+    for idx, ev in enumerate(ledger.events[: max_target_seq + 1]):
+        if idx in target_seqs and any(ext.extension_type == "agy_step_status" for ext in ev.anchor.host_extensions):
             kept = tuple(ext for ext in ev.anchor.host_extensions if ext.extension_type != "agy_step_status")
-            if isinstance(ev, AssistantTextEvent):
-                stripped_on_asst = True
+            stripped_on_asst = stripped_on_asst or isinstance(ev, AssistantTextEvent)
             ev = dataclasses.replace(ev, anchor=dataclasses.replace(ev.anchor, host_extensions=kept))
         rescued_events.append(ev)
-        if idx in tail_seqs:
-            tail_events.append(ev)
-    last_ev = tail_events[-1]
+        if idx in target_seqs:
+            turn_slice.append(ev)
+
+    last_ev = turn_slice[-1]
     last_ts = last_ev.anchor.timestamp_iso
-    for tev in list(tail_events):
-        if isinstance(tev, ToolCallEvent):
-            pair = ledger.by_call_id.get(tev.call_id)
-            if pair is None or pair[1] is None:
-                res_ev = ToolResultEvent(
-                    kind="tool_result",
-                    anchor=EventOriginAnchor(origin_host=tev.anchor.origin_host, turn_id=last_turn_id, timestamp_iso=last_ts),
-                    call_id=tev.call_id, tool_name=tev.tool_name, output_text=INTERRUPTED_TOOL_OUTPUT,
-                    is_error=True, payload=tev.payload,
-                )
-                rescued_events.append(res_ev)
-                tail_events.append(res_ev)
-    last_work = max((i for i, e in enumerate(tail_events) if _is_nonterminal_work_or_abort_event(e)), default=-1)
-    last_asst = max((i for i, e in enumerate(tail_events) if isinstance(e, AssistantTextEvent)), default=-1)
+    for tev in list(turn_slice):
+        if isinstance(tev, ToolCallEvent) and ((pair := ledger.by_call_id.get(tev.call_id)) is None or pair[1] is None):
+            res_ev = ToolResultEvent(
+                kind="tool_result",
+                anchor=EventOriginAnchor(origin_host=tev.anchor.origin_host, turn_id=target_tid, timestamp_iso=last_ts),
+                call_id=tev.call_id, tool_name=tev.tool_name, output_text=INTERRUPTED_TOOL_OUTPUT,
+                is_error=True, payload=tev.payload,
+            )
+            rescued_events.append(res_ev)
+            turn_slice.append(res_ev)
+    last_work = max((i for i, e in enumerate(turn_slice) if _is_nonterminal_work_or_abort_event(e)), default=-1)
+    last_asst = max((i for i, e in enumerate(turn_slice) if isinstance(e, AssistantTextEvent)), default=-1)
     if stripped_on_asst or last_asst == -1 or last_work > last_asst:
         rescued_events.append(
             AssistantTextEvent(
                 kind="assistant_text",
-                anchor=EventOriginAnchor(origin_host=last_ev.anchor.origin_host, turn_id=last_turn_id, timestamp_iso=last_ts),
+                anchor=EventOriginAnchor(origin_host=last_ev.anchor.origin_host, turn_id=target_tid, timestamp_iso=last_ts),
                 text=INTERRUPTED_TURN_TEXT,
             )
         )
-    sealed = TrajectoryLedger.from_events(
-        ledger.workspace_path, ledger.workspace_uri, rescued_events, explicit_title_override=ledger.title
-    )
-    return sealed, True
+    for trailing in ledger.events[max_target_seq + 1 :]:
+        rescued_events.append(
+            dataclasses.replace(trailing, anchor=dataclasses.replace(trailing.anchor, agy_step_index=None, codex_line_no=None))
+        )
+    return TrajectoryLedger.from_events(ledger.workspace_path, ledger.workspace_uri, rescued_events, explicit_title_override=ledger.title), True
+
+
+def rescue_interrupted_ledger(ledger: TrajectoryLedger) -> tuple[TrajectoryLedger, bool]:
+    """Seal a stopped trailing incomplete turn with canceled tool outputs and an interruption notice."""
+    return rescue_interrupted_turn(ledger, None)
+
+
+rescue_inflight_final_turn = rescue_interrupted_ledger
 
 
 @dataclass(frozen=True)
@@ -669,13 +701,8 @@ class TrajectoryLedger:
 
     @classmethod
     def from_events(
-        cls,
-        workspace_path: WorkspacePath,
-        workspace_uri: WorkspaceRootUri,
-        events: Sequence[CanonicalEvent],
-        *,
-        explicit_title_override: str | None = None,
-        recompute_agy_step_indices: bool = False,
+        cls, workspace_path: WorkspacePath, workspace_uri: WorkspaceRootUri, events: Sequence[CanonicalEvent],
+        *, explicit_title_override: str | None = None, recompute_agy_step_indices: bool = False,
     ) -> TrajectoryLedger:
         resolved_title = resolve_canonical_title(events, explicit_title_override=explicit_title_override)
         normalized, by_step, by_call, by_turn = _index_ledger_events(events, recompute_agy_step_indices=recompute_agy_step_indices)
@@ -723,7 +750,6 @@ class TrajectoryLedger:
 
     def project_transcript_rows(self) -> Tuple[TranscriptRowProjection, ...]:
         from .codecs.projections import project_ledger_transcript_rows
-
         return project_ledger_transcript_rows(self)
 
     def project_annotation_pbtxt(self, cascade_id: CascadeId, viewed_at_iso: str | None = None) -> AnnotationPbtxtProjection:
@@ -731,23 +757,15 @@ class TrajectoryLedger:
         return AnnotationPbtxtProjection(cascade_id=cascade_id, title=self.title, last_user_view_time_iso=ts)
 
     def project_agy_cascade_summary(
-        self,
-        cascade_id: CascadeId,
-        project_id: AgyProjectId,
-        viewed_at_iso: str | None = None,
-        source: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
-        lineage: SubagentLineage | None = None,
+        self, cascade_id: CascadeId, project_id: AgyProjectId, viewed_at_iso: str | None = None,
+        source: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT, lineage: SubagentLineage | None = None,
     ) -> CascadeSummaryProjection:
         from .codecs.projections import project_ledger_cascade_summary
-
         return project_ledger_cascade_summary(self, cascade_id, project_id, viewed_at_iso=viewed_at_iso, source=source, lineage=lineage)
 
     def project_agy_hub_summaries_state(
-        self,
-        existing_state: SummariesStateProjection | None,
-        updated_summary: CascadeSummaryProjection,
-        conv_db_path: str,
-        conv_db_mtime: int,
+        self, existing_state: SummariesStateProjection | None, updated_summary: CascadeSummaryProjection,
+        conv_db_path: str, conv_db_mtime: int,
     ) -> SummariesStateProjection:
         merged_summaries = dict(existing_state.summaries) if existing_state is not None else {}
         merged_mtimes = dict(existing_state.file_mod_times) if existing_state is not None else {}
@@ -758,10 +776,8 @@ class TrajectoryLedger:
 
     def project_codex_thread_summary(self, thread_id: CodexThreadId, project_id: CodexProjectId) -> CodexThreadSummaryProjection:
         from .codecs.projections import project_ledger_codex_thread_summary
-
         return project_ledger_codex_thread_summary(self, thread_id, project_id)
 
     def _derive_preview_text(self) -> str:
         from .codecs.projections import derive_ledger_preview_text
-
         return derive_ledger_preview_text(self)

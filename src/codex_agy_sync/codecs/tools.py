@@ -95,7 +95,7 @@ def _synthesize_codex_patch_input(payload: FileEditPayload) -> str:
             flags=re.MULTILINE,
         )
     norm_path = normalize_tool_file_path(payload.path) or "patch_target"
-    verb = "Add" if payload.edit_op == "CREATE" else ("Delete" if payload.edit_op == "DELETE" else "Update")
+    verb = "Add" if payload.edit_op in ("CREATE", "ADD") else ("Delete" if payload.edit_op == "DELETE" else "Update")
     body = payload.unified_diff.rstrip("\r\n")
     return f"*** Begin Patch\n*** {verb} File: {norm_path}\n{body}\n*** End Patch" if body else f"*** Begin Patch\n*** {verb} File: {norm_path}\n*** End Patch"
 
@@ -109,7 +109,8 @@ def _rmeta_read_file(p: ReadFilePayload) -> Mapping[str, Any]:
 
 
 def _args_file_edit(p: FileEditPayload) -> Mapping[str, Any]:
-    return _clean_dict(edit_op=p.edit_op, is_artifact=p.is_artifact, path=normalize_tool_file_path(p.path), unified_diff=p.unified_diff, artifact_summary=p.artifact_summary)
+    canon_op = "CREATE" if p.edit_op == "ADD" else p.edit_op
+    return _clean_dict(edit_op=canon_op, is_artifact=p.is_artifact, path=normalize_tool_file_path(p.path), unified_diff=p.unified_diff, artifact_summary=p.artifact_summary)
 
 
 def _rmeta_file_edit(p: FileEditPayload) -> Mapping[str, Any]:
@@ -333,8 +334,9 @@ def serialize_agy_chat_tool_arguments(payload: CanonicalToolPayload, *, has_resu
     if isinstance(payload, FinishPayload):
         return payload.arguments_json or "{}"
     if isinstance(payload, FileEditPayload):
+        canon_op = "CREATE" if payload.edit_op == "ADD" else payload.edit_op
         data = _clean_dict(
-            EditOp=payload.edit_op,
+            EditOp=canon_op,
             Path=normalize_tool_file_path(payload.path),
             IsArtifact=True if payload.is_artifact else None,
             ArtifactSummary=payload.artifact_summary,

@@ -22,7 +22,7 @@ class ReadFilePayload:
 class FileEditPayload:
     kind: Literal["file_edit"]
     path: str
-    edit_op: Literal["CREATE", "MODIFY", "DELETE"]
+    edit_op: Literal["CREATE", "ADD", "MODIFY", "DELETE"]
     unified_diff: str
     diff_stats: Tuple[int, int] = (0, 0)
     is_artifact: bool = False

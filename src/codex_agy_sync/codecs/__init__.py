@@ -35,12 +35,15 @@ from .rollout import (
     decompress_zstd_rollout_bytes,
     decode_codex_rollout,
     decode_codex_rollout_to_ledger,
-    decode_codex_rpc_thread_to_ledger,
     encode_codex_rollout,
     encode_events_to_codex_rollout,
     encode_ledger_to_codex_rollout,
     iter_codex_rollout_lines,
     read_codex_rollout_lines,
+)
+from .rpc_thread import (
+    decode_codex_rpc_thread_to_ledger,
+    splice_rollout_completed_prefix,
 )
 from .schema_tags import (
     ACTIVE_STEP_STATUS_CODES,

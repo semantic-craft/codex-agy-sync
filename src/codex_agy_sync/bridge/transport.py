@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import time
 from typing import Any, Protocol, Sequence
 import uuid
@@ -31,8 +32,23 @@ from .registry import (
     ProjectRegistry, WorkspaceProjectBinding, _ensure_agy_conversation_db_schema,
     _ensure_agy_summaries_db_schema, _ensure_codex_state_db_schema,
 )
+from .rescue_and_fork import ensure_companion_stores_complete_guarded
 from .rpc import read_agy_ledger_dual_mode, read_codex_ledger_dual_mode
 from .state_machine import generate_uuid7
+
+
+def _atomic_write_rollout(path: Path, text: str) -> None:
+    if path.name.endswith(".zst"):
+        payload = text.encode("utf-8")
+        try:
+            from compression import zstd  # type: ignore[attr-defined]
+
+            compressed = zstd.compress(payload)
+        except ImportError:
+            compressed = subprocess.run(["zstd", "-q", "-c"], input=payload, capture_output=True, check=True).stdout
+        _atomic_write_bytes(path, compressed)
+        return
+    _atomic_write_text(path, text)
 
 
 class HostTransportPort(Protocol):
@@ -418,6 +434,8 @@ class DefaultHostTransport:
                     rconn.close()
                 if row and row[0]:
                     cand = Path(str(row[0]))
+                    if not cand.is_file() and Path(f"{cand}.zst").is_file():
+                        cand = Path(f"{cand}.zst")
                     if cand.resolve(strict=False).is_relative_to(resolved_codex_home):
                         return cand
             except sqlite3.OperationalError:
@@ -543,13 +561,13 @@ class DefaultHostTransport:
                 events, starting_line_no=RolloutLineNo(len(prior_lines) + 1),
                 session_id=str(target_tid), cwd=str(binding.workspace_path),
             )
-            _atomic_write_text(rollout_path, "\n".join([*prior_lines, *(r.raw_json for r in delta_rollout)]) + "\n")
+            _atomic_write_rollout(rollout_path, "\n".join([*prior_lines, *(r.raw_json for r in delta_rollout)]) + "\n")
         else:
             full_rollout = self._codec.encode_ledger_to_codex_rollout(
                 full_ledger, starting_line_no=RolloutLineNo(1),
                 session_id=str(target_tid), cwd=str(binding.workspace_path),
             )
-            _atomic_write_text(rollout_path, "\n".join(r.raw_json for r in full_rollout) + ("\n" if full_rollout else ""))
+            _atomic_write_rollout(rollout_path, "\n".join(r.raw_json for r in full_rollout) + ("\n" if full_rollout else ""))
 
         self._write_codex_companion_stores(binding, target_tid, rollout_path, full_ledger, lineage, eff_parent_tid)
         return target_tid
@@ -630,33 +648,7 @@ class DefaultHostTransport:
         locks: HostLockSnapshot, mode: TransportMode, source_tag: AgyGuiSafeSource,
         lineage: SubagentLineage, guard: PresenceWalGuard, registry: ProjectRegistry,
     ) -> WorkspaceProjectBinding:
-        if mode == TransportMode.ONLINE_RPC or agy_ledger is None or codex_ledger is None:
-            return binding
-
-        conv_db = _validated_child_path(self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id")
-        if conv_db.is_file() and locks.can_write_agy_offline() and self._agy_companions_missing(binding, cascade_id, lineage):
-            try:
-                with guard.acquire_offline_write_locks(HostKind.ANTIGRAVITY, cascade_id, codex_thread_id):
-                    binding = registry.ensure_agy_binding(binding.workspace_path)
-                    raw_rows = self._read_persisted_agy_steps(conv_db)
-                    persisted_ledger = self._codec.decode_agy_steps_to_ledger(
-                        workspace_path=binding.workspace_path, workspace_uri=binding.workspace_uri,
-                        raw_steps=raw_rows, explicit_title_override=agy_ledger.title,
-                    )
-                    eff_lineage = _resolve_effective_agy_lineage(lineage.parent_cascade_id, lineage)
-                    self._write_agy_companion_stores(binding, cascade_id, persisted_ledger, len(raw_rows), conv_db, source_tag, eff_lineage)
-            except BlockingIOError:
-                pass
-
-        if locks.can_write_codex_offline() and self._codex_companions_missing(binding, codex_thread_id):
-            try:
-                with guard.acquire_offline_write_locks(HostKind.CODEX, cascade_id, codex_thread_id):
-                    binding = registry.ensure_codex_binding(binding.workspace_path)
-                    rollout_path, _ = self._find_codex_rollout_and_title(codex_thread_id)
-                    self._write_codex_companion_stores(
-                        binding, codex_thread_id, rollout_path, codex_ledger, lineage, lineage.parent_codex_thread_id
-                    )
-            except (BlockingIOError, FileNotFoundError):
-                pass
-
-        return binding
+        return ensure_companion_stores_complete_guarded(
+            self, binding, cascade_id, codex_thread_id, agy_ledger, codex_ledger,
+            locks, mode, source_tag, lineage, guard, registry,
+        )

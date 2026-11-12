@@ -132,9 +132,45 @@ def encode_any_envelope(type_url: str, value_bytes: bytes) -> bytes:
     return encode_string_field(AnyEnvelopeTag.TYPE_URL, type_url) + encode_bytes_field(AnyEnvelopeTag.VALUE, value_bytes)
 
 
+def _classify_unified_diff_lines(unified_diff: str) -> list[tuple[int, str]]:
+    lines = unified_diff.split("\n")
+    in_header = any(ln.startswith(("@@", "diff --git ")) for ln in lines) or (
+        len(lines) >= 2 and lines[0].startswith(("--- ", "---\t")) and lines[1].startswith(("+++ ", "+++\t"))
+    )
+    out: list[tuple[int, str]] = []
+    for line in lines:
+        if line.startswith("diff --git "):
+            in_header = True
+            out.append((int(UnifiedDiffLineTypeCode.UNSPECIFIED), line))
+        elif line.startswith("@@"):
+            in_header = False
+            out.append((int(UnifiedDiffLineTypeCode.UNSPECIFIED), line))
+        elif in_header and line.startswith(("--- ", "---\t", "+++ ", "+++\t")):
+            if line.startswith(("+++ ", "+++\t")):
+                in_header = False
+            out.append((int(UnifiedDiffLineTypeCode.UNSPECIFIED), line))
+        elif line.startswith("*** "):
+            if line.startswith(("*** Update File:", "*** Add File:", "*** Delete File:")):
+                in_header = False
+            out.append((int(UnifiedDiffLineTypeCode.UNSPECIFIED), line))
+        elif line.startswith("+"):
+            in_header = False
+            out.append((int(UnifiedDiffLineTypeCode.INSERT), line[1:]))
+        elif line.startswith("-"):
+            in_header = False
+            out.append((int(UnifiedDiffLineTypeCode.DELETE), line[1:]))
+        elif line.startswith(" "):
+            in_header = False
+            out.append((int(UnifiedDiffLineTypeCode.UNCHANGED), line[1:]))
+        else:
+            out.append((int(UnifiedDiffLineTypeCode.UNSPECIFIED), line))
+    return out
+
+
 def _compute_diff_stats(unified_diff: str) -> tuple[int, int]:
-    adds = sum(1 for ln in unified_diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
-    dels = sum(1 for ln in unified_diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+    classified = _classify_unified_diff_lines(unified_diff)
+    adds = sum(1 for l_type, _ in classified if l_type == UnifiedDiffLineTypeCode.INSERT)
+    dels = sum(1 for l_type, _ in classified if l_type == UnifiedDiffLineTypeCode.DELETE)
     return adds, dels
 
 
@@ -159,15 +195,7 @@ def encode_unified_diff_block(unified_diff: str) -> bytes:
     if not unified_diff:
         return b""
     ud_buf = bytearray()
-    for line in unified_diff.split("\n"):
-        if line.startswith("+") and not line.startswith("+++"):
-            l_type, l_text = UnifiedDiffLineTypeCode.INSERT, line[1:]
-        elif line.startswith("-") and not line.startswith("---"):
-            l_type, l_text = UnifiedDiffLineTypeCode.DELETE, line[1:]
-        elif line.startswith(" "):
-            l_type, l_text = UnifiedDiffLineTypeCode.UNCHANGED, line[1:]
-        else:
-            l_type, l_text = UnifiedDiffLineTypeCode.UNSPECIFIED, line
+    for l_type, l_text in _classify_unified_diff_lines(unified_diff):
         line_msg = (encode_string_field(UnifiedDiffLineTag.TEXT, l_text) if l_text else b"") + (
             encode_varint_field(UnifiedDiffLineTag.TYPE, int(l_type)) if l_type != 0 else b""
         )
@@ -208,7 +236,7 @@ def decode_any_read_file(args: Mapping[str, Any], _raw_json: str, any_val: bytes
 
 def encode_any_file_edit(p: FileEditPayload) -> bytes:
     buf = bytearray()
-    if p.edit_op == "CREATE":
+    if p.edit_op in ("CREATE", "ADD"):
         buf.extend(encode_varint_field(FileEditTag.KIND, int(FileEditKindCode.CREATE)))
     elif p.edit_op == "MODIFY":
         buf.extend(encode_varint_field(FileEditTag.KIND, int(FileEditKindCode.EDIT)))
@@ -229,6 +257,7 @@ def decode_any_file_edit(args: Mapping[str, Any], _raw_json: str, any_val: bytes
     fm = _pmap(any_val)
     path = _fm_str(fm, FileEditTag.PATH, str(first_present(args, "Path", "path") or ""))
     prior_op = str(first_present(args, "edit_op", "EditOp") or "").upper()
+    prior_op = "CREATE" if prior_op == "ADD" else prior_op
     edit_op: Literal["CREATE", "MODIFY", "DELETE"] = prior_op if prior_op in ("CREATE", "MODIFY", "DELETE") else "MODIFY"  # type: ignore[assignment]
     if (k_val := _fm_varint(fm, FileEditTag.KIND)) is not None:
         edit_op = "CREATE" if k_val == FileEditKindCode.CREATE else ("DELETE" if k_val == 0 else "MODIFY")

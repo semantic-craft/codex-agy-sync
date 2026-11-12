@@ -91,6 +91,10 @@ def _receipt_to_dict(receipt: SyncReceipt) -> dict[str, Any]:
         "forked_from_codex_thread_id": str(receipt.forked_from_codex_thread_id)
         if receipt.forked_from_codex_thread_id
         else None,
+        "peer_fork_cascade_id": str(receipt.peer_fork_cascade_id) if receipt.peer_fork_cascade_id else None,
+        "peer_fork_codex_thread_id": str(receipt.peer_fork_codex_thread_id)
+        if receipt.peer_fork_codex_thread_id
+        else None,
         "backup_manifest": backup_dict,
     }
 
