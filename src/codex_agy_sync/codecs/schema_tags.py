@@ -44,9 +44,26 @@ class StepFieldTag(IntEnum):
 
 
 class StepStatusCode(IntEnum):
+    PENDING = 1
+    RUNNING = 2
     DONE = 3
-    ERROR = 6
-    CANCELED = 7
+    INVALID = 4
+    CLEARED = 5
+    CANCELED = 6
+    ERROR = 7
+    GENERATING = 8
+    WAITING = 9
+    QUEUED = 11
+    INTERRUPTED = 12
+
+
+ACTIVE_STEP_STATUS_CODES: frozenset[int] = frozenset({
+    int(StepStatusCode.PENDING),
+    int(StepStatusCode.RUNNING),
+    int(StepStatusCode.GENERATING),
+    int(StepStatusCode.WAITING),
+    int(StepStatusCode.QUEUED),
+})
 
 
 class StepSourceCode(IntEnum):

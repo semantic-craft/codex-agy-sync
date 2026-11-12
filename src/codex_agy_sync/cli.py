@@ -64,6 +64,8 @@ def _receipt_to_dict(receipt: SyncReceipt) -> dict[str, Any]:
             "agy_boundary_digest": str(c.agy_boundary_digest),
             "codex_boundary_digest": str(c.codex_boundary_digest),
             "updated_at_iso": c.updated_at_iso,
+            "rescued_inflight_turn": bool(c.rescued_inflight_turn),
+            "pre_rescue_source_host": c.pre_rescue_source_host or None,
         }
     backup_dict = None
     if receipt.backup_manifest is not None:
@@ -93,35 +95,27 @@ def _receipt_to_dict(receipt: SyncReceipt) -> dict[str, Any]:
     }
 
 
+def _add_sync_common_args(sub_p: argparse.ArgumentParser) -> None:
+    sub_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
+    sub_p.add_argument("--direction", choices=[d.value for d in SyncDirection], default=SyncDirection.AUTO_INCREMENTAL.value, help="Synchronization direction.")
+    sub_p.add_argument("--mode", choices=[m.value for m in TransportMode], default=TransportMode.AUTO.value, help="Transport mode.")
+    sub_p.add_argument("--fork-policy", choices=[p.value for p in ForkResolutionPolicy], default=ForkResolutionPolicy.HALT_ON_DIVERGENCE.value, help="Divergence resolution policy.")
+    sub_p.add_argument(
+        "--include-interrupted",
+        action="store_true",
+        help="Seal and synchronize a stopped trailing interrupted turn with canceled tool outputs.",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-agy-sync",
         description="Same-directory bidirectional session bridge between Codex Desktop 0.166+ and Antigravity 2.30+.",
     )
-    parser.add_argument(
-        "--agy-data-dir",
-        type=Path,
-        default=None,
-        help="Override Antigravity data directory (defaults to $ANTIGRAVITY_DATA_DIR or ~/.gemini/antigravity).",
-    )
-    parser.add_argument(
-        "--gemini-config-dir",
-        type=Path,
-        default=None,
-        help="Override Gemini config directory (defaults to $GEMINI_CONFIG_DIR or ~/.gemini/config).",
-    )
-    parser.add_argument(
-        "--codex-home-dir",
-        type=Path,
-        default=None,
-        help="Override Codex home directory (defaults to $CODEX_HOME or ~/.codex).",
-    )
-    parser.add_argument(
-        "--sync-state-dir",
-        type=Path,
-        default=None,
-        help="Override sync cursor and backup state directory.",
-    )
+    parser.add_argument("--agy-data-dir", type=Path, default=None, help="Override Antigravity data directory (defaults to $ANTIGRAVITY_DATA_DIR or ~/.gemini/antigravity).")
+    parser.add_argument("--gemini-config-dir", type=Path, default=None, help="Override Gemini config directory (defaults to $GEMINI_CONFIG_DIR or ~/.gemini/config).")
+    parser.add_argument("--codex-home-dir", type=Path, default=None, help="Override Codex home directory (defaults to $CODEX_HOME or ~/.codex).")
+    parser.add_argument("--sync-state-dir", type=Path, default=None, help="Override sync cursor and backup state directory.")
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -130,77 +124,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status_p = subparsers.add_parser("status", help="Show workspace project bindings and discovered sessions.")
     status_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
-    status_p.add_argument(
-        "--include-subagents",
-        action="store_true",
-        help="Include spawned subagent sessions in the workspace status listing.",
-    )
+    status_p.add_argument("--include-subagents", action="store_true", help="Include spawned subagent sessions in the workspace status listing.")
 
     inspect_p = subparsers.add_parser("inspect", help="Decode and summarize a session ledger without mutating state.")
     inspect_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
     inspect_p.add_argument("--cascade-id", type=str, default=None, help="Antigravity cascade UUID to inspect.")
     inspect_p.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID to inspect.")
-    inspect_p.add_argument(
-        "--mode",
-        choices=[m.value for m in TransportMode],
-        default=TransportMode.AUTO.value,
-        help="Transport mode.",
-    )
+    inspect_p.add_argument("--mode", choices=[m.value for m in TransportMode], default=TransportMode.AUTO.value, help="Transport mode.")
 
     sync_s = subparsers.add_parser("sync-session", help="Synchronize one paired or unpaired session.")
-    sync_s.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
+    _add_sync_common_args(sync_s)
     sync_s.add_argument("--cascade-id", type=str, default=None, help="Antigravity cascade UUID.")
     sync_s.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID.")
-    sync_s.add_argument(
-        "--direction",
-        choices=[d.value for d in SyncDirection],
-        default=SyncDirection.AUTO_INCREMENTAL.value,
-        help="Synchronization direction.",
-    )
-    sync_s.add_argument(
-        "--mode",
-        choices=[m.value for m in TransportMode],
-        default=TransportMode.AUTO.value,
-        help="Transport mode.",
-    )
-    sync_s.add_argument(
-        "--fork-policy",
-        choices=[p.value for p in ForkResolutionPolicy],
-        default=ForkResolutionPolicy.HALT_ON_DIVERGENCE.value,
-        help="Divergence resolution policy.",
-    )
-    sync_s.add_argument(
-        "--source-tag",
-        choices=[s.name.lower() for s in AgyGuiSafeSource],
-        default="cascade_client",
-        help="Antigravity GUI-safe trajectory source tag.",
-    )
+    sync_s.add_argument("--source-tag", choices=[s.name.lower() for s in AgyGuiSafeSource], default="cascade_client", help="Antigravity GUI-safe trajectory source tag.")
 
     sync_w = subparsers.add_parser("sync-workspace", help="Synchronize all sessions in a workspace.")
-    sync_w.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
-    sync_w.add_argument(
-        "--direction",
-        choices=[d.value for d in SyncDirection],
-        default=SyncDirection.AUTO_INCREMENTAL.value,
-        help="Synchronization direction.",
-    )
-    sync_w.add_argument(
-        "--mode",
-        choices=[m.value for m in TransportMode],
-        default=TransportMode.AUTO.value,
-        help="Transport mode.",
-    )
-    sync_w.add_argument(
-        "--fork-policy",
-        choices=[p.value for p in ForkResolutionPolicy],
-        default=ForkResolutionPolicy.HALT_ON_DIVERGENCE.value,
-        help="Divergence resolution policy.",
-    )
-    sync_w.add_argument(
-        "--include-subagents",
-        action="store_true",
-        help="Synchronize spawned subagent sessions in addition to top-level sessions.",
-    )
+    _add_sync_common_args(sync_w)
+    sync_w.add_argument("--include-subagents", action="store_true", help="Synchronize spawned subagent sessions in addition to top-level sessions.")
 
     return parser
 
@@ -215,94 +155,91 @@ def _resolve_paths(args: argparse.Namespace, env: Mapping[str, str] | None = Non
     )
 
 
+def _run_status_cmd(bridge: SyncBridge, workspace_arg: str, include_subagents: bool) -> dict[str, Any]:
+    binding = bridge.registry.resolve_readonly_binding(workspace_arg)
+    sessions = bridge.registry.list_workspace_sessions(binding, include_subagents=include_subagents)
+    return {
+        "workspace": _binding_to_dict(binding),
+        "sessions": [
+            {
+                "cascade_id": str(s.cascade_id) if s.cascade_id else None,
+                "codex_thread_id": str(s.codex_thread_id) if s.codex_thread_id else None,
+                "title": s.title,
+                "agy_step_count": s.agy_step_count,
+                "codex_turn_count": s.codex_turn_count,
+                "parent_cascade_id": str(s.parent_cascade_id) if s.parent_cascade_id else None,
+                "parent_codex_thread_id": str(s.parent_codex_thread_id) if s.parent_codex_thread_id else None,
+                "is_subagent": s.lineage.is_subagent,
+                "nesting_depth": s.lineage.nesting_depth,
+                "agent_type_name": s.lineage.agent_type_name or None,
+                "agent_role": s.lineage.agent_role or None,
+            }
+            for s in sessions
+        ],
+    }
+
+
+def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> dict[str, Any]:
+    ledger = bridge.inspect_session_ledger(
+        workspace_arg,
+        cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
+        codex_thread_id=CodexThreadId(args.codex_thread_id) if args.codex_thread_id else None,
+        mode=TransportMode(args.mode),
+    )
+    wm = ledger.latest_watermark()
+    return {
+        "workspace_path": str(ledger.workspace_path),
+        "workspace_uri": str(ledger.workspace_uri),
+        "canonical_title": ledger.title,
+        "total_events": len(ledger.events),
+        "completed_turns": len(ledger.completed_turn_watermarks),
+        "has_inflight_turn": ledger.has_inflight_turn,
+        "counts": {
+            "user_inputs": sum(1 for e in ledger.events if isinstance(e, UserInputEvent)),
+            "assistant_texts": sum(1 for e in ledger.events if isinstance(e, AssistantTextEvent)),
+            "thinking_events": sum(1 for e in ledger.events if isinstance(e, ThinkingEvent)),
+            "tool_calls": sum(1 for e in ledger.events if isinstance(e, ToolCallEvent)),
+            "tool_results": sum(1 for e in ledger.events if isinstance(e, ToolResultEvent)),
+            "checkpoints": sum(1 for e in ledger.events if isinstance(e, CheckpointEvent)),
+        },
+        "latest_watermark": {
+            "turn_id": str(wm.turn_id),
+            "boundary_digest": str(wm.boundary_digest),
+            "last_agy_step_index": int(wm.last_agy_step_index) if wm.last_agy_step_index is not None else None,
+            "last_codex_line_no": int(wm.last_codex_line_no) if wm.last_codex_line_no is not None else None,
+        }
+        if wm is not None
+        else None,
+    }
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     env: Mapping[str, str] | None = None,
 ) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
-    paths = _resolve_paths(args, env=env)
-    bridge = SyncBridge(paths=paths)
+    args = _build_parser().parse_args(list(argv) if argv is not None else None)
+    bridge = SyncBridge(paths=_resolve_paths(args, env=env))
     if args.workspace is not None:
         raw_ws = str(args.workspace).strip()
-        if raw_ws and not raw_ws.startswith("file://") and "://" not in raw_ws:
-            workspace_arg = str(Path(os.path.expandvars(raw_ws)).expanduser().resolve(strict=False))
-        else:
-            workspace_arg = raw_ws
+        workspace_arg = (
+            str(Path(os.path.expandvars(raw_ws)).expanduser().resolve(strict=False))
+            if (raw_ws and not raw_ws.startswith("file://") and "://" not in raw_ws)
+            else raw_ws
+        )
     else:
         workspace_arg = os.getcwd()
 
     if args.subcommand == "pair":
-        binding = bridge.pair_workspace(workspace_arg)
-        print(json.dumps(_binding_to_dict(binding), ensure_ascii=False, indent=2))
+        print(json.dumps(_binding_to_dict(bridge.pair_workspace(workspace_arg)), ensure_ascii=False, indent=2))
         return 0
-
     if args.subcommand == "status":
-        binding = bridge.registry.resolve_readonly_binding(workspace_arg)
-        sessions = bridge.registry.list_workspace_sessions(
-            binding,
-            include_subagents=bool(args.include_subagents),
-        )
-        out = {
-            "workspace": _binding_to_dict(binding),
-            "sessions": [
-                {
-                    "cascade_id": str(s.cascade_id) if s.cascade_id else None,
-                    "codex_thread_id": str(s.codex_thread_id) if s.codex_thread_id else None,
-                    "title": s.title,
-                    "agy_step_count": s.agy_step_count,
-                    "codex_turn_count": s.codex_turn_count,
-                    "parent_cascade_id": str(s.parent_cascade_id) if s.parent_cascade_id else None,
-                    "parent_codex_thread_id": str(s.parent_codex_thread_id) if s.parent_codex_thread_id else None,
-                    "is_subagent": s.lineage.is_subagent,
-                    "nesting_depth": s.lineage.nesting_depth,
-                    "agent_type_name": s.lineage.agent_type_name or None,
-                    "agent_role": s.lineage.agent_role or None,
-                }
-                for s in sessions
-            ],
-        }
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+        print(json.dumps(_run_status_cmd(bridge, workspace_arg, bool(args.include_subagents)), ensure_ascii=False, indent=2))
         return 0
-
     if args.subcommand == "inspect":
-        ledger = bridge.inspect_session_ledger(
-            workspace_arg,
-            cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
-            codex_thread_id=CodexThreadId(args.codex_thread_id) if args.codex_thread_id else None,
-            mode=TransportMode(args.mode),
-        )
-        wm = ledger.latest_watermark()
-        out = {
-            "workspace_path": str(ledger.workspace_path),
-            "workspace_uri": str(ledger.workspace_uri),
-            "canonical_title": ledger.title,
-            "total_events": len(ledger.events),
-            "completed_turns": len(ledger.completed_turn_watermarks),
-            "has_inflight_turn": ledger.has_inflight_turn,
-            "counts": {
-                "user_inputs": sum(1 for e in ledger.events if isinstance(e, UserInputEvent)),
-                "assistant_texts": sum(1 for e in ledger.events if isinstance(e, AssistantTextEvent)),
-                "thinking_events": sum(1 for e in ledger.events if isinstance(e, ThinkingEvent)),
-                "tool_calls": sum(1 for e in ledger.events if isinstance(e, ToolCallEvent)),
-                "tool_results": sum(1 for e in ledger.events if isinstance(e, ToolResultEvent)),
-                "checkpoints": sum(1 for e in ledger.events if isinstance(e, CheckpointEvent)),
-            },
-            "latest_watermark": {
-                "turn_id": str(wm.turn_id),
-                "boundary_digest": str(wm.boundary_digest),
-                "last_agy_step_index": int(wm.last_agy_step_index) if wm.last_agy_step_index is not None else None,
-                "last_codex_line_no": int(wm.last_codex_line_no) if wm.last_codex_line_no is not None else None,
-            }
-            if wm is not None
-            else None,
-        }
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+        print(json.dumps(_run_inspect_cmd(bridge, workspace_arg, args), ensure_ascii=False, indent=2))
         return 0
-
     if args.subcommand == "sync-session":
-        source_enum = AgyGuiSafeSource[args.source_tag.upper()]
         receipt = bridge.sync_session(
             workspace_arg,
             cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
@@ -310,11 +247,11 @@ def main(
             direction=SyncDirection(args.direction),
             mode=TransportMode(args.mode),
             fork_policy=ForkResolutionPolicy(args.fork_policy),
-            source_tag=source_enum,
+            source_tag=AgyGuiSafeSource[args.source_tag.upper()],
+            include_interrupted=bool(args.include_interrupted),
         )
         print(json.dumps(_receipt_to_dict(receipt), ensure_ascii=False, indent=2))
         return 0
-
     if args.subcommand == "sync-workspace":
         receipts = bridge.sync_workspace(
             workspace_arg,
@@ -322,14 +259,10 @@ def main(
             mode=TransportMode(args.mode),
             fork_policy=ForkResolutionPolicy(args.fork_policy),
             include_subagents=bool(args.include_subagents),
+            include_interrupted=bool(args.include_interrupted),
         )
-        out = {
-            "synced_count": len(receipts),
-            "receipts": [_receipt_to_dict(r) for r in receipts],
-        }
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+        print(json.dumps({"synced_count": len(receipts), "receipts": [_receipt_to_dict(r) for r in receipts]}, ensure_ascii=False, indent=2))
         return 0
-
     return 1
 
 

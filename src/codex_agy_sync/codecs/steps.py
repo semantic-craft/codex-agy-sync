@@ -20,19 +20,20 @@ from .._wire import (
     signed_int64,
 )
 from ..ledger import (
-    AssistantTextEvent, CanonicalEvent, CheckpointEvent, EventOriginAnchor,
-    HostExtensionEnvelope, HostKind, MediaAttachment, StepIndex, SystemEvent,
-    TaskBoundaryEvent, ThinkingEvent, TokenUsageAccounting, ToolCallEvent,
+    INTERRUPTED_TOOL_OUTPUT, AssistantTextEvent, CanonicalEvent, CheckpointEvent,
+    EventOriginAnchor, HostExtensionEnvelope, HostKind, MediaAttachment, StepIndex,
+    SystemEvent, TaskBoundaryEvent, ThinkingEvent, TokenUsageAccounting, ToolCallEvent,
     ToolCallId, ToolResultEvent, TrajectoryLedger, TurnId, UserInputEvent,
     WorkspacePath, WorkspaceRootUri,
 )
 from .schema_tags import (
-    STEP_TAG_TO_SPEC, STEP_WIRE_TABLE, AgyRawStepRow, ChatToolCallTag, CheckpointTag,
-    ContextScopeItemTag, CortexStepTypeCode, DurationProtoTag, ErrorDetailsTag,
-    ErrorMessageStepTag, GeminiStepWireTag, GenericResultTag, GenericStepTag,
-    MapEntryTag, MediaTag, ModelUsageTag, NotifyUserTag, PathScopeItemTag,
-    PlannerResponseTag, StepFieldTag, StepMetaTag, StepSourceCode, StepStatusCode,
-    StepWireSpec, SystemMessageTag, TaskBoundaryTag, TextOrScopeItemTag, UserInputTag,
+    ACTIVE_STEP_STATUS_CODES, STEP_TAG_TO_SPEC, STEP_WIRE_TABLE, AgyRawStepRow,
+    ChatToolCallTag, CheckpointTag, ContextScopeItemTag, CortexStepTypeCode,
+    DurationProtoTag, ErrorDetailsTag, ErrorMessageStepTag, GeminiStepWireTag,
+    GenericResultTag, GenericStepTag, MapEntryTag, MediaTag, ModelUsageTag,
+    NotifyUserTag, PathScopeItemTag, PlannerResponseTag, StepFieldTag, StepMetaTag,
+    StepSourceCode, StepStatusCode, StepWireSpec, SystemMessageTag, TaskBoundaryTag,
+    TextOrScopeItemTag, UserInputTag,
 )
 from .tool_payloads import decode_any_envelope
 from .tools import (
@@ -301,7 +302,7 @@ def _decode_generic_step(
         origin_host=HostKind.ANTIGRAVITY, turn_id=turn_id, timestamp_iso=ts_iso, agy_step_index=row.idx,
         unknown_wire_fields=tuple(step_unknowns), host_extensions=_make_agy_exts(gen_unknowns, meta_extra),
     )
-    is_err = row.status in (int(StepStatusCode.ERROR), int(StepStatusCode.CANCELED))
+    is_err = row.status in (int(StepStatusCode.ERROR), int(StepStatusCode.CANCELED), int(StepStatusCode.INTERRUPTED))
     events.append(ToolResultEvent(kind="tool_result", anchor=anchor, call_id=cid, tool_name=tname, output_text=result_text, is_error=is_err, payload=rich_payload, full_output_uri=full_uri))
 
 
@@ -386,13 +387,13 @@ def decode_agy_trajectory(
     turn_num, current_turn_id, turn_has_response = 1, TurnId("turn-1"), False
 
     for row in raw_steps:
+        start_ev_len = len(events)
         meta_dict, meta_extra, spec, is_err_msg, oneof_bytes, step_unknowns = _classify_raw_step_row(row)
         ts_iso = str(meta_dict["created_at_iso"])
         if is_err_msg:
             turn_has_response = True
             events.append(_decode_error_message_step(row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra))
-            continue
-        if spec is None:
+        elif spec is None:
             turn_has_response = True
             op_ext = HostExtensionEnvelope(
                 host=HostKind.ANTIGRAVITY, extension_type="agy_opaque_step", raw_payload=row.step_payload_blob,
@@ -400,35 +401,40 @@ def decode_agy_trajectory(
             )
             anchor = EventOriginAnchor(origin_host=HostKind.ANTIGRAVITY, turn_id=current_turn_id, timestamp_iso=ts_iso, agy_step_index=row.idx, host_extensions=(op_ext,))
             events.append(SystemEvent(kind="system_message", anchor=anchor, event_type=f"opaque_agy_step:{row.step_type}", message_text=f"agy_step_type:{row.step_type}"))
-            continue
-
-        token_usage = TokenUsageAccounting(input_tokens=int(meta_dict["input_tokens"]), output_tokens=int(meta_dict["output_tokens"]), cache_read_tokens=int(meta_dict["cache_read_tokens"]))
-        if spec.step_type == CortexStepTypeCode.USER_INPUT:
-            if turn_has_response:
-                turn_num += 1
-                current_turn_id, turn_has_response = TurnId(f"turn-{turn_num}"), False
-            events.append(_decode_user_input(row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra))
-        elif spec.step_type == CortexStepTypeCode.PLANNER_RESPONSE:
-            turn_has_response = True
-            _decode_planner_response(row, oneof_bytes, current_turn_id, ts_iso, meta_dict, token_usage, step_unknowns, meta_extra, events, call_index_by_id, unmatched_synthetic)
-        elif spec.step_type == CortexStepTypeCode.GENERIC:
-            turn_has_response = True
-            _decode_generic_step(row, oneof_bytes, current_turn_id, ts_iso, meta_dict, step_unknowns, meta_extra, events, call_index_by_id, unmatched_synthetic)
-        elif spec.step_type == CortexStepTypeCode.TASK_BOUNDARY:
-            probe_ev, raw_status = _decode_framing_step(spec, row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra)
-            if (raw_status or "").lower() in ("task_started", "running", "in_progress", "starting"):
+        else:
+            token_usage = TokenUsageAccounting(input_tokens=int(meta_dict["input_tokens"]), output_tokens=int(meta_dict["output_tokens"]), cache_read_tokens=int(meta_dict["cache_read_tokens"]))
+            if spec.step_type == CortexStepTypeCode.USER_INPUT:
                 if turn_has_response:
                     turn_num += 1
                     current_turn_id, turn_has_response = TurnId(f"turn-{turn_num}"), False
-                    probe_ev, _ = _decode_framing_step(spec, row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra)
+                events.append(_decode_user_input(row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra))
+            elif spec.step_type == CortexStepTypeCode.PLANNER_RESPONSE:
+                turn_has_response = True
+                _decode_planner_response(row, oneof_bytes, current_turn_id, ts_iso, meta_dict, token_usage, step_unknowns, meta_extra, events, call_index_by_id, unmatched_synthetic)
+            elif spec.step_type == CortexStepTypeCode.GENERIC:
+                turn_has_response = True
+                _decode_generic_step(row, oneof_bytes, current_turn_id, ts_iso, meta_dict, step_unknowns, meta_extra, events, call_index_by_id, unmatched_synthetic)
+            elif spec.step_type == CortexStepTypeCode.TASK_BOUNDARY:
+                probe_ev, raw_status = _decode_framing_step(spec, row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra)
+                if (raw_status or "").lower() in ("task_started", "running", "in_progress", "starting"):
+                    if turn_has_response:
+                        turn_num += 1
+                        current_turn_id, turn_has_response = TurnId(f"turn-{turn_num}"), False
+                        probe_ev, _ = _decode_framing_step(spec, row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra)
+                else:
+                    turn_has_response = True
+                events.append(probe_ev)
             else:
-                turn_has_response = True
-            events.append(probe_ev)
-        else:
-            if spec.step_type == CortexStepTypeCode.NOTIFY_USER:
-                turn_has_response = True
-            ev_out, _ = _decode_framing_step(spec, row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra)
-            events.append(ev_out)
+                if spec.step_type == CortexStepTypeCode.NOTIFY_USER:
+                    turn_has_response = True
+                ev_out, _ = _decode_framing_step(spec, row, oneof_bytes, current_turn_id, ts_iso, step_unknowns, meta_extra)
+                events.append(ev_out)
+        if row.status in ACTIVE_STEP_STATUS_CODES:
+            st_str = str(row.status)
+            st_ext = HostExtensionEnvelope(host=HostKind.ANTIGRAVITY, extension_type="agy_step_status", raw_payload=b"", metadata=(("status", st_str), ("agy_active_status", st_str)))
+            for ev_idx in range(start_ev_len, len(events)):
+                cur = events[ev_idx]
+                events[ev_idx] = dataclasses.replace(cur, anchor=dataclasses.replace(cur.anchor, host_extensions=(*cur.anchor.host_extensions, st_ext)))
 
     return TrajectoryLedger.from_events(workspace_path=workspace_path, workspace_uri=workspace_uri, events=events, explicit_title_override=explicit_title_override)
 
@@ -573,7 +579,11 @@ def _encode_single_agy_event(ev: CanonicalEvent, next_idx: int, call_by_id: Mapp
             tool_call={"id": str(ev.call_id), "name": agy_name, "arguments_json": args_json, "thinking_signature": paired_call.thinking_signature if paired_call else None},
             tool_summary=summary_lbl, extra_wire_bytes=_ext_payload(ev.anchor, "agy_metadata_extra"),
         )
-        status_code = int(StepStatusCode.CANCELED) if ev.is_error else int(StepStatusCode.DONE)
+        status_code = (
+            (int(StepStatusCode.CANCELED) if ev.output_text == INTERRUPTED_TOOL_OUTPUT else int(StepStatusCode.ERROR))
+            if ev.is_error
+            else int(StepStatusCode.DONE)
+        )
         return _wrap_step_row(next_idx, int(CortexStepTypeCode.GENERIC), int(GeminiStepWireTag.GENERIC_TAG), bytes(gen_buf), meta_blob, ev.anchor.unknown_wire_fields, status=status_code)
 
     if isinstance(ev, CheckpointEvent):

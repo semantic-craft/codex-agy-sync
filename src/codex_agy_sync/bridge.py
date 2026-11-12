@@ -67,12 +67,14 @@ from .ledger import (
     RolloutLineNo,
     StepIndex,
     SubagentLineage,
+    TaskBoundaryEvent,
     TrajectoryId,
     TrajectoryLedger,
     TurnId,
     WorkspacePath,
     WorkspaceRootUri,
     parse_workspace_identity,
+    rescue_interrupted_ledger,
     validate_session_id,
 )
 
@@ -400,6 +402,36 @@ class PairedSessionDescriptor:
 def _parse_agy_trajectory_metadata_lineage(raw_blob: bytes) -> dict[str, Any]:
     """Decode subagent lineage fields (5, 6, 7, 8, 17, 18) from `CortexTrajectoryMetadata`."""
     return decode_trajectory_metadata_proto(raw_blob)
+
+
+def _parse_codex_thread_source_lineage(raw_source: str | None) -> tuple[bool, str, int, str, str]:
+    """Parse Codex `threads.source` JSON into `(is_subagent, parent_tid, depth, role_or_type, nickname)`."""
+    text = str(raw_source or "").strip()
+    if not text.startswith("{"):
+        return False, "", 0, "", ""
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return False, "", 0, "", ""
+    if not isinstance(parsed, dict) or "subagent" not in parsed:
+        return False, "", 0, "", ""
+    sub = parsed.get("subagent")
+    if isinstance(sub, str):
+        return True, "", 1, sub.strip(), ""
+    if isinstance(sub, dict):
+        ts = sub.get("thread_spawn")
+        if isinstance(ts, dict):
+            p_tid = str(ts.get("parent_thread_id") or "").strip()
+            try:
+                depth = max(1, int(ts.get("depth") or 1))
+            except (TypeError, ValueError):
+                depth = 1
+            role_or_type = str(ts.get("agent_role") or "").strip()
+            nickname = str(ts.get("agent_nickname") or "").strip()
+            return True, p_tid, depth, role_or_type, nickname
+        if "other" in sub:
+            return True, "", 1, str(sub.get("other") or "").strip(), ""
+    return True, "", 1, "", ""
 
 
 class ProjectRegistry:
@@ -985,13 +1017,13 @@ class ProjectRegistry:
                     rows = conn.execute(
                         """
                         SELECT id, title, preview, cwd, project_id, attached_thread_parent_id,
-                               rollout_path, agent_nickname, agent_role
+                               rollout_path, agent_nickname, agent_role, source
                         FROM threads
                         WHERE archived = 0
                         ORDER BY recency_at_ms DESC, updated_at DESC
                         """
                     ).fetchall()
-                    for tid, title, preview, cwd, pid, parent_tid, rpath, agent_nickname, agent_role in rows:
+                    for tid, title, preview, cwd, pid, parent_tid, rpath, agent_nickname, agent_role, raw_source in rows:
                         tid_str = str(tid or "").strip()
                         if not tid_str:
                             continue
@@ -1021,19 +1053,30 @@ class ProjectRegistry:
                                     )
                                 except Exception:
                                     turn_count = 1
-                            parent_tid_str = str(parent_tid or "").strip()
+                            src_is_sub, src_parent_tid, src_depth, src_type, src_nick = _parse_codex_thread_source_lineage(
+                                str(raw_source) if raw_source is not None else None
+                            )
+                            parent_tid_str = str(parent_tid or "").strip() or src_parent_tid
                             if parent_tid_str:
                                 try:
                                     validate_session_id(parent_tid_str, label="parent_codex_thread_id")
                                 except ValueError:
                                     parent_tid_str = ""
+                            eff_c_type = str(agent_role or "").strip() or src_type
+                            eff_c_role = str(agent_nickname or "").strip() or src_nick
+                            c_depth = (
+                                max(1, src_depth)
+                                if src_is_sub
+                                else (1 if (parent_tid_str and (eff_c_type or eff_c_role)) else 0)
+                            )
                             codex_sessions[tid_str] = {
                                 "codex_thread_id": CodexThreadId(tid_str),
                                 "title": str(title or preview or "").strip() or "Untitled Session",
                                 "turn_count": turn_count,
                                 "parent_codex_thread_id": CodexThreadId(parent_tid_str) if parent_tid_str else None,
-                                "agent_type_name": str(agent_role or "").strip(),
-                                "agent_role": str(agent_nickname or "").strip(),
+                                "nesting_depth": c_depth,
+                                "agent_type_name": eff_c_type,
+                                "agent_role": eff_c_role,
                             }
                 finally:
                     conn.close()
@@ -1054,9 +1097,12 @@ class ProjectRegistry:
             eff_type = str(agy_info.get("agent_type_name") or codex_info.get("agent_type_name") or "").strip()
             eff_role = str(agy_info.get("agent_role") or codex_info.get("agent_role") or "").strip()
             spawn_idx: StepIndex | None = agy_info.get("spawn_step_index")
-            depth = max(0, int(agy_info.get("nesting_depth") or 0))
-            if depth == 0 and (bool(eff_type) or bool(eff_role) or spawn_idx is not None):
-                depth = 1
+            depth = max(
+                0,
+                int(agy_info.get("nesting_depth") or 0),
+                int(codex_info.get("nesting_depth") or 0),
+                1 if spawn_idx is not None else 0,
+            )
             return SubagentLineage(
                 parent_cascade_id=p_cid,
                 root_cascade_id=r_cid,
@@ -1483,6 +1529,8 @@ class SessionSyncCursor:
     agy_boundary_digest: ContentDigest
     codex_boundary_digest: ContentDigest
     updated_at_iso: str
+    rescued_inflight_turn: bool = False
+    pre_rescue_source_host: str = ""
 
 
 @dataclass(frozen=True)
@@ -2648,6 +2696,24 @@ class DefaultHostTransport:
         created_sec = max(1, thread_proj.created_at_ms // 1000)
         updated_sec = max(1, thread_proj.updated_at_ms // 1000)
         recency_sec = updated_sec
+        thread_source_value = (
+            json.dumps(
+                {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": str(effective_parent_tid) if effective_parent_tid else None,
+                            "depth": max(1, lineage.nesting_depth),
+                            "agent_nickname": lineage.agent_role or None,
+                            "agent_role": lineage.agent_type_name or None,
+                        }
+                    }
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if (lineage is not None and lineage.is_subagent)
+            else "desktop"
+        )
 
         conn = sqlite3.connect(str(state_db), timeout=10.0)
         try:
@@ -2660,13 +2726,14 @@ class DefaultHostTransport:
                     archived, cli_version, first_user_message, agent_nickname, agent_role,
                     created_at_ms, updated_at_ms, preview, recency_at, recency_at_ms,
                     name, project_id, originator, attached_thread_parent_id
-                ) VALUES (?, ?, ?, ?, 'desktop', 'openai', ?, ?, 'workspace-write', 'never', 0, 1, 0, '0.166.0', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'codex_vscode', ?)
+                ) VALUES (?, ?, ?, ?, ?, 'openai', ?, ?, 'workspace-write', 'never', 0, 1, 0, '0.166.0', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'codex_vscode', ?)
                 """,
                 (
                     str(target_tid),
                     str(existing_rollout),
                     created_sec,
                     updated_sec,
+                    thread_source_value,
                     str(thread_proj.cwd),
                     thread_proj.title,
                     thread_proj.preview,
@@ -2847,6 +2914,8 @@ class SyncBridge:
                         agy_boundary_digest=ContentDigest(str(raw["agy_boundary_digest"])),
                         codex_boundary_digest=ContentDigest(str(raw["codex_boundary_digest"])),
                         updated_at_iso=str(raw.get("updated_at_iso") or ""),
+                        rescued_inflight_turn=bool(raw.get("rescued_inflight_turn", False)),
+                        pre_rescue_source_host=str(raw.get("pre_rescue_source_host") or ""),
                     )
                 except Exception:
                     continue
@@ -2868,6 +2937,8 @@ class SyncBridge:
             "agy_boundary_digest": str(cursor.agy_boundary_digest),
             "codex_boundary_digest": str(cursor.codex_boundary_digest),
             "updated_at_iso": cursor.updated_at_iso,
+            "rescued_inflight_turn": bool(cursor.rescued_inflight_turn),
+            "pre_rescue_source_host": str(cursor.pre_rescue_source_host or ""),
         }
         _atomic_write_text(cpath, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
@@ -3071,6 +3142,7 @@ class SyncBridge:
                 except sqlite3.OperationalError:
                     pass
 
+        codex_depth = 0
         if codex_thread_id is not None:
             tid_key = validate_session_id(str(codex_thread_id), label="codex_thread_id")
             state_db = self._paths.codex_home_dir / "state_5.sqlite"
@@ -3079,16 +3151,26 @@ class SyncBridge:
                     conn = _open_readonly_sqlite(state_db)
                     try:
                         row = conn.execute(
-                            "SELECT attached_thread_parent_id, agent_role, agent_nickname FROM threads WHERE id = ?",
+                            "SELECT attached_thread_parent_id, agent_role, agent_nickname, source FROM threads WHERE id = ?",
                             (tid_key,),
                         ).fetchone()
                         if row:
-                            if row[0] and str(row[0]).strip():
-                                parent_tid_str = str(row[0]).strip()
-                            if not type_name and row[1] and str(row[1]).strip():
-                                type_name = str(row[1]).strip()
-                            if not role and row[2] and str(row[2]).strip():
-                                role = str(row[2]).strip()
+                            src_is_sub, src_parent_tid, src_depth, src_type, src_nick = _parse_codex_thread_source_lineage(
+                                str(row[3]) if row[3] is not None else None
+                            )
+                            c_parent = str(row[0] or "").strip() or src_parent_tid
+                            c_type = str(row[1] or "").strip() or src_type
+                            c_nick = str(row[2] or "").strip() or src_nick
+                            if c_parent:
+                                parent_tid_str = c_parent
+                            if not type_name and c_type:
+                                type_name = c_type
+                            if not role and c_nick:
+                                role = c_nick
+                            if src_is_sub:
+                                codex_depth = max(1, src_depth)
+                            elif c_parent and (c_type or c_nick):
+                                codex_depth = 1
                     finally:
                         conn.close()
                 except sqlite3.OperationalError:
@@ -3107,10 +3189,9 @@ class SyncBridge:
                     else:
                         parent_tid_str = ""
 
-        if depth == 0 and (bool(sc_info) or bool(type_name) or bool(role) or spawn_idx is not None):
-            depth = 1
+        depth = max(depth, codex_depth, 1 if (bool(sc_info) or spawn_idx is not None) else 0)
 
-        is_actual_subagent = depth > 0 or bool(type_name) or bool(role) or spawn_idx is not None
+        is_actual_subagent = depth > 0 or spawn_idx is not None
         if is_actual_subagent:
             if parent_cid_str and not parent_tid_str:
                 p_cursor = self._load_cursor(binding.workspace_uri, CascadeId(parent_cid_str), None)
@@ -3137,6 +3218,32 @@ class SyncBridge:
             spawn_step_index=spawn_idx,
         )
 
+    @staticmethod
+    def _is_source_actively_running(
+        host: HostKind,
+        ledger: TrajectoryLedger | None,
+        locks: HostLockSnapshot,
+    ) -> bool:
+        if host == HostKind.ANTIGRAVITY:
+            if locks.agy_presence_locked or locks.agy_wal_active:
+                return True
+            return bool(
+                locks.agy_daemon is not None
+                and ledger is not None
+                and any(
+                    ext.extension_type == "agy_step_status" and dict(ext.metadata).get("status") in {"1", "2", "8"}
+                    for ev in ledger.events
+                    for ext in ev.anchor.host_extensions
+                )
+            )
+        if locks.codex_wal_active:
+            return True
+        return bool(
+            locks.codex_daemon is not None
+            and ledger is not None
+            and any(isinstance(ev, TaskBoundaryEvent) and ev.task_status.lower() == "in_progress" for ev in ledger.events)
+        )
+
     def sync_session(
         self,
         workspace: str | Path,
@@ -3147,6 +3254,7 @@ class SyncBridge:
         mode: TransportMode = TransportMode.AUTO,
         fork_policy: ForkResolutionPolicy = ForkResolutionPolicy.HALT_ON_DIVERGENCE,
         source_tag: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
+        include_interrupted: bool = False,
     ) -> SyncReceipt:
         """Synchronize one paired session (or import an unpaired session) idempotently."""
         if cascade_id is not None:
@@ -3204,6 +3312,68 @@ class SyncBridge:
             except FileNotFoundError:
                 codex_ledger = None
 
+        agy_has_reconcilable_rescued_tail = False
+        codex_has_reconcilable_rescued_tail = False
+        if cursor is not None and cursor.rescued_inflight_turn:
+            if (
+                cursor.pre_rescue_source_host == HostKind.ANTIGRAVITY.value
+                and agy_ledger is not None
+                and agy_ledger.has_inflight_turn
+                and not self._is_source_actively_running(HostKind.ANTIGRAVITY, agy_ledger, initial_locks)
+            ):
+                probe_agy, did_probe_agy = rescue_interrupted_ledger(agy_ledger)
+                p_wm = probe_agy.find_watermark(cursor.last_synced_turn_id) if did_probe_agy else None
+                if p_wm is not None and p_wm.boundary_digest == cursor.agy_boundary_digest:
+                    agy_ledger = probe_agy
+                    agy_has_reconcilable_rescued_tail = True
+            elif (
+                cursor.pre_rescue_source_host == HostKind.CODEX.value
+                and codex_ledger is not None
+                and codex_ledger.has_inflight_turn
+                and not self._is_source_actively_running(HostKind.CODEX, codex_ledger, initial_locks)
+            ):
+                probe_codex, did_probe_codex = rescue_interrupted_ledger(codex_ledger)
+                p_wm = probe_codex.find_watermark(cursor.last_synced_turn_id) if did_probe_codex else None
+                if p_wm is not None and p_wm.boundary_digest == cursor.codex_boundary_digest:
+                    codex_ledger = probe_codex
+                    codex_has_reconcilable_rescued_tail = True
+
+        was_agy_rescued = False
+        was_codex_rescued = False
+        if include_interrupted:
+            if (
+                direction in (SyncDirection.AGY_TO_CODEX, SyncDirection.AUTO_INCREMENTAL)
+                and agy_ledger is not None
+                and agy_ledger.has_inflight_turn
+            ):
+                if self._is_source_actively_running(HostKind.ANTIGRAVITY, agy_ledger, initial_locks):
+                    return SyncReceipt(
+                        workspace=binding,
+                        cascade_id=cascade_id or CascadeId("00000000-0000-0000-0000-000000000000"),
+                        codex_thread_id=codex_thread_id or CodexThreadId("00000000-0000-0000-0000-000000000000"),
+                        transition_kind="deferred_busy",
+                        transport_used=mode,
+                        events_applied=0,
+                        updated_cursor=cursor,
+                    )
+                agy_ledger, was_agy_rescued = rescue_interrupted_ledger(agy_ledger)
+            if (
+                direction in (SyncDirection.CODEX_TO_AGY, SyncDirection.AUTO_INCREMENTAL)
+                and codex_ledger is not None
+                and codex_ledger.has_inflight_turn
+            ):
+                if self._is_source_actively_running(HostKind.CODEX, codex_ledger, initial_locks):
+                    return SyncReceipt(
+                        workspace=binding,
+                        cascade_id=cascade_id or CascadeId("00000000-0000-0000-0000-000000000000"),
+                        codex_thread_id=codex_thread_id or CodexThreadId("00000000-0000-0000-0000-000000000000"),
+                        transition_kind="deferred_busy",
+                        transport_used=mode,
+                        events_applied=0,
+                        updated_cursor=cursor,
+                    )
+                codex_ledger, was_codex_rescued = rescue_interrupted_ledger(codex_ledger)
+
         locks = self._guard.probe_locks(
             probe_cid,
             probe_tid,
@@ -3240,6 +3410,8 @@ class SyncBridge:
                 cursor.last_synced_codex_line_no,
                 cursor.agy_boundary_digest,
                 cursor.codex_boundary_digest,
+                cursor.rescued_inflight_turn,
+                cursor.pre_rescue_source_host,
             ) != (
                 fixed_cursor.cascade_id,
                 fixed_cursor.codex_thread_id,
@@ -3248,6 +3420,8 @@ class SyncBridge:
                 fixed_cursor.last_synced_codex_line_no,
                 fixed_cursor.agy_boundary_digest,
                 fixed_cursor.codex_boundary_digest,
+                fixed_cursor.rescued_inflight_turn,
+                fixed_cursor.pre_rescue_source_host,
             ):
                 self._save_cursor(fixed_cursor)
             return SyncReceipt(
@@ -3322,7 +3496,7 @@ class SyncBridge:
                     mode=transition.selected_transport,
                     parent_cascade_id=lineage.parent_cascade_id,
                     source_tag=source_tag,
-                    incremental=isinstance(transition, IncrementalAppendTransition),
+                    incremental=(isinstance(transition, IncrementalAppendTransition) and not agy_has_reconcilable_rescued_tail),
                     lineage=lineage,
                 )
                 refreshed_agy = self._transport.read_agy_ledger(
@@ -3341,6 +3515,8 @@ class SyncBridge:
                     agy_boundary_digest=agy_wm.boundary_digest,
                     codex_boundary_digest=codex_wm.boundary_digest,
                     updated_at_iso=_now_iso(),
+                    rescued_inflight_turn=was_codex_rescued,
+                    pre_rescue_source_host=HostKind.CODEX.value if was_codex_rescued else "",
                 )
                 self._save_cursor(new_cursor)
                 return SyncReceipt(
@@ -3395,7 +3571,7 @@ class SyncBridge:
                 lock_snapshot=locks,
                 mode=transition.selected_transport,
                 parent_thread_id=lineage.parent_codex_thread_id,
-                incremental=isinstance(transition, IncrementalAppendTransition),
+                incremental=(isinstance(transition, IncrementalAppendTransition) and not codex_has_reconcilable_rescued_tail),
                 lineage=lineage,
             )
             refreshed_codex = self._transport.read_codex_ledger(
@@ -3414,6 +3590,8 @@ class SyncBridge:
                 agy_boundary_digest=agy_wm.boundary_digest,
                 codex_boundary_digest=codex_wm.boundary_digest,
                 updated_at_iso=_now_iso(),
+                rescued_inflight_turn=was_agy_rescued,
+                pre_rescue_source_host=HostKind.ANTIGRAVITY.value if was_agy_rescued else "",
             )
             self._save_cursor(new_cursor)
             return SyncReceipt(
@@ -3490,6 +3668,8 @@ class SyncBridge:
                     agy_boundary_digest=agy_wm.boundary_digest,
                     codex_boundary_digest=codex_wm.boundary_digest,
                     updated_at_iso=_now_iso(),
+                    rescued_inflight_turn=was_codex_rescued,
+                    pre_rescue_source_host=HostKind.CODEX.value if was_codex_rescued else "",
                 )
                 self._save_cursor(fork_cursor)
                 return SyncReceipt(
@@ -3546,6 +3726,8 @@ class SyncBridge:
                 agy_boundary_digest=agy_wm.boundary_digest,
                 codex_boundary_digest=codex_wm.boundary_digest,
                 updated_at_iso=_now_iso(),
+                rescued_inflight_turn=was_agy_rescued,
+                pre_rescue_source_host=HostKind.ANTIGRAVITY.value if was_agy_rescued else "",
             )
             self._save_cursor(fork_cursor)
             return SyncReceipt(
@@ -3601,6 +3783,8 @@ class SyncBridge:
                 agy_boundary_digest=agy_wm.boundary_digest,
                 codex_boundary_digest=codex_wm.boundary_digest,
                 updated_at_iso=_now_iso(),
+                rescued_inflight_turn=was_codex_rescued,
+                pre_rescue_source_host=HostKind.CODEX.value if was_codex_rescued else "",
             )
             self._save_cursor(ow_cursor)
             return SyncReceipt(
@@ -3652,6 +3836,8 @@ class SyncBridge:
             agy_boundary_digest=agy_wm.boundary_digest,
             codex_boundary_digest=codex_wm.boundary_digest,
             updated_at_iso=_now_iso(),
+            rescued_inflight_turn=was_agy_rescued,
+            pre_rescue_source_host=HostKind.ANTIGRAVITY.value if was_agy_rescued else "",
         )
         self._save_cursor(ow_cursor)
         return SyncReceipt(
@@ -3673,6 +3859,7 @@ class SyncBridge:
         mode: TransportMode = TransportMode.AUTO,
         fork_policy: ForkResolutionPolicy = ForkResolutionPolicy.HALT_ON_DIVERGENCE,
         include_subagents: bool = False,
+        include_interrupted: bool = False,
     ) -> Tuple[SyncReceipt, ...]:
         """Discover and synchronize all sessions in `workspace`."""
         binding = self._registry.resolve_readonly_binding(workspace)
@@ -3693,6 +3880,7 @@ class SyncBridge:
                 direction=direction,
                 mode=mode,
                 fork_policy=fork_policy,
+                include_interrupted=include_interrupted,
             )
             receipts.append(rec)
             if direction == SyncDirection.AUTO_INCREMENTAL and rec.transition_kind == "diverged_forked":
@@ -3704,6 +3892,7 @@ class SyncBridge:
                             direction=SyncDirection.CODEX_TO_AGY,
                             mode=mode,
                             fork_policy=fork_policy,
+                            include_interrupted=include_interrupted,
                         )
                     )
                 if rec.forked_from_cascade_id is not None:
@@ -3714,6 +3903,7 @@ class SyncBridge:
                             direction=SyncDirection.AGY_TO_CODEX,
                             mode=mode,
                             fork_policy=fork_policy,
+                            include_interrupted=include_interrupted,
                         )
                     )
         return tuple(receipts)

@@ -10,8 +10,8 @@ import subprocess
 from typing import Any, Callable, Literal, Mapping, Sequence, Tuple
 
 from ..ledger import (
-    AssistantTextEvent, CanonicalEvent, CanonicalToolPayload, CheckpointEvent,
-    EventOriginAnchor, FileEditPayload, HostExtensionEnvelope, HostKind,
+    INTERRUPTED_TOOL_OUTPUT, AssistantTextEvent, CanonicalEvent, CanonicalToolPayload,
+    CheckpointEvent, EventOriginAnchor, FileEditPayload, HostExtensionEnvelope, HostKind,
     MediaAttachment, OpaqueToolPayload, RolloutLineNo, RunCommandPayload,
     SearchWebDocument, SearchWebPayload, SystemEvent, TaskBoundaryEvent,
     ThinkingEvent, ToolCallEvent, ToolCallId, ToolResultEvent, TrajectoryLedger,
@@ -230,7 +230,8 @@ def _decode_tool_response_item(
             prior_payload = dataclasses.replace(prior_payload, exit_code=int(m_exit.group(1)) if m_exit else 0)
             events[call_pos] = dataclasses.replace(prior_ev, payload=prior_payload)
     is_err = bool(pl.get("is_error", False)) or str(pl.get("status") or "").lower() in ("failed", "error")
-    res_ev = ToolResultEvent(kind="tool_result", anchor=base_anchor, call_id=cid, tool_name=prior_tname, output_text=out_text, is_error=is_err, payload=prior_payload)
+    res_exts = (HostExtensionEnvelope(host=HostKind.CODEX, extension_type="synthesized_dangling_output", raw_payload=b"1"),) if pt_dict.get("synthesized_dangling_output") else ()
+    res_ev = ToolResultEvent(kind="tool_result", anchor=dataclasses.replace(base_anchor, host_extensions=res_exts), call_id=cid, tool_name=prior_tname, output_text=out_text, is_error=is_err, payload=prior_payload)
     if cid in ws_result_index:
         events[ws_result_index[cid]] = res_ev
     else:
@@ -373,12 +374,19 @@ def decode_codex_rollout(
 def _encode_codex_system_event(ev: SystemEvent, ts: str, append_fn: Callable[[str, str, Mapping[str, Any]], None]) -> None:
     for ext in ev.anchor.host_extensions:
         if ext.extension_type == "codex_raw_record" and ext.raw_payload:
-            append_fn(ts, dict(ext.metadata).get("record_type", "event_msg"), safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace")))
+            raw_d = dict(safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace")))
+            if "turn_id" in raw_d:
+                raw_d["turn_id"] = str(ev.anchor.turn_id)
+            if "root_turn_id" in raw_d:
+                raw_d["root_turn_id"] = str(ev.anchor.turn_id)
+            append_fn(ts, dict(ext.metadata).get("record_type", "event_msg"), raw_d)
             return
     if ev.event_type.startswith("codex_") and ev.event_type.endswith("_message"):
         role = ev.event_type.removeprefix("codex_").removesuffix("_message")
         for ext in ev.anchor.host_extensions:
-            if ext.extension_type == f"message_{role}" and ext.raw_payload and (raw_pl := safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace"))):
+            if ext.extension_type == f"message_{role}" and ext.raw_payload and (raw_pl := dict(safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace")))):
+                if isinstance(raw_pl.get("internal_chat_message_metadata_passthrough"), dict):
+                    raw_pl["internal_chat_message_metadata_passthrough"] = {**raw_pl["internal_chat_message_metadata_passthrough"], "turn_id": str(ev.anchor.turn_id)}
                 append_fn(ts, "response_item", raw_pl)
                 return
         append_fn(ts, "response_item", {"type": "message", "role": role, "content": [{"type": "input_text", "text": ev.message_text}], "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)}})
@@ -420,7 +428,9 @@ def _encode_single_codex_event(
         append_fn(ts, "response_item", pl_d)
         return False
     if isinstance(ev, AssistantTextEvent):
-        raw_am = next((safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace")) for ext in ev.anchor.host_extensions if ext.extension_type == "codex_agent_message" and ext.raw_payload), None)
+        raw_am = next((dict(safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace"))) for ext in ev.anchor.host_extensions if ext.extension_type == "codex_agent_message" and ext.raw_payload), None)
+        if raw_am and isinstance(raw_am.get("internal_chat_message_metadata_passthrough"), dict):
+            raw_am["internal_chat_message_metadata_passthrough"] = {**raw_am["internal_chat_message_metadata_passthrough"], "turn_id": str(ev.anchor.turn_id)}
         append_fn(ts, "response_item", raw_am or {"type": "message", "status": "completed", "id": ev.message_id or f"msg_asst_{next_line_hint}", "role": "assistant", "content": [{"type": "output_text", "text": ev.text}], "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)}})
         return False
     if isinstance(ev, ToolCallEvent):
@@ -447,6 +457,8 @@ def _encode_single_codex_event(
             res_pt: dict[str, Any] = {"turn_id": str(ev.anchor.turn_id)}
             if rmeta := extract_tool_result_meta(ev.payload):
                 res_pt["tool_result_meta"] = rmeta
+            if any(ext.extension_type == "synthesized_dangling_output" for ext in ev.anchor.host_extensions):
+                res_pt["synthesized_dangling_output"] = True
             append_fn(ts, "response_item", {"type": out_kind, "call_id": str(ev.call_id), "output": ev.output_text, "is_error": ev.is_error, "status": "failed" if ev.is_error else "completed", "internal_chat_message_metadata_passthrough": res_pt})
         return False
     if isinstance(ev, CheckpointEvent):
@@ -492,8 +504,12 @@ def encode_codex_rollout(
             meta_pl["cwd"] = cwd
         _append_record(first_ts, "session_meta", meta_pl)
 
+    resolved_ids = {e.call_id for e in events if isinstance(e, ToolResultEvent)}
+    dangling_turn_calls: list[ToolCallEvent] = []
+    synth_ext = (HostExtensionEnvelope(host=HostKind.CODEX, extension_type="synthesized_dangling_output", raw_payload=b"1"),)
     active_turn: TurnId | None = None
     active_turn_closed = True
+    turn_events_buf: list[CanonicalEvent] = []
     last_ts = "2026-01-01T00:00:00Z"
     ws_native_calls: set[ToolCallId] = set()
 
@@ -504,16 +520,31 @@ def encode_codex_rollout(
             _append_record(ts, ev.event_type, raw_dict or {"message": ev.message_text, "event_type": ev.event_type})
             continue
         if ev.anchor.turn_id != active_turn:
-            if active_turn is not None and not active_turn_closed:
-                _append_record(ts, "event_msg", {"type": "task_complete", "turn_id": str(active_turn), "root_turn_id": str(active_turn), "last_agent_message": "Turn complete"})
+            if active_turn is not None:
+                for dc in dangling_turn_calls:
+                    if dc.call_id not in ws_native_calls:
+                        s_res = ToolResultEvent(kind="tool_result", anchor=EventOriginAnchor(origin_host=dc.anchor.origin_host, turn_id=active_turn, timestamp_iso=ts, host_extensions=synth_ext), call_id=dc.call_id, tool_name=dc.tool_name, output_text=INTERRUPTED_TOOL_OUTPUT, is_error=True, payload=dc.payload)
+                        _encode_single_codex_event(s_res, ts, next_line, ws_native_calls, _append_record)
+                dangling_turn_calls.clear()
+                if not active_turn_closed:
+                    _append_record(ts, "event_msg", {"type": "task_complete", "turn_id": str(active_turn), "root_turn_id": str(active_turn), "last_agent_message": "Turn complete"})
             active_turn, active_turn_closed = ev.anchor.turn_id, False
+            turn_events_buf.clear()
             if not (isinstance(ev, TaskBoundaryEvent) and ev.task_status == "task_started"):
                 _append_record(ts, "event_msg", {"type": "task_started", "turn_id": str(active_turn), "root_turn_id": str(active_turn)})
+        turn_events_buf.append(ev)
         if _encode_single_codex_event(ev, ts, next_line, ws_native_calls, _append_record):
             active_turn_closed = True
+        if isinstance(ev, ToolCallEvent) and ev.call_id not in resolved_ids and ev.call_id not in ws_native_calls:
+            dangling_turn_calls.append(ev)
 
-    if active_turn is not None and not active_turn_closed:
-        _append_record(last_ts, "event_msg", {"type": "task_complete", "turn_id": str(active_turn), "root_turn_id": str(active_turn), "last_agent_message": "Turn complete"})
+    if active_turn is not None and not active_turn_closed and not dangling_turn_calls:
+        from ..ledger import _is_nonterminal_work_or_abort_event, _is_terminal_completion_event
+
+        lw = max((i for i, e in enumerate(turn_events_buf) if _is_nonterminal_work_or_abort_event(e)), default=-1)
+        lc = max((i for i, e in enumerate(turn_events_buf) if _is_terminal_completion_event(e)), default=-1)
+        if lw <= lc and not any(ext.extension_type == "agy_step_status" for e in turn_events_buf for ext in e.anchor.host_extensions):
+            _append_record(last_ts, "event_msg", {"type": "task_complete", "turn_id": str(active_turn), "root_turn_id": str(active_turn), "last_agent_message": "Turn complete"})
     return tuple(lines)
 
 
@@ -578,6 +609,13 @@ def decode_codex_rpc_thread_to_ledger(
                 w_pl = SearchWebPayload(kind="search_web", query=str(item.get("query") or ""))
                 events.append(ToolCallEvent(kind="tool_call", anchor=anchor, call_id=cid, tool_name="web_search", tool_summary="web_search", payload=w_pl))
                 events.append(ToolResultEvent(kind="tool_result", anchor=anchor, call_id=cid, tool_name="web_search", output_text=f"Web search: {w_pl.query}", is_error=False, payload=w_pl))
-        if str(turn.get("status") or "completed").lower() == "completed":
+        t_status = str(turn.get("status") or "completed").lower()
+        if t_status == "completed":
             events.append(TaskBoundaryEvent(kind="task_boundary", anchor=anchor, boundary_kind="task_boundary", task_name="", task_status="task_complete", task_summary="Turn complete"))
+        elif t_status in ("inprogress", "in_progress"):
+            events.append(TaskBoundaryEvent(kind="task_boundary", anchor=anchor, boundary_kind="task_boundary", task_name="", task_status="in_progress", task_summary=""))
+        elif t_status in ("interrupted", "failed"):
+            err_obj = turn.get("error")
+            err_msg = str((err_obj.get("message") if isinstance(err_obj, Mapping) else err_obj) or turn.get("status") or t_status)
+            events.append(SystemEvent(kind="system_message", anchor=anchor, event_type="codex_event_msg:turn_aborted", message_text=err_msg))
     return TrajectoryLedger.from_events(workspace_path=workspace_path, workspace_uri=workspace_uri, events=events, explicit_title_override=thread_obj.get("name") or thread_obj.get("title") or explicit_title_override)

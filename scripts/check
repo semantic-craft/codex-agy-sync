@@ -48,10 +48,12 @@ wire_path = pathlib.Path("src/codex_agy_sync/_wire.py")
 wire_loc = len(wire_path.read_text(encoding="utf-8").splitlines())
 assert wire_loc < 220, f"_wire.py must remain < 220 LOC, got {wire_loc}"
 
+payloads_path = pathlib.Path("src/codex_agy_sync/payloads.py")
+cli_path = pathlib.Path("src/codex_agy_sync/cli.py")
 ledger_path = pathlib.Path("src/codex_agy_sync/ledger.py")
 ledger_src = ledger_path.read_text(encoding="utf-8")
 ledger_loc = len(ledger_src.splitlines())
-assert ledger_loc < 950, f"ledger.py must remain < 950 LOC, got {ledger_loc}"
+assert ledger_loc < 800, f"ledger.py must remain < 800 LOC, got {ledger_loc}"
 ledger_defs = {
     n.name for n in ast.walk(ast.parse(ledger_src)) if isinstance(n, ast.FunctionDef)
 }
@@ -68,9 +70,10 @@ codecs_files = sorted(codecs_dir.glob("*.py"))
 assert {p.name for p in codecs_files} >= {
     "__init__.py", "projections.py", "rollout.py", "schema_tags.py", "steps.py", "tools.py",
 }, f"Missing codecs submodules: {[p.name for p in codecs_files]}"
-for mod_path in [wire_path, ledger_path, *codecs_files]:
+for mod_path in [wire_path, payloads_path, ledger_path, cli_path, *codecs_files]:
     mod_src = mod_path.read_text(encoding="utf-8")
     mod_loc = len(mod_src.splitlines())
+    assert mod_loc < 800, f"{mod_path} must remain < 800 LOC, got {mod_loc}"
     if mod_path.parent == codecs_dir:
         assert mod_loc < 700, f"{mod_path} must remain < 700 LOC, got {mod_loc}"
     for node in ast.walk(ast.parse(mod_src)):

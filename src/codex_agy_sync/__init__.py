@@ -43,6 +43,8 @@ from .codecs import (
     TrajectoryWireCodec,
 )
 from .ledger import (
+    INTERRUPTED_TOOL_OUTPUT,
+    INTERRUPTED_TURN_TEXT,
     AgyGuiSafeSource,
     AgyProjectId,
     AnnotationPbtxtProjection,
@@ -104,6 +106,7 @@ from .ledger import (
     WorkspaceRootUri,
     normalize_tool_file_path,
     parse_workspace_identity,
+    rescue_interrupted_ledger,
     resolve_canonical_title,
     validate_session_id,
 )
@@ -147,6 +150,8 @@ __all__ = [
     "HostKind",
     "HostLockSnapshot",
     "HostTransportPort",
+    "INTERRUPTED_TOOL_OUTPUT",
+    "INTERRUPTED_TURN_TEXT",
     "IncrementalAppendTransition",
     "InitialImportTransition",
     "InvokeSubagentPayload",
@@ -203,6 +208,7 @@ __all__ = [
     "WorkspaceRootUri",
     "normalize_tool_file_path",
     "parse_workspace_identity",
+    "rescue_interrupted_ledger",
     "resolve_canonical_title",
     "validate_session_id",
 ]
