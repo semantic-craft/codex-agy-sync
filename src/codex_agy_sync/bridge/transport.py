@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 from datetime import datetime, timezone
 import json
@@ -30,6 +31,7 @@ from .registry import (
     ProjectRegistry, WorkspaceProjectBinding, _ensure_agy_conversation_db_schema,
     _ensure_agy_summaries_db_schema, _ensure_codex_state_db_schema,
 )
+from .rpc import read_agy_ledger_dual_mode, read_codex_ledger_dual_mode
 from .state_machine import generate_uuid7
 
 
@@ -106,60 +108,48 @@ class DefaultHostTransport:
     def _read_agy_explicit_title(self, cascade_id: CascadeId) -> str | None:
         validate_session_id(str(cascade_id), label="cascade_id")
         annot_path = _validated_child_path(self._paths.agy_data_dir, "annotations", f"{cascade_id}.pbtxt", label="cascade_id")
-        pbtxt_title = (
-            parse_annotation_pbtxt_title(annot_path.read_text(encoding="utf-8", errors="replace"))
-            if annot_path.is_file() else None
-        )
-        db_title: str | None = None
-        summary_annot_title: str | None = None
+        pbtxt_title = parse_annotation_pbtxt_title(annot_path.read_text(encoding="utf-8", errors="replace")) if annot_path.is_file() else None
+        db_title = summary_annot_title = None
         sum_db = self._paths.agy_data_dir / "conversation_summaries.db"
         if sum_db.is_file():
             try:
-                conn = _open_readonly_sqlite(sum_db)
-                try:
-                    row = conn.execute(
-                        "SELECT title, raw_summary FROM conversation_summaries WHERE conversation_id = ?",
-                        (str(cascade_id),),
-                    ).fetchone()
-                finally:
-                    conn.close()
+                with contextlib.closing(_open_readonly_sqlite(sum_db)) as conn:
+                    row = conn.execute("SELECT title, raw_summary FROM conversation_summaries WHERE conversation_id = ?", (str(cascade_id),)).fetchone()
                 if row:
-                    if row[0] and str(row[0]).strip():
-                        db_title = str(row[0]).strip()
+                    db_title = str(row[0]).strip() if row[0] and str(row[0]).strip() else None
                     if row[1]:
-                        try:
-                            cand = decode_cascade_summary_proto(bytes(row[1]), fallback_cascade_id=cascade_id).annotations.title.strip()
-                            summary_annot_title = cand or None
-                        except ValueError:
-                            pass
+                        with contextlib.suppress(ValueError):
+                            summary_annot_title = decode_cascade_summary_proto(bytes(row[1]), fallback_cascade_id=cascade_id).annotations.title.strip() or None
             except sqlite3.OperationalError:
                 pass
         return next((c for c in (pbtxt_title, summary_annot_title, db_title) if c), None)
 
     def _read_persisted_agy_steps(self, conv_db: Path) -> list[AgyRawStepRow]:
-        conn = _open_readonly_sqlite(conv_db)
-        try:
-            rows = conn.execute(
-                "SELECT idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format FROM steps ORDER BY idx ASC"
-            ).fetchall()
-        finally:
-            conn.close()
+        with contextlib.closing(_open_readonly_sqlite(conv_db)) as conn:
+            rows = conn.execute("SELECT idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format FROM steps ORDER BY idx ASC").fetchall()
         return _rows_to_raw_agy_steps(rows)
 
-    def read_agy_ledger(
-        self, binding: WorkspaceProjectBinding, cascade_id: CascadeId,
-        lock_snapshot: HostLockSnapshot, mode: TransportMode,
-    ) -> TrajectoryLedger:
-        _ = (lock_snapshot, mode)
-        validate_session_id(str(cascade_id), label="cascade_id")
+    def _read_agy_ledger_disk(self, binding: WorkspaceProjectBinding, cascade_id: CascadeId) -> TrajectoryLedger:
         conv_db = _validated_child_path(self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id")
         if not conv_db.is_file():
             raise FileNotFoundError(f"Antigravity conversation database not found: {conv_db}")
         return self._codec.decode_agy_steps_to_ledger(
-            workspace_path=binding.workspace_path, workspace_uri=binding.workspace_uri,
-            raw_steps=self._read_persisted_agy_steps(conv_db),
+            binding.workspace_path, binding.workspace_uri, self._read_persisted_agy_steps(conv_db),
             explicit_title_override=self._read_agy_explicit_title(cascade_id),
         )
+
+    def read_agy_ledger_with_meta(
+        self, binding: WorkspaceProjectBinding, cascade_id: CascadeId, lock_snapshot: HostLockSnapshot, mode: TransportMode,
+    ) -> tuple[TrajectoryLedger, TransportMode, bool]:
+        return read_agy_ledger_dual_mode(
+            self._codec, binding, cascade_id, lock_snapshot, mode,
+            read_disk_fn=lambda: self._read_agy_ledger_disk(binding, cascade_id), read_title_fn=self._read_agy_explicit_title,
+        )
+
+    def read_agy_ledger(
+        self, binding: WorkspaceProjectBinding, cascade_id: CascadeId, lock_snapshot: HostLockSnapshot, mode: TransportMode,
+    ) -> TrajectoryLedger:
+        return self.read_agy_ledger_with_meta(binding, cascade_id, lock_snapshot, mode)[0]
 
     def _resolve_codex_rollout_candidate(self, raw_path: str, resolved_codex_home: Path) -> Path | None:
         for cand in (Path(raw_path), Path(f"{raw_path}.zst")):
@@ -167,67 +157,57 @@ class DefaultHostTransport:
                 return cand
         return None
 
-    def _find_codex_rollout_and_title(self, thread_id: CodexThreadId) -> tuple[Path, str | None]:
+    def _probe_codex_rollout_and_title(self, thread_id: CodexThreadId) -> tuple[Path | None, str | None]:
         validate_session_id(str(thread_id), label="codex_thread_id")
         resolved_codex_home = self._paths.codex_home_dir.resolve(strict=False)
         state_db = self._paths.codex_home_dir / "state_5.sqlite"
-        rollout_path: Path | None = None
-        db_title: str | None = None
-
+        rollout_path = db_title = None
         if state_db.is_file():
-            try:
-                conn = _open_readonly_sqlite(state_db)
-                try:
+            with contextlib.suppress(sqlite3.OperationalError):
+                with contextlib.closing(_open_readonly_sqlite(state_db)) as conn:
                     row = conn.execute("SELECT rollout_path, title, name FROM threads WHERE id = ?", (str(thread_id),)).fetchone()
-                finally:
-                    conn.close()
                 if row:
-                    if row[0]:
-                        rollout_path = self._resolve_codex_rollout_candidate(str(row[0]), resolved_codex_home)
+                    rollout_path = self._resolve_codex_rollout_candidate(str(row[0]), resolved_codex_home) if row[0] else None
                     db_title = next((str(tc).strip() for tc in (row[2], row[1]) if tc and str(tc).strip()), None)
-            except sqlite3.OperationalError:
-                pass
-
         session_idx = self._paths.codex_home_dir / "session_index.jsonl"
         if session_idx.is_file() and not db_title:
-            try:
+            with contextlib.suppress(Exception):
                 for line in session_idx.read_text(encoding="utf-8", errors="replace").splitlines():
-                    if str(thread_id) in line:
-                        obj = json.loads(line)
-                        if obj.get("id") == str(thread_id) and str(obj.get("thread_name") or "").strip():
-                            db_title = str(obj["thread_name"]).strip()
-            except Exception:
-                pass
+                    if str(thread_id) in line and (obj := json.loads(line)).get("id") == str(thread_id) and str(obj.get("thread_name") or "").strip():
+                        db_title = str(obj["thread_name"]).strip()
+        return rollout_path, db_title
 
+    def _find_codex_rollout_and_title(self, thread_id: CodexThreadId) -> tuple[Path, str | None]:
+        rollout_path, db_title = self._probe_codex_rollout_and_title(thread_id)
         if rollout_path is None:
             for sub in ("sessions", "archived_sessions"):
-                search_root = self._paths.codex_home_dir / sub
-                if search_root.is_dir():
-                    resolved_search = search_root.resolve(strict=False)
-                    matches = [
-                        m for pat in (f"*{thread_id}.jsonl", f"*{thread_id}.jsonl.zst")
-                        for m in sorted(search_root.rglob(pat))
-                        if m.is_file() and m.resolve(strict=False).is_relative_to(resolved_search)
-                    ]
+                if (sroot := self._paths.codex_home_dir / sub).is_dir():
+                    rsroot = sroot.resolve(strict=False)
+                    matches = [m for pat in (f"*{thread_id}.jsonl", f"*{thread_id}.jsonl.zst") for m in sorted(sroot.rglob(pat)) if m.is_file() and m.resolve(strict=False).is_relative_to(rsroot)]
                     if matches:
                         rollout_path = matches[-1]
                         break
-
         if rollout_path is None or not rollout_path.is_file():
             raise FileNotFoundError(f"Codex rollout JSONL file not found for thread {thread_id}")
         return rollout_path, db_title
 
-    def read_codex_ledger(
-        self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId,
-        lock_snapshot: HostLockSnapshot, mode: TransportMode,
-    ) -> TrajectoryLedger:
-        _ = (lock_snapshot, mode)
-        validate_session_id(str(thread_id), label="codex_thread_id")
-        rollout_path, db_title = self._find_codex_rollout_and_title(thread_id)
-        return self._codec.decode_codex_rollout_to_ledger(
-            workspace_path=binding.workspace_path, workspace_uri=binding.workspace_uri,
-            raw_lines=read_codex_rollout_lines(rollout_path), explicit_title_override=db_title,
+    def read_codex_ledger_with_meta(
+        self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId, lock_snapshot: HostLockSnapshot, mode: TransportMode,
+    ) -> tuple[TrajectoryLedger, TransportMode, bool]:
+        def _disk() -> TrajectoryLedger:
+            rp, title = self._find_codex_rollout_and_title(thread_id)
+            return self._codec.decode_codex_rollout_to_ledger(binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(rp), explicit_title_override=title)
+
+        return read_codex_ledger_dual_mode(
+            self._codec, self._paths.codex_home_dir, binding, thread_id, lock_snapshot, mode,
+            read_disk_fn=_disk, read_optional_title_fn=lambda tid: self._probe_codex_rollout_and_title(tid)[1],
+            resolve_rollout_fn=self._resolve_codex_rollout_candidate,
         )
+
+    def read_codex_ledger(
+        self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId, lock_snapshot: HostLockSnapshot, mode: TransportMode,
+    ) -> TrajectoryLedger:
+        return self.read_codex_ledger_with_meta(binding, thread_id, lock_snapshot, mode)[0]
 
     def _write_agy_conversation_db(
         self, binding: WorkspaceProjectBinding, target_cid: CascadeId,

@@ -27,6 +27,7 @@ from .registry import (
     ProjectRegistry, WorkspaceProjectBinding,
     _parse_agy_trajectory_metadata_lineage, _parse_codex_thread_source_lineage, _safe_valid_session_id,
 )
+from .rpc import ProbedSyncLedgers, probe_sync_ledgers
 from .state_machine import (
     CursorForkStateMachine, DeferredBusyTransition, DivergedConflictTransition, ForkResolutionPolicy,
     IncrementalAppendTransition, InitialImportTransition, NoOpTransition, SessionSyncCursor,
@@ -66,6 +67,7 @@ class _WritePlan:
     full_ledger: TrajectoryLedger
     source_ledger: TrajectoryLedger
     selected_transport: TransportMode
+    receipt_transport: TransportMode
     transition_kind: _WriteReceiptKind
     lineage: SubagentLineage
     source_tag: AgyGuiSafeSource
@@ -81,12 +83,9 @@ def _readonly_fetchone(db_path: Path, sql: str, params: tuple[object, ...] = ())
     if not db_path.is_file():
         return None
     try:
-        conn = _open_readonly_sqlite(db_path)
-        try:
+        with contextlib.closing(_open_readonly_sqlite(db_path)) as conn:
             row = conn.execute(sql, params).fetchone()
-            return tuple(row) if row is not None else None
-        finally:
-            conn.close()
+        return tuple(row) if row is not None else None
     except sqlite3.OperationalError:
         return None
 
@@ -96,6 +95,7 @@ def _make_write_plan(
     events: Sequence[CanonicalEvent], full_events: Sequence[CanonicalEvent], source_ledger: TrajectoryLedger,
     title: str, selected_transport: TransportMode, transition_kind: _WriteReceiptKind,
     lineage: SubagentLineage, source_tag: AgyGuiSafeSource, *,
+    receipt_transport: TransportMode | None = None,
     incremental: bool = False, was_source_rescued: bool = False,
     forked_from_cascade_id: CascadeId | None = None, forked_from_codex_thread_id: CodexThreadId | None = None,
     agy_turn_inflight: bool = False, codex_turn_inflight: bool = False,
@@ -104,9 +104,10 @@ def _make_write_plan(
         binding.workspace_path, binding.workspace_uri, full_events,
         explicit_title_override=title, recompute_agy_step_indices=(target_host == HostKind.ANTIGRAVITY),
     )
+    eff_receipt_tr = receipt_transport if receipt_transport is not None else selected_transport
     return _WritePlan(
         target_host, target_cid, target_tid, tuple(events), full_ledger, source_ledger,
-        selected_transport, transition_kind, lineage, source_tag, incremental,
+        selected_transport, eff_receipt_tr, transition_kind, lineage, source_tag, incremental,
         was_source_rescued, forked_from_cascade_id, forked_from_codex_thread_id,
         agy_turn_inflight, codex_turn_inflight,
     )
@@ -344,7 +345,11 @@ class SyncBridge:
         )
 
     @staticmethod
-    def _is_source_actively_running(host: HostKind, ledger: TrajectoryLedger | None, locks: HostLockSnapshot) -> bool:
+    def _is_source_actively_running(
+        host: HostKind, ledger: TrajectoryLedger | None, locks: HostLockSnapshot, *, rpc_active: bool = False,
+    ) -> bool:
+        if rpc_active:
+            return True
         if host == HostKind.ANTIGRAVITY:
             return locks.agy_presence_locked or locks.agy_wal_active or bool(
                 locks.agy_daemon is not None and ledger is not None and any(
@@ -368,54 +373,45 @@ class SyncBridge:
 
     def _probe_and_read_ledgers(
         self, binding: WorkspaceProjectBinding, cursor: SessionSyncCursor | None,
-        cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None, mode: TransportMode,
-    ) -> tuple[
-        CascadeId | None, CodexThreadId | None, CascadeId | None, CodexThreadId | None,
-        HostLockSnapshot, TrajectoryLedger | None, TrajectoryLedger | None,
-    ]:
+        cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
+        direction: SyncDirection, mode: TransportMode,
+    ) -> ProbedSyncLedgers:
         probe_cid = cascade_id or (self._unpaired_det_cid(binding.workspace_uri, codex_thread_id) if codex_thread_id else None)
         probe_tid = codex_thread_id or (self._unpaired_det_tid(binding.workspace_uri, cascade_id) if cascade_id else None)
-        initial_locks = self._guard.probe_locks(probe_cid, probe_tid)
-        agy_ledger: TrajectoryLedger | None = None
-        if (read_cid := cascade_id or (probe_cid if cursor is None else None)) is not None:
-            with contextlib.suppress(FileNotFoundError):
-                agy_ledger = self._transport.read_agy_ledger(binding, read_cid, initial_locks, mode)
-                cascade_id = read_cid
-        codex_ledger: TrajectoryLedger | None = None
-        if (read_tid := codex_thread_id or (probe_tid if cursor is None else None)) is not None:
-            with contextlib.suppress(FileNotFoundError):
-                codex_ledger = self._transport.read_codex_ledger(binding, read_tid, initial_locks, mode)
-                codex_thread_id = read_tid
-        return cascade_id, codex_thread_id, probe_cid, probe_tid, initial_locks, agy_ledger, codex_ledger
+        return probe_sync_ledgers(
+            self._transport, self._guard, binding, cursor, cascade_id, codex_thread_id,
+            direction, mode, probe_cid=probe_cid, probe_tid=probe_tid,
+        )
 
     def _reconcile_and_rescue_ledgers(
-        self, cursor: SessionSyncCursor | None, agy_ledger: TrajectoryLedger | None,
-        codex_ledger: TrajectoryLedger | None, initial_locks: HostLockSnapshot,
+        self, cursor: SessionSyncCursor | None, probed: ProbedSyncLedgers,
         direction: SyncDirection, include_interrupted: bool,
     ) -> tuple[TrajectoryLedger | None, TrajectoryLedger | None, bool, bool, bool, bool, bool]:
+        agy_ledger, codex_ledger, initial_locks = probed.agy_ledger, probed.codex_ledger, probed.initial_locks
         agy_reconciled, codex_reconciled = False, False
         if cursor is not None and cursor.rescued_inflight_turn and cursor.pre_rescue_source_host in (HostKind.ANTIGRAVITY.value, HostKind.CODEX.value):
             is_pre_agy = cursor.pre_rescue_source_host == HostKind.ANTIGRAVITY.value
             cand_host = HostKind.ANTIGRAVITY if is_pre_agy else HostKind.CODEX
             cand_ledger = agy_ledger if is_pre_agy else codex_ledger
             cand_digest = cursor.agy_boundary_digest if is_pre_agy else cursor.codex_boundary_digest
-            if cand_ledger is not None and cand_ledger.has_inflight_turn and not self._is_source_actively_running(cand_host, cand_ledger, initial_locks):
-                probed, did_probe = rescue_interrupted_ledger(cand_ledger)
-                p_wm = probed.find_watermark(cursor.last_synced_turn_id) if did_probe else None
+            cand_active = probed.agy_rpc_active if is_pre_agy else probed.codex_rpc_active
+            if cand_ledger is not None and cand_ledger.has_inflight_turn and not self._is_source_actively_running(cand_host, cand_ledger, initial_locks, rpc_active=cand_active):
+                rescued_cand, did_probe = rescue_interrupted_ledger(cand_ledger)
+                p_wm = rescued_cand.find_watermark(cursor.last_synced_turn_id) if did_probe else None
                 if p_wm is not None and p_wm.boundary_digest == cand_digest:
                     if is_pre_agy:
-                        agy_ledger, agy_reconciled = probed, True
+                        agy_ledger, agy_reconciled = rescued_cand, True
                     else:
-                        codex_ledger, codex_reconciled = probed, True
+                        codex_ledger, codex_reconciled = rescued_cand, True
 
         was_agy_rescued, was_codex_rescued = False, False
         if include_interrupted:
             if direction in (SyncDirection.AGY_TO_CODEX, SyncDirection.AUTO_INCREMENTAL) and agy_ledger and agy_ledger.has_inflight_turn:
-                if self._is_source_actively_running(HostKind.ANTIGRAVITY, agy_ledger, initial_locks):
+                if self._is_source_actively_running(HostKind.ANTIGRAVITY, agy_ledger, initial_locks, rpc_active=probed.agy_rpc_active):
                     return agy_ledger, codex_ledger, agy_reconciled, codex_reconciled, False, False, True
                 agy_ledger, was_agy_rescued = rescue_interrupted_ledger(agy_ledger)
             if direction in (SyncDirection.CODEX_TO_AGY, SyncDirection.AUTO_INCREMENTAL) and codex_ledger and codex_ledger.has_inflight_turn:
-                if self._is_source_actively_running(HostKind.CODEX, codex_ledger, initial_locks):
+                if self._is_source_actively_running(HostKind.CODEX, codex_ledger, initial_locks, rpc_active=probed.codex_rpc_active):
                     return agy_ledger, codex_ledger, agy_reconciled, codex_reconciled, False, False, True
                 codex_ledger, was_codex_rescued = rescue_interrupted_ledger(codex_ledger)
         return agy_ledger, codex_ledger, agy_reconciled, codex_reconciled, was_agy_rescued, was_codex_rescued, False
@@ -465,7 +461,7 @@ class SyncBridge:
                         agy_turn_inflight=plan.agy_turn_inflight, codex_turn_inflight=plan.codex_turn_inflight,
                     ))
                 except BlockingIOError:
-                    return SyncReceipt(binding, plan.target_cid, plan.target_tid, "deferred_busy", plan.selected_transport, 0, cursor)
+                    return SyncReceipt(binding, plan.target_cid, plan.target_tid, "deferred_busy", plan.receipt_transport, 0, cursor)
                 target_sid = str(plan.target_cid) if plan.target_host == HostKind.ANTIGRAVITY else str(plan.target_tid)
                 candidates, cleanup_globs = self._candidate_target_paths(
                     plan.target_host, plan.target_cid, plan.target_tid, binding=binding, lineage=plan.lineage
@@ -490,7 +486,7 @@ class SyncBridge:
                     backup.restore()
                 raise
             return SyncReceipt(
-                binding, written_cid, written_tid, plan.transition_kind, plan.selected_transport,
+                binding, written_cid, written_tid, plan.transition_kind, plan.receipt_transport,
                 len(plan.events), new_cursor, plan.forked_from_cascade_id, plan.forked_from_codex_thread_id, backup,
             )
 
@@ -498,7 +494,7 @@ class SyncBridge:
         self, binding: WorkspaceProjectBinding, transition: InitialImportTransition | IncrementalAppendTransition,
         cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
-        lineage: SubagentLineage, source_tag: AgyGuiSafeSource,
+        lineage: SubagentLineage, source_tag: AgyGuiSafeSource, receipt_transport: TransportMode,
         agy_reconciled: bool, codex_reconciled: bool, was_agy_rescued: bool, was_codex_rescued: bool,
     ) -> _WritePlan:
         events_slice = transition.events_to_apply if isinstance(transition, InitialImportTransition) else transition.delta_events
@@ -517,7 +513,8 @@ class SyncBridge:
         return _make_write_plan(
             binding, transition.target_host, target_cid, target_tid, events_slice, full_evs,
             src_ledger, src_ledger.title, transition.selected_transport, transition.kind,
-            lineage, source_tag, incremental=(is_inc and not (agy_reconciled if is_agy else codex_reconciled)),
+            lineage, source_tag, receipt_transport=receipt_transport,
+            incremental=(is_inc and not (agy_reconciled if is_agy else codex_reconciled)),
             was_source_rescued=(was_codex_rescued if is_agy else was_agy_rescued),
             agy_turn_inflight=bool(agy_ledger and agy_ledger.has_inflight_turn),
             codex_turn_inflight=bool(codex_ledger and codex_ledger.has_inflight_turn),
@@ -527,7 +524,7 @@ class SyncBridge:
         self, binding: WorkspaceProjectBinding, transition: DivergedConflictTransition,
         orig_cid: CascadeId, orig_tid: CodexThreadId,
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
-        lineage: SubagentLineage, source_tag: AgyGuiSafeSource,
+        lineage: SubagentLineage, source_tag: AgyGuiSafeSource, receipt_transport: TransportMode,
         fork_policy: ForkResolutionPolicy, was_agy_rescued: bool, was_codex_rescued: bool,
     ) -> _WritePlan:
         is_fork, is_agy = (fork_policy == ForkResolutionPolicy.FORK_NEW_SESSION), (transition.target_host == HostKind.ANTIGRAVITY)
@@ -540,7 +537,8 @@ class SyncBridge:
             transition.fork_events_to_apply, src_ledger,
             f"{src_ledger.title} (Fork)" if is_fork else src_ledger.title,
             transition.selected_transport, "diverged_forked" if is_fork else "diverged_overwritten",
-            lineage, source_tag, was_source_rescued=(was_codex_rescued if is_agy else was_agy_rescued),
+            lineage, source_tag, receipt_transport=receipt_transport,
+            was_source_rescued=(was_codex_rescued if is_agy else was_agy_rescued),
             forked_from_cascade_id=(orig_cid if (is_fork and is_agy and orig_cid != _NULL_CID) else None),
             forked_from_codex_thread_id=(orig_tid if (not is_agy and is_fork and orig_tid != _NULL_TID) else None),
             agy_turn_inflight=(False if (is_fork and is_agy) else bool(agy_ledger and agy_ledger.has_inflight_turn)),
@@ -583,7 +581,8 @@ class SyncBridge:
         self, binding: WorkspaceProjectBinding, cursor: SessionSyncCursor | None,
         transition: NoOpTransition, cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
-        locks: HostLockSnapshot, mode: TransportMode, source_tag: AgyGuiSafeSource, lineage: SubagentLineage,
+        locks: HostLockSnapshot, mode: TransportMode, receipt_transport: TransportMode,
+        source_tag: AgyGuiSafeSource, lineage: SubagentLineage,
     ) -> SyncReceipt:
         final_cid, final_tid = (cascade_id or transition.cursor.cascade_id), (codex_thread_id or transition.cursor.codex_thread_id)
         if agy_ledger is not None and codex_ledger is not None and hasattr(self._transport, "ensure_companion_stores_complete"):
@@ -596,7 +595,7 @@ class SyncBridge:
         )
         if cursor is None or dataclasses.replace(cursor, updated_at_iso="") != dataclasses.replace(fixed_cursor, updated_at_iso=""):
             self._save_cursor(fixed_cursor)
-        return SyncReceipt(binding, final_cid, final_tid, "no_op", mode, 0, fixed_cursor)
+        return SyncReceipt(binding, final_cid, final_tid, "no_op", receipt_transport, 0, fixed_cursor)
 
     def sync_session(
         self, workspace: str | Path, *,
@@ -616,17 +615,19 @@ class SyncBridge:
             cascade_id, codex_thread_id = (cascade_id or cursor.cascade_id), (codex_thread_id or cursor.codex_thread_id)
 
         lineage = self._resolve_session_lineage(binding, cascade_id, codex_thread_id)
-        cascade_id, codex_thread_id, probe_cid, probe_tid, init_locks, agy_ledger, codex_ledger = (
-            self._probe_and_read_ledgers(binding, cursor, cascade_id, codex_thread_id, mode)
-        )
+        probed = self._probe_and_read_ledgers(binding, cursor, cascade_id, codex_thread_id, direction, mode)
+        cascade_id, codex_thread_id = probed.cascade_id, probed.codex_thread_id
+        if probed.rpc_required_unavailable:
+            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
+
         agy_ledger, codex_ledger, agy_rec, codex_rec, was_agy_rescued, was_codex_rescued, busy_src = (
-            self._reconcile_and_rescue_ledgers(cursor, agy_ledger, codex_ledger, init_locks, direction, include_interrupted)
+            self._reconcile_and_rescue_ledgers(cursor, probed, direction, include_interrupted)
         )
         if busy_src:
-            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", mode, 0, cursor)
+            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", probed.resolve_receipt_transport(mode, is_deferred=True), 0, cursor)
 
         locks = self._guard.probe_locks(
-            probe_cid, probe_tid,
+            probed.probe_cid, probed.probe_tid,
             agy_turn_inflight=bool(agy_ledger and agy_ledger.has_inflight_turn),
             codex_turn_inflight=bool(codex_ledger and codex_ledger.has_inflight_turn),
         )
@@ -635,24 +636,31 @@ class SyncBridge:
             online_rpc_write_supported=bool(getattr(self._transport, "supports_online_rpc_write", False)),
         )
         if isinstance(transition, NoOpTransition):
+            if not probed.satisfies_online_rpc_mode(mode, None):
+                return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
             return self._finalize_noop(
-                binding, cursor, transition, cascade_id, codex_thread_id, agy_ledger, codex_ledger, locks, mode, source_tag, lineage,
+                binding, cursor, transition, cascade_id, codex_thread_id, agy_ledger, codex_ledger,
+                locks, mode, probed.resolve_receipt_transport(mode), source_tag, lineage,
             )
         if isinstance(transition, DeferredBusyTransition):
-            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", mode, 0, cursor)
+            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", probed.resolve_receipt_transport(mode, is_deferred=True), 0, cursor)
+
+        if not probed.satisfies_online_rpc_mode(mode, transition.source_host):
+            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
+        receipt_tr = probed.resolve_receipt_transport(mode, source_host=transition.source_host)
         if isinstance(transition, (InitialImportTransition, IncrementalAppendTransition)):
             plan = self._build_import_or_append_plan(
                 binding, transition, cascade_id, codex_thread_id, agy_ledger, codex_ledger,
-                lineage, source_tag, agy_rec, codex_rec, was_agy_rescued, was_codex_rescued,
+                lineage, source_tag, receipt_tr, agy_rec, codex_rec, was_agy_rescued, was_codex_rescued,
             )
             return self._execute_write_plan(binding, cursor, plan)
 
         orig_cid, orig_tid = (cascade_id or transition.cursor.cascade_id), (codex_thread_id or transition.cursor.codex_thread_id)
         if fork_policy == ForkResolutionPolicy.HALT_ON_DIVERGENCE:
-            return SyncReceipt(binding, orig_cid, orig_tid, "diverged_halted", transition.selected_transport, 0, cursor)
+            return SyncReceipt(binding, orig_cid, orig_tid, "diverged_halted", receipt_tr, 0, cursor)
         div_plan = self._build_divergence_write_plan(
             binding, transition, orig_cid, orig_tid, agy_ledger, codex_ledger,
-            lineage, source_tag, fork_policy, was_agy_rescued, was_codex_rescued,
+            lineage, source_tag, receipt_tr, fork_policy, was_agy_rescued, was_codex_rescued,
         )
         receipt = self._execute_write_plan(binding, cursor, div_plan)
         if (

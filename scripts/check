@@ -74,8 +74,12 @@ assert {p.name for p in codecs_files} >= {
     "__init__.py", "projections.py", "rollout.py", "schema_tags.py", "steps.py", "tool_payloads.py", "tools.py",
 }, f"Missing codecs submodules: {[p.name for p in codecs_files]}"
 assert {p.name for p in bridge_files} >= {
-    "__init__.py", "paths_and_locks.py", "registry.py", "state_machine.py", "sync.py", "transport.py",
+    "__init__.py", "paths_and_locks.py", "registry.py", "rpc.py", "state_machine.py", "sync.py", "transport.py",
 }, f"Missing bridge submodules: {[p.name for p in bridge_files]}"
+rpc_loc = len((bridge_dir / "rpc.py").read_text(encoding="utf-8").splitlines())
+assert rpc_loc < 450, f"bridge/rpc.py must remain < 450 LOC, got {rpc_loc}"
+for sym in ("OnlineRpcUnavailableError", "AgyRpcReadResult", "CodexRpcReadResult", "fetch_agy_trajectory_via_rpc", "fetch_codex_thread_via_rpc"):
+    assert hasattr(pkg, sym), f"Missing public RPC export on codex_agy_sync: {sym}"
 for mod_path in sorted(pathlib.Path("src/codex_agy_sync").rglob("*.py")):
     mod_src = mod_path.read_text(encoding="utf-8")
     mod_loc = len(mod_src.splitlines())

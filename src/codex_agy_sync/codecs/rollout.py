@@ -598,10 +598,11 @@ def decode_codex_rpc_thread_to_ledger(
                 continue
             itype = str(item.get("type") or "")
             if itype == "userMessage":
-                txt, media = _extract_content_blocks(item.get("content") or [])
+                txt, media = _extract_content_blocks(item.get("content") if item.get("content") is not None else (item.get("text") or ""))
                 events.append(UserInputEvent(kind="user_input", anchor=anchor, query_text=txt, media=media))
             elif itype == "agentMessage":
-                events.append(AssistantTextEvent(kind="assistant_text", anchor=anchor, text=str(item.get("text") or ""), message_id=str(item["id"]) if item.get("id") else None))
+                am_txt = str(item["text"]) if item.get("text") is not None else _extract_content_blocks(item.get("content") or [])[0]
+                events.append(AssistantTextEvent(kind="assistant_text", anchor=anchor, text=am_txt, message_id=str(item["id"]) if item.get("id") else None))
             elif itype == "reasoning":
                 s_list = item.get("summary") or []
                 events.append(ThinkingEvent(kind="thinking", anchor=anchor, summary_text="\n".join(str(x) for x in s_list) if isinstance(s_list, list) else str(s_list or "")))
@@ -609,7 +610,7 @@ def decode_codex_rpc_thread_to_ledger(
                 cid = ToolCallId(str(item.get("id") or f"rpc-cmd-{t_idx}-{len(events)}"))
                 pl = RunCommandPayload(kind="run_command", command_line=str(item.get("command") or ""), cwd=normalize_tool_file_path(str(item.get("cwd") or workspace_path)), exit_code=int(item["exitCode"]) if item.get("exitCode") is not None else 0)
                 events.append(ToolCallEvent(kind="tool_call", anchor=anchor, call_id=cid, tool_name="exec_command", tool_summary="exec_command", payload=pl))
-                if str(item.get("status") or "completed").lower() != "inprogress":
+                if str(item.get("status") or "completed").lower() not in ("inprogress", "in_progress"):
                     events.append(ToolResultEvent(kind="tool_result", anchor=anchor, call_id=cid, tool_name="exec_command", output_text=str(item.get("aggregatedOutput") or ""), is_error=str(item.get("status") or "").lower() in ("failed", "declined"), payload=pl))
             elif itype == "fileChange":
                 cid = ToolCallId(str(item.get("id") or f"rpc-patch-{t_idx}-{len(events)}"))
@@ -617,14 +618,15 @@ def decode_codex_rpc_thread_to_ledger(
                 first_ch = changes[0] if changes and isinstance(changes[0], Mapping) else {}
                 f_pl = FileEditPayload(kind="file_edit", path=normalize_tool_file_path(str(first_ch.get("path") or "")), edit_op="MODIFY", unified_diff=str(first_ch.get("diff") or ""))
                 events.append(ToolCallEvent(kind="tool_call", anchor=anchor, call_id=cid, tool_name="apply_patch", tool_summary="apply_patch", payload=f_pl))
-                if str(item.get("status") or "completed").lower() != "inprogress":
+                if str(item.get("status") or "completed").lower() not in ("inprogress", "in_progress"):
                     events.append(ToolResultEvent(kind="tool_result", anchor=anchor, call_id=cid, tool_name="apply_patch", output_text="Applied patch", is_error=str(item.get("status") or "").lower() in ("failed", "declined"), payload=f_pl))
             elif itype == "webSearch":
                 cid = ToolCallId(str(item.get("id") or f"rpc-ws-{t_idx}-{len(events)}"))
                 w_pl = SearchWebPayload(kind="search_web", query=str(item.get("query") or ""))
                 events.append(ToolCallEvent(kind="tool_call", anchor=anchor, call_id=cid, tool_name="web_search", tool_summary="web_search", payload=w_pl))
                 events.append(ToolResultEvent(kind="tool_result", anchor=anchor, call_id=cid, tool_name="web_search", output_text=f"Web search: {w_pl.query}", is_error=False, payload=w_pl))
-        t_status = str(turn.get("status") or "completed").lower()
+        raw_t_status = turn.get("status")
+        t_status = str((raw_t_status.get("type") if isinstance(raw_t_status, Mapping) else raw_t_status) or "completed").lower()
         if t_status == "completed":
             events.append(TaskBoundaryEvent(kind="task_boundary", anchor=anchor, boundary_kind="task_boundary", task_name="", task_status="task_complete", task_summary="Turn complete"))
         elif t_status in ("inprogress", "in_progress"):

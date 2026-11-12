@@ -165,26 +165,26 @@ class CursorForkStateMachine:
         if target_host == HostKind.ANTIGRAVITY:
             if lock_snapshot.agy_turn_inflight:
                 return DeferredBusyTransition("deferred_busy", HostKind.ANTIGRAVITY, "Antigravity target session has an in-flight turn.")
-            if requested_mode == TransportMode.ONLINE_RPC:
+            if requested_mode == TransportMode.ONLINE_RPC and online_rpc_write_supported:
                 if lock_snapshot.agy_daemon is None:
                     return DeferredBusyTransition("deferred_busy", HostKind.ANTIGRAVITY, "Online RPC requested for Antigravity, but no live LanguageServer daemon is available.")
-                if not online_rpc_write_supported:
-                    return DeferredBusyTransition("deferred_busy", target_host, f"Online write RPC for {target_host.value} is not enabled; deferring to avoid raw-writing active WAL storage.")
                 return TransportMode.ONLINE_RPC
             if lock_snapshot.can_write_agy_offline():
                 return TransportMode.OFFLINE_STORAGE
+            if requested_mode == TransportMode.ONLINE_RPC:
+                return DeferredBusyTransition("deferred_busy", target_host, f"Online write RPC for {target_host.value} is not enabled; deferring to avoid raw-writing active WAL storage.")
             return DeferredBusyTransition("deferred_busy", HostKind.ANTIGRAVITY, "Antigravity session is locked by an active presence flock or WAL daemon.")
 
         if lock_snapshot.codex_turn_inflight:
             return DeferredBusyTransition("deferred_busy", HostKind.CODEX, "Codex target thread has an in-flight turn.")
-        if requested_mode == TransportMode.ONLINE_RPC:
+        if requested_mode == TransportMode.ONLINE_RPC and online_rpc_write_supported:
             if lock_snapshot.codex_daemon is None:
                 return DeferredBusyTransition("deferred_busy", HostKind.CODEX, "Online RPC requested for Codex, but no live app-server socket is available.")
-            if not online_rpc_write_supported:
-                return DeferredBusyTransition("deferred_busy", target_host, f"Online write RPC for {target_host.value} is not enabled; deferring to avoid raw-writing active WAL storage.")
             return TransportMode.ONLINE_RPC
         if lock_snapshot.can_write_codex_offline():
             return TransportMode.OFFLINE_STORAGE
+        if requested_mode == TransportMode.ONLINE_RPC:
+            return DeferredBusyTransition("deferred_busy", target_host, f"Online write RPC for {target_host.value} is not enabled; deferring to avoid raw-writing active WAL storage.")
         return DeferredBusyTransition("deferred_busy", HostKind.CODEX, "Codex thread cannot be written safely right now due to active WAL lock.")
 
     @staticmethod

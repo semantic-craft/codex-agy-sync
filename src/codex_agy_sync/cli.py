@@ -163,6 +163,7 @@ def _resolve_paths(args: argparse.Namespace, env: Mapping[str, str] | None = Non
         codex_home_dir=(args.codex_home_dir.resolve() if args.codex_home_dir else discovered.codex_home_dir),
         sync_state_dir=(args.sync_state_dir.resolve() if args.sync_state_dir else discovered.sync_state_dir),
         agy_cli_data_dir=cli_dir,
+        codex_app_server_socket=discovered.codex_app_server_socket,
     )
 
 

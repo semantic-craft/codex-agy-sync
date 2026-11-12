@@ -17,6 +17,7 @@ from .paths_and_locks import (
     _now_iso,
     _open_readonly_sqlite,
     _validated_child_path,
+    has_live_unix_socket,
 )
 from .registry import (
     FORBIDDEN_AGY_PROJECT_IDS,
@@ -26,6 +27,13 @@ from .registry import (
     _ensure_agy_conversation_db_schema,
     _ensure_agy_summaries_db_schema,
     _ensure_codex_state_db_schema,
+)
+from .rpc import (
+    AgyRpcReadResult,
+    CodexRpcReadResult,
+    OnlineRpcUnavailableError,
+    fetch_agy_trajectory_via_rpc,
+    fetch_codex_thread_via_rpc,
 )
 from .state_machine import (
     CursorForkStateMachine,
@@ -45,8 +53,10 @@ from .transport import DefaultHostTransport, HostTransportPort
 
 __all__ = [
     "AgyDaemonEndpoint",
+    "AgyRpcReadResult",
     "BackupManifest",
     "CodexDaemonEndpoint",
+    "CodexRpcReadResult",
     "CsrfSecret",
     "CursorForkStateMachine",
     "CursorTransition",
@@ -61,6 +71,7 @@ __all__ = [
     "IncrementalAppendTransition",
     "InitialImportTransition",
     "NoOpTransition",
+    "OnlineRpcUnavailableError",
     "PairedSessionDescriptor",
     "PresenceWalGuard",
     "ProjectRegistry",
@@ -79,5 +90,8 @@ __all__ = [
     "_now_iso",
     "_open_readonly_sqlite",
     "_validated_child_path",
+    "fetch_agy_trajectory_via_rpc",
+    "fetch_codex_thread_via_rpc",
     "generate_uuid7",
+    "has_live_unix_socket",
 ]

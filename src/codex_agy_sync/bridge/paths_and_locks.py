@@ -54,6 +54,7 @@ class HostEnvironmentPaths:
     codex_home_dir: Path
     sync_state_dir: Path
     agy_cli_data_dir: Path | None = None
+    codex_app_server_socket: Path | None = None
 
     @classmethod
     def discover(
@@ -85,12 +86,16 @@ class HostEnvironmentPaths:
         else:
             agy_cli_data_dir = None
 
+        raw_codex_sock = (source_env.get("CODEX_APP_SERVER_SOCKET") or "").strip()
+        codex_app_server_socket = Path(raw_codex_sock).expanduser() if raw_codex_sock else None
+
         return cls(
             gemini_config_dir=gemini_config_dir,
             agy_data_dir=agy_data_dir,
             codex_home_dir=codex_home_dir,
             sync_state_dir=sync_state_dir,
             agy_cli_data_dir=agy_cli_data_dir,
+            codex_app_server_socket=codex_app_server_socket,
         )
 
 
@@ -272,6 +277,33 @@ def _open_nonblocking_ex_flock(lock_path: Path, *, create: bool) -> int:
     return fd
 
 
+def has_live_unix_socket(path: Path | None) -> bool:
+    """Return `True` iff `path` exists and resolves (following symlinks) to a Unix domain socket."""
+    if path is None:
+        return False
+    try:
+        return path.exists() and stat.S_ISSOCK(path.stat().st_mode)
+    except OSError:
+        return False
+
+
+def unix_socket_connect_path(sock_path: Path) -> str:
+    """Select the shorter of `sock_path` and its symlink-resolved path to stay under macOS `sun_path` limits."""
+    raw_str = str(sock_path)
+    resolved_str = str(sock_path.resolve(strict=False))
+    return resolved_str if len(os.fsencode(resolved_str)) < len(os.fsencode(raw_str)) else raw_str
+
+
+def _can_tcp_connect_loopback(port: int) -> bool:
+    if port <= 0:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+            return True
+    except OSError:
+        return False
+
+
 class PresenceWalGuard:
     """Enforces read-only SQLite access, held `flock` critical sections, and `BackupManifest` creation."""
 
@@ -295,24 +327,32 @@ class PresenceWalGuard:
         daemon_dir = self._paths.agy_data_dir / "daemon"
         if not daemon_dir.is_dir():
             return None
+        candidates: list[AgyDaemonEndpoint] = []
         for hf in sorted(daemon_dir.glob("hub_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 raw = json.loads(hf.read_text(encoding="utf-8"))
                 pid = int(raw.get("pid") or 0)
                 tok = str(raw.get("csrfToken") or "").strip()
                 if pid > 0 and tok and self._is_pid_alive(pid):
-                    return AgyDaemonEndpoint(
-                        pid=pid,
-                        http_port=int(raw.get("httpPort") or raw.get("port") or 0),
-                        https_port=int(raw.get("httpsPort") or 0),
-                        ls_version=str(raw.get("lsVersion") or "2.30.0"),
-                        csrf_secret=CsrfSecret(tok),
+                    candidates.append(
+                        AgyDaemonEndpoint(
+                            pid=pid,
+                            http_port=int(raw.get("httpPort") or raw.get("port") or 0),
+                            https_port=int(raw.get("httpsPort") or 0),
+                            ls_version=str(raw.get("lsVersion") or "2.30.0"),
+                            csrf_secret=CsrfSecret(tok),
+                        )
                     )
             except Exception:
                 continue
-        return None
+        if len(candidates) > 1:
+            for ep in candidates:
+                if _can_tcp_connect_loopback(ep.http_port):
+                    return ep
+        return candidates[0] if candidates else None
 
     def _discover_codex_daemon(self) -> CodexDaemonEndpoint | None:
+        live_pid: int | None = None
         daemon_json = self._paths.codex_home_dir / "daemon.json"
         if daemon_json.is_file():
             try:
@@ -320,29 +360,30 @@ class PresenceWalGuard:
                 if isinstance(raw, dict):
                     pid = int(raw.get("pid") or 0)
                     if pid > 0 and self._is_pid_alive(pid):
-                        return CodexDaemonEndpoint(socket_path=daemon_json, pid=pid)
+                        live_pid = pid
             except Exception:
                 pass
 
         for candidate in (
+            self._paths.codex_app_server_socket,
             self._paths.codex_home_dir / "app-server.sock",
+            self._paths.codex_home_dir / "app-server-control" / "app-server-control.sock",
+            self._paths.codex_home_dir / "ipc" / "ipc.sock",
             self._paths.codex_home_dir / "run" / "app-server.sock",
         ):
-            try:
-                if not candidate.exists() or not stat.S_ISSOCK(candidate.lstat().st_mode):
-                    continue
-            except OSError:
+            if candidate is None or not has_live_unix_socket(candidate):
                 continue
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(0.2)
             try:
-                sock.connect(str(candidate))
-                return CodexDaemonEndpoint(socket_path=candidate)
+                sock.connect(unix_socket_connect_path(candidate))
+                return CodexDaemonEndpoint(socket_path=candidate, pid=live_pid)
             except OSError:
                 continue
             finally:
                 sock.close()
-        return None
+
+        return CodexDaemonEndpoint(socket_path=daemon_json, pid=live_pid) if live_pid is not None else None
 
     def _probe_flock_locked(self, lock_file: Path) -> bool:
         if not lock_file.exists():
