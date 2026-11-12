@@ -39,9 +39,9 @@ print("  Codex session {}: {} user msgs, {} reasoning items, {} paired tool call
 '
 
 echo "[3/5] Verifying src/codex_agy_sync domain architecture against Phase 1 schema..."
-find src/codex_agy_sync -name '*.py' -print0 | sort -z | xargs -0 python3 -m py_compile bin/codex-agy-sync
+find src/codex_agy_sync tests skills/verify-codex-agy-sync/scripts -name '*.py' -print0 | sort -z | xargs -0 python3 -m py_compile bin/codex-agy-sync
 PYTHONPATH=src python3 -c '
-import ast, json, pathlib
+import ast, json, pathlib, subprocess, sys
 import codex_agy_sync as pkg
 
 wire_path = pathlib.Path("src/codex_agy_sync/_wire.py")
@@ -66,6 +66,23 @@ assert not (ledger_defs & forbidden_wire_defs), f"Wire primitives leaked into le
 
 assert not pathlib.Path("src/codex_agy_sync/codecs.py").exists(), "Monolithic codecs.py must not exist"
 assert not pathlib.Path("src/codex_agy_sync/bridge.py").exists(), "Monolithic bridge.py must not exist"
+assert not pathlib.Path("tests/test_roundtrip_and_sync.py").exists(), "Monolithic test_roundtrip_and_sync.py must not exist"
+for extra_py in sorted(
+    list(pathlib.Path("tests").rglob("*.py"))
+    + list(pathlib.Path("skills/verify-codex-agy-sync/scripts").rglob("*.py"))
+):
+    extra_src = extra_py.read_text(encoding="utf-8")
+    ast.parse(extra_src, filename=str(extra_py))
+    extra_loc = len(extra_src.splitlines())
+    assert extra_loc < 800, f"{extra_py} must remain < 800 LOC, got {extra_loc}"
+assert pathlib.Path("skills/verify-codex-agy-sync/SKILL.md").is_file(), "Missing verify-codex-agy-sync SKILL.md"
+verify_help = subprocess.run(
+    [sys.executable, "skills/verify-codex-agy-sync/scripts/control_sync_verify.py", "--help"],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+assert verify_help.returncode == 0 and "suite" in verify_help.stdout, f"verify-codex-agy-sync --help failed: {verify_help.stderr}"
 codecs_dir = pathlib.Path("src/codex_agy_sync/codecs")
 bridge_dir = pathlib.Path("src/codex_agy_sync/bridge")
 codecs_files = sorted(codecs_dir.glob("*.py"))
@@ -141,7 +158,7 @@ for p in repo.rglob("*"):
     if rel.parts[0] in (".git", "out") or "__pycache__" in rel.parts or rel.suffix == ".pyc":
         continue
     txt = p.read_text(encoding="utf-8", errors="ignore")
-    if rel.parts[0] in ("scripts", "src", "docs", "tests", "bin"):
+    if rel.parts[0] in ("scripts", "src", "docs", "tests", "bin", "skills"):
         for line_no, line in enumerate(txt.splitlines(), start=1):
             if home_str in line:
                 bad.append(f"{rel}:{line_no}: hardcoded home path {home_str}")

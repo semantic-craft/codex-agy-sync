@@ -28,4 +28,4 @@ Preconditions:
 ## Gotchas
 
 - Passing neither `--cascade-id` nor `--codex-thread-id` fails validation. Test both flags explicitly.
-- Do not confuse `total_events` with Antigravity `steps` row count: one `PLANNER_RESPONSE` step unpacks into thinking, assistant text, and tool call events in the ledger.
+- Do not confuse `total_events` with the Antigravity `steps` row count, because one `PLANNER_RESPONSE` step unpacks into thinking, assistant text, and tool call events in the ledger.
