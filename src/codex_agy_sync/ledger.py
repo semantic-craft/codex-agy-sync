@@ -264,6 +264,8 @@ class SchedulePayload:
     cron_expression: str | None = None
     timer_condition: str = "never"
     is_daemon: bool = False
+    exact_timing: bool = False
+    max_iterations: int | None = None
 
 @dataclass(frozen=True)
 class QuestionOption:
@@ -368,6 +370,7 @@ class ToolCallEvent:
     tool_name: str
     tool_summary: str
     payload: CanonicalToolPayload
+    thinking_signature: bytes | None = None
 
 @dataclass(frozen=True)
 class ToolResultEvent:
@@ -714,7 +717,9 @@ def _build_turn_watermarks(
                     all_calls_resolved = False
             elif isinstance(tev, (AssistantTextEvent, ToolResultEvent)):
                 has_completion = True
-            elif isinstance(tev, (CheckpointEvent, SystemEvent)) and not has_user_or_start:
+            elif isinstance(tev, (CheckpointEvent, SystemEvent)) and (
+                not has_user_or_start or (isinstance(tev, SystemEvent) and tev.event_type == "error_message")
+            ):
                 has_completion = True
             elif isinstance(tev, TaskBoundaryEvent) and tev.task_status.lower() not in inflight_statuses:
                 has_completion = True
