@@ -77,8 +77,13 @@ def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
 
         return zstd.decompress(raw_bytes).decode("utf-8", errors="replace")
     except ImportError:
-        proc = subprocess.run(["zstd", "-d", "-c"], input=raw_bytes, capture_output=True, check=True)
-        return proc.stdout.decode("utf-8", errors="replace")
+        try:
+            import zstandard  # type: ignore[import-not-found]
+
+            return zstandard.ZstdDecompressor().decompress(raw_bytes).decode("utf-8", errors="replace")
+        except ImportError:
+            proc = subprocess.run(["zstd", "-d", "-c"], input=raw_bytes, capture_output=True, check=True)
+            return proc.stdout.decode("utf-8", errors="replace")
 
 
 def iter_codex_rollout_lines(path: Path) -> Iterator[CodexRawRolloutLine]:

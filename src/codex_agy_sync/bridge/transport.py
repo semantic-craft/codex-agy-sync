@@ -45,7 +45,12 @@ def _atomic_write_rollout(path: Path, text: str) -> None:
 
             compressed = zstd.compress(payload)
         except ImportError:
-            compressed = subprocess.run(["zstd", "-q", "-c"], input=payload, capture_output=True, check=True).stdout
+            try:
+                import zstandard  # type: ignore[import-not-found]
+
+                compressed = zstandard.ZstdCompressor().compress(payload)
+            except ImportError:
+                compressed = subprocess.run(["zstd", "-q", "-c"], input=payload, capture_output=True, check=True).stdout
         _atomic_write_bytes(path, compressed)
         return
     _atomic_write_text(path, text)

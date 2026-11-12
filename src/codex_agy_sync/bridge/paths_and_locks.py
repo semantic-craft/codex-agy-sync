@@ -327,8 +327,8 @@ def _is_sqlite_shm_wal_locked(db_path: Path) -> bool:
             req = struct.pack("qqihh", 120, 8, 0, fcntl.F_WRLCK, os.SEEK_SET)
             l_type = struct.unpack("qqihh", fcntl.fcntl(fd, fcntl.F_GETLK, req))[3]
         elif sys.platform.startswith("linux"):
-            req = struct.pack("hhqqih", fcntl.F_WRLCK, os.SEEK_SET, 120, 8, 0, 0)
-            l_type = struct.unpack("hhqqih", fcntl.fcntl(fd, fcntl.F_GETLK, req))[0]
+            req = struct.pack("hhqqi0q", fcntl.F_WRLCK, os.SEEK_SET, 120, 8, 0)
+            l_type = struct.unpack("hhqqi0q", fcntl.fcntl(fd, fcntl.F_GETLK, req))[0]
         else:
             return False
         return int(l_type) != fcntl.F_UNLCK
