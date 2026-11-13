@@ -41,17 +41,6 @@
 | [Antigravity-Database-Manager](https://github.com/ag-donald/Antigravity-Database-Manager/blob/main/src/core/summaries_repair.py) | 宿主持久化摘要的接口参考；本机实测无需额外调用摘要写入 |
 | [OpenAI app-server](https://github.com/openai/codex/tree/main/codex-rs/app-server) | 原生 rollout 分叉、项目归属、标题和线程卸载 |
 
-## 可借鉴的六大参考项目
-
-| 项目 | 位置 / 仓库 | 借鉴模块与核心价值 |
-| --- | --- | --- |
-| **1. Lagrange** | `https://github.com/varungupta3009/Lagrange` (`lagrange.py`) | 破解 Antigravity Hub 2.30+ 架构的 `source = 0` 可见性规则、`TrajectoryMetadata.workspace_uris` (field 7) + `project_id` (field 18) 与 `~/.gemini/config/projects/<uuid>.json` 绑定、`annotations/<id>.pbtxt` 标题优先级、`agyhub_summaries_proto.pb` 离线重建与子代理 (field 17) 嵌套保持 |
-| **2. Antigravity Trajectory Extractor** | `https://github.com/jijiamoer/antigravity-trajectory-extractor` | 在线发现运行中的 `language_server` 并调用 `GetCascadeTrajectory` RPC 直接获取最新 `steps` 与运行状态，作为 `Antigravity -> Codex` 在线无锁读取通道 |
-| **3. Antigravity Database Manager** | `https://github.com/ag-donald/Antigravity-Database-Manager` (`docs/schema.proto`, `src/core/protobuf.py`) | 详尽的 `StepWrapper`、`TrajectoryStep`、`ToolCall` (`call_id`, `tool_name`, `arguments_json`, `response_blob`)、`AssistantResponse` (field 94) 与 `TaskBoundaryResponse` (field 93) 字段定义 |
-| **4. txcript** | `https://github.com/skillsynchq/txcript` (`src/harness/codex.rs`, `src/harness/antigravity.rs`) | Codex `rollout-*.jsonl` 与 Antigravity `steps` 表及 `brain/<id>/.system_generated/logs/transcript.jsonl` 工具级双向转换，以及半途中断回合的工具错误闭合思路 |
-| **5. agent-session-bridge & session-migrate** | `https://github.com/Amiyadesi/agent-session-bridge` (`src/agent_session_bridge/antigravity.py`) | `PRAGMA user_version=1` 防客户端旧版迁移清空元数据、`presence/*.lock` 与 `daemon/*.json` PID 存活门禁、`manifest.json` 备份审计以及 Codex `state_5.sqlite` 安全清理 |
-| **6. 本机自有项目** | `~/Projects/dsh-conversation-import`、`~/Projects/dsh-antigravity-bridge`、`~/Projects/agents-everywhere` | 增量水位线与分叉保护状态机，以及 `agents-everywhere` 的 Antigravity 原生运行时集成与 Codex app-server 接入；当前实现以本仓 `bridge/rpc.py` 为准 |
-
 ## 运行机制与架构选型（`A2 + B2 + C1`）
 
 1. **`A2` 在线回环 RPC 无锁读取与受控离线落盘写入**

@@ -1,5 +1,3 @@
-"""Command-line entry points for offline sync and new Desktop session handoff."""
-
 from __future__ import annotations
 
 import argparse

@@ -25,21 +25,12 @@
 
 ## 当前状态
 
+- 2026-11-14 `0.2.0` 已完成实现与发布包准备。GitHub 仓库已公开。Desktop handoff 的交付范围是可见历史文本与新会话续聊，不宣称跨宿主运行态无损迁移；同会话在线追加和其余工具的全面实机验收不在本次完成范围。
+
 - 2026-11-14 新增 Desktop 专用 `handoff`。复用现有账本和编码器，AGY 以全新 ID 发布后由原生 RPC 加载，Codex 走原生 fork 并等待卸载。每次切换生成新会话，相同源历史重跑 `no_op`；不做实时镜像，不覆盖活跃会话。
 - 真实 Desktop 验收发现并修复格式、重复消息和跨宿主运行态问题。思考及检查点摘要保留为普通文本，不重放私有推理状态、原生检查点和明确宿主注入。当前验收对象为 AGY 2.31.2 与 ChatGPT 内嵌 Codex；普通文本、多轮上下文和 Python 工具历史文本已实际双向往返；工具名称、参数与原始输出平文化，不仿制宿主运行态。验收收据与截图位于 `$HOME/Projects/_artifacts/codex-agy-sync/verify-desktop-20261113T180734Z/acceptance-*`。
-- `scripts/check` 已通过，91 项测试、5 项既有实机夹具跳过。门禁明确选用本次创建的测试会话；默认继承控制聊天 ID 会因其无项目绑定失败。一次读取期间 AGY 后台更新摘要导致统计比较失败，随后同命令重跑通过。
+- 发布复验 `scripts/check` 通过，91 项测试、5 项既有实机夹具跳过。此前真实测试会话已归档，本轮 Codex 映射使用其隔离数据库副本并只在副本恢复可见状态；AGY 仍为只读实机映射。隔离 CLI 七场景通过，宿主指纹未变。wheel 已在独立环境安装，版本和 `handoff --help` 通过。本轮未重新执行 Desktop 多轮实机续聊，沿用上列已验收证据。
 
-
-- 2026-11-10 完成正式项目立项（判断 ID `a607d12864a349a18ddb0d63345bd3d6`，Antigravity 项目 ID `c13d254c-e8dc-4b56-b9a9-2a8ed562b3a1`）、Phase 1 二进制 schema 提取以及初版双向同步原型与首次多模型审查。
-- 2026-11-11 完成子智能体血缘隔离、工具路径 `file://` 规范化、二次 `/interrogate` 对抗审查修复（提交 `e56b226`、`f46aac1`），并落地项目本地隔离沙盒验收技能 `skills/verify-codex-agy-sync/SKILL.md` 与全仓代码质量专项评审，制定 6 个模块化重构与功能收口单元。
-- 2026-11-12 按 `A2 + B2 + C1` 架构方案依次完成 Unit 1 至 Unit 5 落地并通过 `./scripts/check` 门禁：
-  - **Unit 1** 抽离唯一安全 Wire 原语 `src/codex_agy_sync/_wire.py` 与工具载荷模块 `payloads.py`，消除重复 varint 解析器与摘要缓存失步隐患。
-  - **Unit 2** 将编解码器拆分为 `src/codex_agy_sync/codecs/` 下 7 个子模块（`schema_tags.py`、`tool_payloads.py`、`tools.py`、`steps.py`、`rollout.py`、`projections.py`、`__init__.py`），挂载真函数表修复列表重复翻倍、补丁块头污染、`scope_items` 与 `thinking_signature` 保真、`step_type = 17` 错误步骤与 `.jsonl.zst` 解码。
-  - **Unit 3** 收紧 `SubagentLineage.is_subagent` 正交判定（保护带 `agent_name` 的顶层会话与 Codex 根线程不被误判隐藏），收紧未完结回合水位线过滤，并实现 `B2` `--include-interrupted` 半途回合原生错误闭合、幂等重跑与续聊回传自动替换。
-  - **Unit 4** 将桥接层拆分为 `src/codex_agy_sync/bridge/` 子包，实现 RFC 9562 单调 UUIDv7、`acquire_offline_write_locks` 全程持锁临界区、写盘异常自动 `BackupManifest.restore()` 回滚、`NoOpTransition` 伴生索引自愈（含 `antigravity-cli/brain` 镜像）及单次 `sync_session(FORK_NEW_SESSION)` 对称双分支派生。
-  - **Unit 5** 新增 `src/codex_agy_sync/bridge/rpc.py`，兑现 `A2` 在线回环只读 RPC（Antigravity `LanguageServerService/GetCascadeTrajectory` Protobuf 客户端与 Codex `app-server` Unix Socket WebSocket `thread/read` 客户端，支持 macOS 软链套接字解析与超长扩展帧），确保活跃运行回合严格返回 `deferred_busy` 且 `SyncReceipt.transport_used` 如实报告实际传输通道，并同步对齐 `C1` 纯按需 CLI 文档。
-  - **Unit 6** 将单体测试文件拆解为 11 个 `< 800` 行的专题模块（覆盖率与断言完全保留），新增 `skills/verify-codex-agy-sync/scripts/_suite.py` 7 场景隔离沙盒验证套件，完成三模型对抗审阅（`pro`、`flash`、`inherit`）9 项缺陷修复（`27d1ffd`）与跨平台 32 字节 Linux flock 对齐及 `zstandard` 回退（`9a87882`），全仓 60 项测试与沙盒验收全部通过。
-  - **发布与分发** 完成标准 `pyproject.toml`、MIT `LICENSE`、`0.1.0` 版本号声明与控制台入口，推送到 GitHub 远程仓库 `semantic-craft/codex-agy-sync` 并发布首个 Release 标签 `v0.1.0`。
 
 ## 下一步
 

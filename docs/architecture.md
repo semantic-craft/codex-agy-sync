@@ -1,5 +1,7 @@
 # Architecture rationale (`codex-agy-sync`)
 
+This document describes the offline synchronization engine. For Desktop handoff through new native sessions, see [Desktop 按需交接](../README.md#desktop-按需交接). That path preserves tool history as text rather than replaying host runtime state.
+
 ## Problem
 
 `codex-agy-sync` synchronizes agent coding sessions bidirectionally between Google Antigravity 2.30+ (`LanguageServerService` Connect RPC and `~/.gemini/antigravity/conversations/<id>.db`) and OpenAI Codex 0.166+ (`codex app-server` JSON-RPC v2 and `~/.codex/state_5.sqlite` plus `rollout-*.jsonl`) inside a shared workspace directory. Phase 1 schema extraction and architectural grounding exposed three structural mismatches that break naive translators.

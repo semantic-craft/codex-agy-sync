@@ -260,7 +260,7 @@ def fetch_codex_thread_via_rpc(
         sock.connect(unix_socket_connect_path(endpoint.socket_path))
         ws.handshake()
         ws.send_json({"id": 1, "method": "initialize", "params": {
-            "clientInfo": {"name": "codex-agy-sync", "version": "0.1.0"}, "capabilities": {"experimentalApi": True},
+            "clientInfo": {"name": "codex-agy-sync", "version": "0.2.0"}, "capabilities": {"experimentalApi": True},
         }})
         if "error" in ws.wait_for_id(1):
             raise OnlineRpcUnavailableError("Codex app-server initialize RPC failed.")
