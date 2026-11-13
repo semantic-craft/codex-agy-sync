@@ -439,6 +439,17 @@ def decode_agy_trajectory(
     return TrajectoryLedger.from_events(workspace_path=workspace_path, workspace_uri=workspace_uri, events=events, explicit_title_override=explicit_title_override)
 
 
+def bind_agy_step(row: AgyRawStepRow, trajectory_id: str, cascade_id: str) -> AgyRawStepRow:
+    reference = encode_string_field(1, trajectory_id) + encode_varint_field(2, int(row.idx)) + encode_string_field(4, cascade_id)
+    metadata = encode_unknown_fields(
+        UnknownWireField(n, w, raw) for n, w, _, raw in iter_wire_fields(row.metadata_blob) if n != 20
+    ) + encode_bytes_field(20, reference)
+    payload = encode_unknown_fields(
+        UnknownWireField(n, w, raw) for n, w, _, raw in iter_wire_fields(row.step_payload_blob) if n != int(StepFieldTag.METADATA)
+    ) + encode_bytes_field(StepFieldTag.METADATA, metadata)
+    return dataclasses.replace(row, metadata_blob=metadata, step_payload_blob=payload)
+
+
 def _wrap_step_row(idx: int, step_type: int, oneof_tag: int, oneof_payload: bytes, meta_blob: bytes, unknowns: Sequence[UnknownWireField], status: int = int(StepStatusCode.DONE)) -> AgyRawStepRow:
     step_buf = (
         encode_varint_field(StepFieldTag.TYPE, step_type)
@@ -447,7 +458,7 @@ def _wrap_step_row(idx: int, step_type: int, oneof_tag: int, oneof_payload: byte
         + encode_bytes_field(oneof_tag, oneof_payload)
         + encode_unknown_fields(unknowns)
     )
-    return AgyRawStepRow(idx=StepIndex(idx), step_type=step_type, status=status, has_subtrajectory=False, metadata_blob=meta_blob, step_payload_blob=step_buf)
+    return AgyRawStepRow(idx=StepIndex(idx), step_type=step_type, status=status, has_subtrajectory=False, metadata_blob=meta_blob, step_payload_blob=step_buf, step_format=0)
 
 
 def _encode_planner_group(

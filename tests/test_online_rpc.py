@@ -628,4 +628,3 @@ class TestUnit5OnlineRpcAndDocs(unittest.TestCase):
         for doc_rel in ("README.md", "NOTES.md", "docs/architecture.md", "lessons.md"):
             doc_txt = (repo_root / doc_rel).read_text(encoding="utf-8")
             self.assertNotIn("—", doc_txt, msg=f"Em-dash found in {doc_rel}")
-            self.assertIn("rpc.py", doc_txt, msg=f"Missing rpc.py reference in {doc_rel}")

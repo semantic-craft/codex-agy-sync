@@ -9,6 +9,7 @@ import re
 import subprocess
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, Tuple
 
+from .. import __version__
 from ..ledger import (
     INTERRUPTED_TOOL_OUTPUT, AssistantTextEvent, CanonicalEvent, CanonicalToolPayload,
     CheckpointEvent, EventOriginAnchor, FileEditPayload, HostExtensionEnvelope, HostKind,
@@ -44,6 +45,9 @@ class _RolloutTurnTracker:
     raw_turn_to_canonical: dict[str, TurnId] = dataclasses.field(default_factory=dict)
     user_sources: list[tuple[int, str, str]] = dataclasses.field(default_factory=list)
     asst_sources: list[tuple[int, str, str]] = dataclasses.field(default_factory=list)
+
+    def has_user_counterpart(self, text: str, source: str) -> bool:
+        return any(txt == text.strip() and src == source for _, txt, src in self.user_sources)
 
     def switch_turn(self, new_tid: TurnId) -> None:
         if new_tid != self.current_turn_id:
@@ -175,15 +179,21 @@ def _decode_event_msg_record(pl: Mapping[str, Any], ts_iso: str, line_no: Rollou
         return True, False
     if ev_sub == "user_message":
         q_text = str(pl.get("message") or pl.get("text") or "")
-        if not any(txt == q_text.strip() and src == "response_item" for _, txt, src in tracker.user_sources):
-            tracker.user_sources.append((len(events), q_text.strip(), "event_msg"))
-            events.append(UserInputEvent(kind="user_input", anchor=anchor, query_text=q_text))
+        for index, (position, text, source) in enumerate(tracker.user_sources):
+            if text == q_text.strip() and source == "response_item":
+                tracker.user_sources[index] = (position, text, "merged")
+                return False, False
+        tracker.user_sources.append((len(events), q_text.strip(), "event_msg"))
+        events.append(UserInputEvent(kind="user_input", anchor=anchor, query_text=q_text))
         return False, False
     if ev_sub == "agent_message":
         a_text = str(pl.get("message") or pl.get("text") or "")
-        if not any(txt == a_text.strip() and src == "response_item" for _, txt, src in tracker.asst_sources):
-            tracker.asst_sources.append((len(events), a_text.strip(), "event_msg"))
-            events.append(AssistantTextEvent(kind="assistant_text", anchor=anchor, text=a_text))
+        for index, (position, text, source) in enumerate(tracker.asst_sources):
+            if text == a_text.strip() and source == "response_item":
+                tracker.asst_sources[index] = (position, text, "merged")
+                return True, False
+        tracker.asst_sources.append((len(events), a_text.strip(), "event_msg"))
+        events.append(AssistantTextEvent(kind="assistant_text", anchor=anchor, text=a_text))
         return True, False
     if ev_sub == "agent_reasoning":
         events.append(ThinkingEvent(kind="thinking", anchor=anchor, summary_text=str(pl.get("text") or pl.get("summary") or "")))
@@ -226,6 +236,11 @@ def _decode_tool_response_item(
         if "exit_code" in safe_json_dict(args_json):
             call_has_explicit_exit.add(cid)
         payload = decode_tool_payload(tname, args_json, is_codex_wire=True)
+        if ptype == "custom_tool_call" and tname == "exec":
+            try:
+                json.loads(args_json)
+            except ValueError:
+                payload = OpaqueToolPayload(kind="opaque", tool_name=tname, raw_arguments_json=args_json)
         tsig_hex = pt_dict.get("thinking_signature_hex")
         tsig = bytes.fromhex(tsig_hex) if isinstance(tsig_hex, str) and tsig_hex else b""
         exts = (HostExtensionEnvelope(host=HostKind.CODEX, extension_type="tool_namespace", raw_payload=str(pl["namespace"]).encode("utf-8"), metadata=(("item_type", ptype),)),) if pl.get("namespace") else ()
@@ -251,6 +266,8 @@ def _decode_tool_response_item(
             events[call_pos] = dataclasses.replace(prior_ev, payload=prior_payload)
     is_err = bool(pl.get("is_error", False)) or str(pl.get("status") or "").lower() in ("failed", "error")
     res_exts = (HostExtensionEnvelope(host=HostKind.CODEX, extension_type="synthesized_dangling_output", raw_payload=b"1"),) if pt_dict.get("synthesized_dangling_output") else ()
+    if not pl.get("call_id"):
+        res_exts += (HostExtensionEnvelope(host=HostKind.CODEX, extension_type="codex_unpaired_tool_output", raw_payload=json.dumps(pl, ensure_ascii=False, sort_keys=True).encode("utf-8")),)
     res_ev = ToolResultEvent(kind="tool_result", anchor=dataclasses.replace(base_anchor, host_extensions=res_exts), call_id=cid, tool_name=prior_tname, output_text=out_text, is_error=is_err, payload=prior_payload)
     if cid in ws_result_index:
         events[ws_result_index[cid]] = res_ev
@@ -274,7 +291,9 @@ def _decode_response_item_record(
         msg_id = str(pl["id"]) if pl.get("id") else None
         if role == "user":
             scopes = tuple(str(s) for s in pt_dict["scope_items"]) if isinstance(pt_dict.get("scope_items"), list) else ()
-            u_ev = UserInputEvent(kind="user_input", anchor=dataclasses.replace(base_anchor, client_message_id=msg_id), query_text=full_text, scope_items=scopes, media=media_items)
+            provenance = {key: pt_dict[key] for key in ("content_item_kinds", "content_item_metadata") if key in pt_dict}
+            extensions = (HostExtensionEnvelope(host=HostKind.CODEX, extension_type="codex_message_provenance", raw_payload=json.dumps(provenance, ensure_ascii=False, sort_keys=True).encode("utf-8")),) if provenance else ()
+            u_ev = UserInputEvent(kind="user_input", anchor=dataclasses.replace(base_anchor, client_message_id=msg_id, host_extensions=extensions), query_text=full_text, scope_items=scopes, media=media_items)
             for idx_src, (ev_pos, txt, src) in enumerate(tracker.user_sources):
                 if src == "event_msg" and txt == full_text.strip():
                     events[ev_pos], tracker.user_sources[idx_src] = u_ev, (ev_pos, txt, "merged")
@@ -364,7 +383,7 @@ def decode_codex_rollout(
             if ev_sub in ("task_started", "user_message"):
                 if ev_turn:
                     tracker.canonical_for_raw(ev_turn)
-                elif tracker.turn_has_response:
+                elif tracker.turn_has_response and not (ev_sub == "user_message" and tracker.has_user_counterpart(str(pl.get("message") or pl.get("text") or ""), "response_item")):
                     tracker.advance_sequential()
                 if ev_sub == "task_started":
                     tracker.turn_has_response = False
@@ -379,7 +398,7 @@ def decode_codex_rollout(
             pt = pl.get("internal_chat_message_metadata_passthrough")
             if isinstance(pt, dict) and pt.get("turn_id"):
                 tracker.canonical_for_raw(pt["turn_id"])
-            elif pl.get("type") == "message" and str(pl.get("role") or "user") == "user" and tracker.turn_has_response:
+            elif pl.get("type") == "message" and str(pl.get("role") or "user") == "user" and tracker.turn_has_response and not tracker.has_user_counterpart(_extract_content_blocks(pl.get("content") or [])[0], "event_msg"):
                 tracker.advance_sequential()
             if _decode_response_item_record(pl, ts_iso, row.line_no, tracker, events, call_index_by_id, call_has_explicit_exit, ws_result_index):
                 tracker.turn_has_response = True
@@ -422,17 +441,28 @@ def _encode_codex_system_event(ev: SystemEvent, ts: str, append_fn: Callable[[st
     append_fn(ts, "event_msg", pl_out)
 
 
+def _encode_codex_user_event(
+    ev: UserInputEvent, ts: str, next_line_hint: int,
+    append_fn: Callable[[str, str, Mapping[str, Any]], None],
+) -> None:
+    content_list: list[dict[str, Any]] = [{"type": "input_text", "text": ev.query_text}]
+    content_list.extend({"type": "input_image", "mime_type": m.mime_type, "image_url": m.uri} for m in ev.media)
+    u_pt: dict[str, Any] = {"turn_id": str(ev.anchor.turn_id)}
+    if ev.scope_items:
+        u_pt["scope_items"] = list(ev.scope_items)
+    for extension in ev.anchor.host_extensions:
+        if extension.extension_type == "codex_message_provenance":
+            u_pt.update(safe_json_dict(extension.raw_payload.decode("utf-8", errors="replace")))
+    append_fn(ts, "response_item", {"type": "message", "id": ev.anchor.client_message_id or f"msg_user_{next_line_hint}", "role": "user", "content": content_list, "internal_chat_message_metadata_passthrough": u_pt})
+    append_fn(ts, "event_msg", {"type": "user_message", "turn_id": str(ev.anchor.turn_id), "message": ev.query_text, "images": [], "local_images": [], "text_elements": []})
+
+
 def _encode_single_codex_event(
     ev: CanonicalEvent, ts: str, next_line_hint: int, ws_native_calls: set[ToolCallId],
     append_fn: Callable[[str, str, Mapping[str, Any]], None],
 ) -> bool:
     if isinstance(ev, UserInputEvent):
-        content_list: list[dict[str, Any]] = [{"type": "input_text", "text": ev.query_text}]
-        content_list.extend({"type": "input_image", "mime_type": m.mime_type, "image_url": m.uri} for m in ev.media)
-        u_pt: dict[str, Any] = {"turn_id": str(ev.anchor.turn_id)}
-        if ev.scope_items:
-            u_pt["scope_items"] = list(ev.scope_items)
-        append_fn(ts, "response_item", {"type": "message", "id": ev.anchor.client_message_id or f"msg_user_{next_line_hint}", "role": "user", "content": content_list, "internal_chat_message_metadata_passthrough": u_pt})
+        _encode_codex_user_event(ev, ts, next_line_hint, append_fn)
         return False
     if isinstance(ev, ThinkingEvent):
         r_type, enc_val = "reasoning", None
@@ -452,6 +482,7 @@ def _encode_single_codex_event(
         if raw_am and isinstance(raw_am.get("internal_chat_message_metadata_passthrough"), dict):
             raw_am["internal_chat_message_metadata_passthrough"] = {**raw_am["internal_chat_message_metadata_passthrough"], "turn_id": str(ev.anchor.turn_id)}
         append_fn(ts, "response_item", raw_am or {"type": "message", "status": "completed", "id": ev.message_id or f"msg_asst_{next_line_hint}", "role": "assistant", "content": [{"type": "output_text", "text": ev.text}], "internal_chat_message_metadata_passthrough": {"turn_id": str(ev.anchor.turn_id)}})
+        append_fn(ts, "event_msg", {"type": "agent_message", "turn_id": str(ev.anchor.turn_id), "message": ev.text, "phase": "final_answer"})
         return False
     if isinstance(ev, ToolCallEvent):
         if raw_ws := next((safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace")) for ext in ev.anchor.host_extensions if ext.extension_type == "codex_web_search_call" and ext.raw_payload), None):
@@ -471,6 +502,12 @@ def _encode_single_codex_event(
         append_fn(ts, "response_item", call_pl)
         return False
     if isinstance(ev, ToolResultEvent):
+        raw_output = next((dict(safe_json_dict(ext.raw_payload.decode("utf-8", errors="replace"))) for ext in ev.anchor.host_extensions if ext.extension_type == "codex_unpaired_tool_output"), None)
+        if raw_output:
+            if isinstance(raw_output.get("internal_chat_message_metadata_passthrough"), dict):
+                raw_output["internal_chat_message_metadata_passthrough"] = {**raw_output["internal_chat_message_metadata_passthrough"], "turn_id": str(ev.anchor.turn_id)}
+            append_fn(ts, "response_item", raw_output)
+            return False
         if ev.call_id not in ws_native_calls:
             spec = TOOL_SPEC_BY_PAYLOAD_KIND.get(ev.payload.kind)
             out_kind = "custom_tool_call_output" if (spec and spec.codex_call_kind == "custom_tool_call") else ("tool_search_output" if ev.tool_name == "tool_search" else "function_call_output")
@@ -512,6 +549,8 @@ def encode_codex_rollout(
 
     def _append_record(ts: str, rtype: str, payload: Mapping[str, Any]) -> None:
         nonlocal next_line
+        if rtype == "session_meta":
+            payload = {"cli_version": __version__, **payload}
         record = {"timestamp": ts or "2026-01-01T00:00:00Z", "ordinal": next_line - 1, "type": rtype, "payload": payload}
         lines.append(CodexRawRolloutLine(line_no=RolloutLineNo(next_line), raw_json=json.dumps(record, ensure_ascii=False, separators=(",", ":"))))
         next_line += 1

@@ -18,6 +18,7 @@ from ..codecs import (
     AgyRawStepRow, TrajectoryWireCodec, decode_cascade_summary_proto, decode_summaries_state_proto,
     encode_trajectory_metadata_proto, parse_annotation_pbtxt_title, read_codex_rollout_lines,
 )
+from ..codecs.steps import bind_agy_step
 from ..ledger import (
     AgyGuiSafeSource, CanonicalEvent, CascadeId, CascadeSummaryProjection, CodexThreadId,
     HostKind, RolloutLineNo, StepIndex, SubagentLineage, SummariesStateProjection,
@@ -244,6 +245,9 @@ class DefaultHostTransport:
         conn = sqlite3.connect(str(conv_db), timeout=10.0)
         try:
             _ensure_agy_conversation_db_schema(conn)
+            existing_meta = conn.execute("SELECT trajectory_id FROM trajectory_meta LIMIT 1").fetchone()
+            if existing_meta:
+                traj_id = TrajectoryId(existing_meta[0])
             if is_incremental:
                 max_row = conn.execute("SELECT COALESCE(MAX(idx), -1) FROM steps").fetchone()
                 start_idx = StepIndex(int(max_row[0]) + 1 if max_row else 0)
@@ -252,14 +256,15 @@ class DefaultHostTransport:
                 conn.execute("DELETE FROM steps")
                 step_rows = self._codec.encode_ledger_to_agy_steps(full_ledger, starting_step_idx=StepIndex(0))
 
-            for r in step_rows:
+            for raw_row in step_rows:
+                r = bind_agy_step(raw_row, str(traj_id), str(target_cid))
                 conn.execute(
                     "INSERT OR REPLACE INTO steps (idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (int(r.idx), r.step_type, r.status, 1 if r.has_subtrajectory else 0, r.metadata_blob, r.step_payload_blob, r.step_format),
                 )
             conn.execute("DELETE FROM trajectory_meta")
             conn.execute(
-                "INSERT INTO trajectory_meta (trajectory_id, cascade_id, trajectory_type, source) VALUES (?, ?, 1, ?)",
+                "INSERT INTO trajectory_meta (trajectory_id, cascade_id, trajectory_type, source) VALUES (?, ?, 4, ?)",
                 (str(traj_id), str(target_cid), source_tag.proto_enum_value),
             )
             created_iso = full_ledger.events[0].anchor.timestamp_iso if full_ledger.events else _now_iso()
@@ -267,7 +272,7 @@ class DefaultHostTransport:
                 project_id=binding.agy_project_id, workspace_uris=(binding.workspace_uri,), created_at_iso=created_iso,
                 nesting_depth=effective_lineage.nesting_depth,
                 parent_conversation_id=str(effective_lineage.parent_cascade_id or ""),
-                root_conversation_id=str(effective_lineage.root_cascade_id or ""),
+                root_conversation_id=str(effective_lineage.root_cascade_id or target_cid),
                 agent_type_name=effective_lineage.agent_type_name, agent_role=effective_lineage.agent_role,
             )
             conn.execute("INSERT OR REPLACE INTO trajectory_metadata_blob (id, data) VALUES ('main', ?)", (bytes(tmeta_blob),))

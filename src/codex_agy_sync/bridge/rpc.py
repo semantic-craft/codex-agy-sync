@@ -260,7 +260,7 @@ def fetch_codex_thread_via_rpc(
         sock.connect(unix_socket_connect_path(endpoint.socket_path))
         ws.handshake()
         ws.send_json({"id": 1, "method": "initialize", "params": {
-            "clientInfo": {"name": "codex-agy-sync", "version": "0.1.0"}, "capabilities": {"experimentalApi": True},
+            "clientInfo": {"name": "codex-agy-sync", "version": "0.2.0"}, "capabilities": {"experimentalApi": True},
         }})
         if "error" in ws.wait_for_id(1):
             raise OnlineRpcUnavailableError("Codex app-server initialize RPC failed.")
@@ -273,6 +273,15 @@ def fetch_codex_thread_via_rpc(
         with contextlib.suppress(OSError):
             ws.send_frame(0x8, b"")
         sock.close()
+
+
+def import_codex_rollout_via_rpc(
+    endpoint: CodexDaemonEndpoint, rollout_path: Path, workspace_path: Path, project_id: str, title: str,
+    *, timeout_s: float = 90.0,
+) -> CodexThreadId:
+    from .native_codex import import_codex_rollout_via_rpc as native_import
+
+    return native_import(endpoint, rollout_path, workspace_path, project_id, title, timeout_s=timeout_s)
 
 
 def read_agy_ledger_dual_mode(
