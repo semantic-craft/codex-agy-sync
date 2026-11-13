@@ -1,16 +1,9 @@
-"""Command-line interface for `codex-agy-sync`.
-
-Exposes five deterministic subcommands backed by `SyncBridge`:
-1. `pair`: Register or verify bidirectional project bindings for a workspace folder.
-2. `status`: List paired and unpaired sessions in a workspace along with lock/cursor state.
-3. `inspect`: Decode an Antigravity cascade or Codex thread into `TrajectoryLedger` summary JSON.
-4. `sync-session`: Synchronize a single session idempotently with explicit direction, transport, and fork policy.
-5. `sync-workspace`: Discover and synchronize all sessions in a workspace folder.
-"""
+"""Command-line entry points for offline sync and new Desktop session handoff."""
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -27,6 +20,7 @@ from .bridge import (
     TransportMode,
     WorkspaceProjectBinding,
 )
+from .bridge.handoff import HandoffPendingError, handoff_session
 from .ledger import (
     AgyGuiSafeSource,
     AssistantTextEvent,
@@ -150,6 +144,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sync_s.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID.")
     sync_s.add_argument("--source-tag", choices=[s.name.lower() for s in AgyGuiSafeSource], default="cascade_client", help="Antigravity GUI-safe trajectory source tag.")
 
+    handoff = subparsers.add_parser("handoff", help="Hand completed history to a new Desktop session; does not append to an existing target.")
+    handoff.add_argument("--workspace", "-w", default=None, help="Workspace path or file:// URI, already registered on both hosts.")
+    handoff.add_argument("--direction", choices=["codex_to_agy", "agy_to_codex"], required=True)
+    handoff.add_argument("--source-id", required=True, help="Source Codex thread or Antigravity cascade UUID.")
+    handoff.add_argument("--title", default=None, help="Title for the new Desktop session, defaulting to the source title.")
+
     sync_w = subparsers.add_parser("sync-workspace", help="Synchronize all sessions in a workspace.")
     _add_sync_common_args(sync_w)
     sync_w.add_argument("--include-subagents", action="store_true", help="Synchronize spawned subagent sessions in addition to top-level sessions.")
@@ -261,6 +261,14 @@ def main(
         return 0
     if args.subcommand == "inspect":
         print(json.dumps(_run_inspect_cmd(bridge, workspace_arg, args), ensure_ascii=False, indent=2))
+        return 0
+    if args.subcommand == "handoff":
+        try:
+            receipt = handoff_session(bridge.paths, workspace_arg, direction=SyncDirection(args.direction), source_id=args.source_id, title=args.title)
+        except HandoffPendingError as exc:
+            print(json.dumps(dataclasses.asdict(exc.receipt), ensure_ascii=False, indent=2), file=sys.stderr)
+            return 2
+        print(json.dumps(dataclasses.asdict(receipt), ensure_ascii=False, indent=2))
         return 0
     if args.subcommand == "sync-session":
         receipt = bridge.sync_session(

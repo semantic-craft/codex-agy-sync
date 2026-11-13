@@ -236,6 +236,11 @@ def _decode_tool_response_item(
         if "exit_code" in safe_json_dict(args_json):
             call_has_explicit_exit.add(cid)
         payload = decode_tool_payload(tname, args_json, is_codex_wire=True)
+        if ptype == "custom_tool_call" and tname == "exec":
+            try:
+                json.loads(args_json)
+            except ValueError:
+                payload = OpaqueToolPayload(kind="opaque", tool_name=tname, raw_arguments_json=args_json)
         tsig_hex = pt_dict.get("thinking_signature_hex")
         tsig = bytes.fromhex(tsig_hex) if isinstance(tsig_hex, str) and tsig_hex else b""
         exts = (HostExtensionEnvelope(host=HostKind.CODEX, extension_type="tool_namespace", raw_payload=str(pl["namespace"]).encode("utf-8"), metadata=(("item_type", ptype),)),) if pl.get("namespace") else ()

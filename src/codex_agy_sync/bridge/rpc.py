@@ -275,6 +275,15 @@ def fetch_codex_thread_via_rpc(
         sock.close()
 
 
+def import_codex_rollout_via_rpc(
+    endpoint: CodexDaemonEndpoint, rollout_path: Path, workspace_path: Path, project_id: str, title: str,
+    *, timeout_s: float = 90.0,
+) -> CodexThreadId:
+    from .native_codex import import_codex_rollout_via_rpc as native_import
+
+    return native_import(endpoint, rollout_path, workspace_path, project_id, title, timeout_s=timeout_s)
+
+
 def read_agy_ledger_dual_mode(
     codec: TrajectoryWireCodec, binding: WorkspaceProjectBinding, cascade_id: CascadeId,
     lock_snapshot: HostLockSnapshot, mode: TransportMode, *,
