@@ -310,7 +310,7 @@ class TestRoundtripAndCli(BridgeSandboxBase):
             check=True,
         )
         pair_json = json.loads(pair_res.stdout)
-        self.assertEqual(pair_json["workspace_name"], "agent-fleet")
+        self.assertEqual(pair_json["workspace_name"], "agents-everywhere")
 
         sync_res = subprocess.run(
             base_args

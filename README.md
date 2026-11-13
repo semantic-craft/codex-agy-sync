@@ -19,7 +19,7 @@
 | **3. Antigravity Database Manager** | `https://github.com/ag-donald/Antigravity-Database-Manager` (`docs/schema.proto`, `src/core/protobuf.py`) | 详尽的 `StepWrapper`、`TrajectoryStep`、`ToolCall` (`call_id`, `tool_name`, `arguments_json`, `response_blob`)、`AssistantResponse` (field 94) 与 `TaskBoundaryResponse` (field 93) 字段定义 |
 | **4. txcript** | `https://github.com/skillsynchq/txcript` (`src/harness/codex.rs`, `src/harness/antigravity.rs`) | Codex `rollout-*.jsonl` 与 Antigravity `steps` 表及 `brain/<id>/.system_generated/logs/transcript.jsonl` 工具级双向转换，以及半途中断回合的工具错误闭合思路 |
 | **5. agent-session-bridge & session-migrate** | `https://github.com/Amiyadesi/agent-session-bridge` (`src/agent_session_bridge/antigravity.py`) | `PRAGMA user_version=1` 防客户端旧版迁移清空元数据、`presence/*.lock` 与 `daemon/*.json` PID 存活门禁、`manifest.json` 备份审计以及 Codex `state_5.sqlite` 安全清理 |
-| **6. 本机自有项目** | `~/Projects/dsh-conversation-import`、`~/Projects/dsh-antigravity-bridge`、`~/Projects/agent-fleet` | 增量水位线与分叉保护状态机，以及 `agent-fleet` 的 Hub `LanguageServerService` Connect RPC 与 `codex app-server` Unix Socket WebSocket JSON-RPC v2 客户端协议实现 |
+| **6. 本机自有项目** | `~/Projects/dsh-conversation-import`、`~/Projects/dsh-antigravity-bridge`、`~/Projects/agents-everywhere` | 增量水位线与分叉保护状态机，以及 `agents-everywhere` 的 Antigravity 原生运行时集成与 Codex app-server 接入；当前实现以本仓 `bridge/rpc.py` 为准 |
 
 ## 运行机制与架构选型（`A2 + B2 + C1`）
 
