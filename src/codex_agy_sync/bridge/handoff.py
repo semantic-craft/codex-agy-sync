@@ -70,7 +70,10 @@ def _read_source(paths: HostEnvironmentPaths, binding: WorkspaceProjectBinding, 
     if to_agy:
         ledger, _, active = transport.read_codex_ledger_with_meta(binding, CodexThreadId(source_id), locks, mode)
     else:
-        ledger, _, active = transport.read_agy_ledger_with_meta(binding, CascadeId(source_id), locks, mode)
+        active = endpoint is not None and rpc.fetch_agy_trajectory_via_rpc(endpoint, CascadeId(source_id)).is_active
+        if active:
+            raise ValueError("Source session is active. Finish the turn before handoff.")
+        ledger, _, _ = transport.read_agy_ledger_with_meta(binding, CascadeId(source_id), locks, TransportMode.OFFLINE_STORAGE)
     if active or ledger.has_inflight_turn:
         raise ValueError("Source session is active or has an incomplete turn. Finish the turn before handoff.")
     if ledger.latest_watermark() is None:

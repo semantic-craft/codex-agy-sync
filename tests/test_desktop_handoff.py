@@ -11,7 +11,7 @@ from unittest import mock
 
 from codex_agy_sync._wire import iter_wire_fields
 from codex_agy_sync.bridge import HostEnvironmentPaths, SyncBridge, SyncDirection, TransportMode
-from codex_agy_sync.bridge.handoff import HandoffPendingError, _handoff_ledger, _publish_new_file, handoff_session
+from codex_agy_sync.bridge.handoff import HandoffPendingError, _read_source, _handoff_ledger, _publish_new_file, handoff_session
 from codex_agy_sync.bridge.rpc import AgyRpcReadResult
 from codex_agy_sync.bridge.transport import DefaultHostTransport
 from codex_agy_sync.codecs import decode_trajectory_metadata_proto
@@ -252,6 +252,36 @@ class DesktopHandoffTest(unittest.TestCase):
         handed = _handoff_ledger(source, None)
         text = next(event.text for event in handed.events if isinstance(event, AssistantTextEvent) and event.text.startswith("[Imported tool result]"))
         self.assertIn("is_error: true\nOutput:\nProcess exited with code 1", text)
+
+    def test_idle_agy_uses_persisted_generic_result_after_rpc_status_gate(self):
+        cid = CascadeId("00000000-0000-4000-8000-000000000042")
+        anchor = dataclasses.replace(self.anchor, origin_host=HostKind.ANTIGRAVITY)
+        payload = RunCommandPayload(kind="run_command", command_line="python3 -c 'print(421 * 3)'", cwd=str(self.workspace), exit_code=0)
+        call = ToolCallEvent(kind="tool_call", anchor=anchor, call_id=ToolCallId("call-native-python"), tool_name="run_command", tool_summary="Python multiplication", payload=payload)
+        result = ToolResultEvent(kind="tool_result", anchor=anchor, call_id=call.call_id, tool_name="run_command", output_text="Command exited with code 0.\n\nCommand output:\n1263\r\n", is_error=False, payload=payload)
+        source = TrajectoryLedger.from_events(self.binding.workspace_path, self.binding.workspace_uri, [self.events[0], call, result, self.events[1]])
+        self.transport.apply_to_agy(self.binding, cid, source.events, source, self.bridge.guard.probe_locks(cid, None), TransportMode.OFFLINE_STORAGE)
+        db = self.paths.agy_data_dir / "conversations" / f"{cid}.db"
+        before = db.read_bytes()
+        rows = self.transport._read_persisted_agy_steps(db)
+        native_rows = tuple(dataclasses.replace(row, step_type=21) if row.step_type == 132 else row for row in rows)
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", return_value=AgyRpcReadResult(native_rows, 1)) as status:
+            read = _read_source(self.paths, self.binding, SyncDirection.AGY_TO_CODEX, str(cid))
+        self.assertFalse(read.has_inflight_turn)
+        actual_result = next(event for event in read.events if isinstance(event, ToolResultEvent))
+        self.assertEqual(actual_result.call_id, call.call_id)
+        self.assertEqual(actual_result.output_text, result.output_text)
+        self.assertEqual(db.read_bytes(), before)
+        status.assert_called_once()
+        portable = _handoff_ledger(read, None)
+        self.assertTrue(any(result.output_text in event.text for event in portable.events if isinstance(event, AssistantTextEvent)))
+
+    def test_active_agy_status_blocks_disk_history_read(self):
+        cid = CascadeId("00000000-0000-4000-8000-000000000042")
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", return_value=AgyRpcReadResult((), 2)), mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta") as disk:
+            with self.assertRaisesRegex(ValueError, "active"):
+                _read_source(self.paths, self.binding, SyncDirection.AGY_TO_CODEX, str(cid))
+        disk.assert_not_called()
 
     def test_codex_uncertain_response_preserves_known_target(self):
         error = RuntimeError("response timeout")

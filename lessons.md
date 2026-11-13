@@ -78,3 +78,5 @@
 - 回归入口为 `tests/test_desktop_rollout.py`、`tests/test_desktop_handoff.py`、`tests/test_native_codex_import.py`。这些测试不替代 Desktop 多轮验收。
 
 - AGY 会把导入的 generic 工具结果（磁盘 step type 132）在 RPC 中投影成原生 RUN_COMMAND（type 21）。当前七类步骤 decoder 未覆盖该投影，导致回传误补中断结果。Desktop handoff 将工具调用和原始输出平文化，避开运行态重放；旧 codec 不因此宣称支持全部宿主投影。Codex custom `exec` 的非 JSON 脚本输入也必须保留原文，不能按空命令解析。
+
+- AGY 新执行的原生工具也存在相同 RPC 投影差异：真实 Python 结果在磁盘 type 132 中完整，在 RPC type 21 中未被现有解码器读出。handoff 先用 RPC 检查空闲，再用现有只读 SQLite 读取器提取历史；实测原始结果 `1263` 与 call ID 配对保留，数据库指纹不变。
