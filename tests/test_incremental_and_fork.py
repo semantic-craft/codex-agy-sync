@@ -263,7 +263,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             [],
         )
 
-        ws2 = self.root / "agent-fleet-c2a-fork"
+        ws2 = self.root / "agents-everywhere-c2a-fork"
         ws2.mkdir(parents=True, exist_ok=True)
         b2 = self.bridge.pair_workspace(ws2)
         cid2 = CascadeId("2222bbbb-2222-3333-4444-555555555555")

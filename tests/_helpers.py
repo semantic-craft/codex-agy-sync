@@ -25,7 +25,7 @@ class BridgeSandboxBase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
-        self.workspace_dir = self.root / "agent-fleet"
+        self.workspace_dir = self.root / "agents-everywhere"
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.ws_path, self.ws_uri = parse_workspace_identity(self.workspace_dir)
         self.paths = HostEnvironmentPaths(

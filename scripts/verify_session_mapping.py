@@ -160,19 +160,18 @@ def select_default_agy_conversation(agy_root: pathlib.Path) -> str:
     conn = open_sqlite_readonly(sum_db)
     rows = conn.execute(
         """
-        SELECT conversation_id, step_count, project_id, workspace_uris
+        SELECT conversation_id
         FROM conversation_summaries
         WHERE source = ''
           AND project_id NOT IN ('', 'default-cli-project', 'outside-of-project', 'null', 'none')
           AND step_count >= 15
-        ORDER BY CASE WHEN workspace_uris LIKE '%agent-fleet%' THEN 0 ELSE 1 END,
-                 last_modified_time DESC
+        ORDER BY last_modified_time DESC
         """
     ).fetchall()
     conn.close()
     best_cid = None
     best_score = -1
-    for cid, _, _, uris in rows:
+    for (cid,) in rows:
         db_file = agy_root / "conversations" / f"{cid}.db"
         if not db_file.is_file():
             continue
@@ -181,11 +180,11 @@ def select_default_agy_conversation(agy_root: pathlib.Path) -> str:
         cconn.close()
         if not {14, 15, 132}.issubset(stypes):
             continue
-        score = len(stypes & {14, 15, 23, 101, 132}) * 10 + (5 if "agent-fleet" in (uris or "") else 0)
+        score = len(stypes & {14, 15, 23, 101, 132}) * 10
         if score > best_score:
             best_score = score
             best_cid = cid
-        if score >= 55:
+        if score == 50:
             return cid
     if best_cid:
         return best_cid
