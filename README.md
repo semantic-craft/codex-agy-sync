@@ -1,6 +1,6 @@
 # codex-agy-sync（Codex 与 Antigravity 会话同频桥）
 
-实现 OpenAI Codex 0.166+（Desktop 与 CLI）与 Google Antigravity 2.30+（Hub Desktop 与 `agy` CLI）在同一项目文件夹下对话、思考摘要、工具调用与执行结果的最大颗粒度对齐、双向导入与无缝接续。
+在同一项目中按需交接 Codex 与 Antigravity Desktop 的会话历史，并在目标 Desktop 中继续聊天。没有后台同步进程，也不做实时镜像。旧版 `sync-session` 保留受控离线增量同步。
 
 ## 背景与核心问题
 
@@ -8,7 +8,38 @@
 - Codex 将会话存为 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`（及 `.jsonl.zst`）与 `~/.codex/state_5.sqlite`（`threads`、`projects`、`project_roots`）。
 - Antigravity 2.30+ Desktop（Hub 架构）将会话存为 `~/.gemini/antigravity/conversations/<cascade_id>.db`（内含 `steps.step_payload` Protobuf 二进制与 `trajectory_metadata_blob`）、`conversation_summaries.db`、`agyhub_summaries_proto.pb`、`annotations/<id>.pbtxt` 与 `brain/<id>/.system_generated/logs/transcript.jsonl`，并通过 `~/.gemini/config/projects/<uuid>.json` 绑定左侧项目栏。
 
-现有开源工具或仅支持 `antigravity-cli` 目录，或过滤掉了全部工具调用与输出，或仍停留在旧版 IDE 2.5.5 的 `state.vscdb` 结构。本项目通过 REA（`reverse-engineer-anything`）与 REAP（`reap-prompts`）直接从本机新版客户端提取真实 Protobuf 描述符与 RPC 契约，实现新版本 100% 兼容的同目录细粒度对齐。
+本项目复用现有账本与编码器，参考开源 Desktop 导入项目的做法，并以本机真实 Desktop 验证兼容性。存储转换成功、侧栏可见和模型能连续续聊是三项不同的验收，不能互相替代。
+
+## Desktop 按需交接
+
+两端先在 Desktop 中注册同一个项目目录，完成当前回合后执行：
+
+```bash
+./bin/codex-agy-sync handoff --workspace "$PWD" \
+  --direction codex_to_agy --source-id <codex-thread-id>
+./bin/codex-agy-sync handoff --workspace "$PWD" \
+  --direction agy_to_codex --source-id <agy-cascade-id>
+```
+
+收据返回目标 `target_id` 和 `status`。在目标 Desktop 打开对应标题的会话继续工作；下次换端时，将正在使用的会话 ID 作为 `--source-id`。可用 `--title` 指定新标题。
+
+- 每次交接生成带累计历史的新会话，旧会话保留。相同源历史再次执行返回 `no_op`，复用已有目标。
+- AGY 在隔离目录生成完整新数据库与专属文件，以不覆盖方式发布新 ID，再由原生 `GetCascadeTrajectory` 加载和注册。桥不会直接写运行中的摘要数据库。
+- Codex 由原生 `thread/fork(path)` 接管暂存 rollout，设置项目和标题，退订并等待线程卸载后交给 Desktop。宿主默认卸载等待可能约一分钟。
+- 交接保留可见消息。工具名称、参数、结果以及思考与检查点的可读摘要，作为带说明的普通历史文本保留；模型私有推理状态、原生检查点、签名、运行环境注入、正在运行的进程和权限不跨宿主移植。
+- 活跃或未完成回合拒绝交接。导入结果不确定时保留 `pending` 收据和已知目标 ID，不自动重建第二份会话。
+
+`handoff` 与 `sync-session` 的语义不同。后者仍要求目标离线，按原配对会话增量写入；前者面向保持 Desktop 运行的按需新会话交接。
+
+本次复用的直接依据：
+
+| 上游 | 复用范围 |
+| --- | --- |
+| [agentsview](https://github.com/kenn-io/agentsview/blob/main/internal/parser/antigravity.go) | Desktop SQLite/Protobuf 读取结构；它是读取器，不承担原生写入 |
+| [antigravity-chat-manger](https://github.com/M7mdJs/antigravity-chat-manger/blob/main/src/recovery.py) | 通过 `GetCascadeTrajectory` 让宿主载入导入会话 |
+| [antigravity-move-chat-to-projects](https://github.com/Jabir-A-H/antigravity-move-chat-to-projects/blob/main/transplant_chat.py) | 区分会话内容与原生身份元数据；最终路径无需占位会话 |
+| [Antigravity-Database-Manager](https://github.com/ag-donald/Antigravity-Database-Manager/blob/main/src/core/summaries_repair.py) | 宿主持久化摘要的接口参考；本机实测无需额外调用摘要写入 |
+| [OpenAI app-server](https://github.com/openai/codex/tree/main/codex-rs/app-server) | 原生 rollout 分叉、项目归属、标题和线程卸载 |
 
 ## 可借鉴的六大参考项目
 
@@ -25,13 +56,13 @@
 
 1. **`A2` 在线回环 RPC 无锁读取与受控离线落盘写入**
    - 读取端支持在线回环 RPC 与 `?mode=ro` 只读磁盘双模路由。Antigravity 在线通道调用 `LanguageServerService/GetCascadeTrajectory` 二进制 Protobuf 接口（仅在内存请求头携带 `x-codeium-csrf-token`），Codex 在线通道连接 Unix Socket WebSocket 执行 `codex app-server` 的 `initialize` 与 `thread/read(includeTurns=true)`。
-   - 写入端严格采用 `Lagrange` 风格的受控离线存储落盘。写盘全程持有 `sync.lock` 与 `presence/<id>.lock` 排他 `flock`，确认目标宿主无活跃守护进程、无活跃 `-wal` 且无未完结回合后先生成 SHA-256 `BackupManifest`，任何中途异常自动调用 `BackupManifest.restore()` 原子回滚，并在 `SyncReceipt.transport_used` 如实报告实际使用的读取传输模式（`online_rpc` 或 `offline_storage`）。
+   - `sync-session` 写入端采用受控离线存储落盘。写盘全程持有 `sync.lock` 与 `presence/<id>.lock` 排他 `flock`，确认目标宿主无活跃守护进程、无活跃 `-wal` 且无未完结回合后先生成 SHA-256 `BackupManifest`，任何中途异常自动调用 `BackupManifest.restore()` 原子回滚，并在 `SyncReceipt.transport_used` 如实报告实际使用的读取传输模式（`online_rpc` 或 `offline_storage`）。
 2. **`B2` 严格完结回合水位线与显式半途回合抢救**
    - 默认仅在工具调用全部闭合的已完成回合边界推进同步游标，自动跳过流式未完结回合。
    - 显式传入 `--include-interrupted` 时，若源宿主已停止运行（非活跃流式状态），按 `txcript` 风格为悬空工具调用补齐原生取消错误结果并闭合半途回合，保持重跑幂等并在对端续聊回传时平滑替换抢救锚点。
 3. **`C1` 纯按需显式 CLI 触发（零后台轮询守护进程）**
    - 支持通过 `pip install .` 或 `pipx install .` 安装标准控制台命令 `codex-agy-sync`，亦可直接执行仓库内 `bin/codex-agy-sync`。
-   - 提供五个确定性子命令（`pair`、`status`、`inspect`、`sync-session`、`sync-workspace`），按需显式执行，不驻留任何后台轮询守护进程。
+   - 提供按需子命令（`pair`、`status`、`inspect`、`handoff`、`sync-session`、`sync-workspace`），按需显式执行，不驻留任何后台轮询守护进程。
 
 ## 模块化代码结构
 
@@ -39,8 +70,8 @@
 - `_wire.py` 提供全仓唯一的 64 位 Protobuf varint、wire 字段解析与时间戳编解码原语。
 - `payloads.py` 定义 16 类结构化工具载荷（`CanonicalToolPayload`）与未知工具透传信封（`OpaqueToolPayload`）。
 - `ledger.py` 定义强类型标识、`SubagentLineage`、索引化事件账本 `TrajectoryLedger`、5 类伴生存储纯投影以及 `B2` 半途回合闭合纯函数。
-- `codecs/`（7 个子模块 `schema_tags.py`、`tool_payloads.py`、`tools.py`、`steps.py`、`rollout.py`、`projections.py`、`__init__.py`）实现表驱动的 `gemini_coder.Step` Protobuf 与 Codex `.jsonl` / `.jsonl.zst` / RPC 线程编解码。
-- `bridge/`（7 个子模块 `paths_and_locks.py`、`registry.py`、`state_machine.py`、`rpc.py`、`transport.py`、`sync.py`、`__init__.py`）实现双端项目配对、锁守卫与备份回滚、纯状态机、`A2` 在线回环 RPC 读取客户端、多存储落盘自愈与对称分叉门面 `SyncBridge`。
+- `codecs/`（核心子模块 `schema_tags.py`、`tool_payloads.py`、`tools.py`、`steps.py`、`rollout.py`、`projections.py`、`__init__.py`）实现表驱动的 `gemini_coder.Step` Protobuf 与 Codex `.jsonl` / `.jsonl.zst` / RPC 线程编解码。
+- `bridge/`（核心子模块 `paths_and_locks.py`、`registry.py`、`state_machine.py`、`rpc.py`、`native_codex.py`、`handoff.py`、`transport.py`、`sync.py`、`__init__.py`）实现双端项目配对、锁守卫与备份回滚、纯状态机、`A2` 在线回环 RPC 读取客户端、多存储落盘自愈与对称分叉门面 `SyncBridge`。
 - `cli.py` 与 `bin/codex-agy-sync` 暴露命令行入口。
 
 ## 契约提取与验证入口

@@ -66,3 +66,15 @@
 - 验证点：<写明之后怎么核对这条已改到位。>
 - 复发记录：Seen <N>x (<YYYY-MM-DD>)，<每次独立发生的证据。>
 ```
+
+### Desktop 续聊必须在多轮真实上下文中验收
+
+- 2026-11-14 实测发现，Codex rollout 缺少 `session_meta.cli_version` 时原生 fork 拒绝导入；仅有 `response_item` 时模型历史存在，但 Desktop 的 `thread/read` 消息列表为空。编码时补版本和对应 `event_msg`，并以真实 app-server 回读验证。
+- Codex 原生 `event_msg` 可能没有 `turn_id`。必须先配对同轮 `response_item` 副本，再推断新回合；页面注入的工具输出会使旧的 `turn_has_response` 启发式错误推进回合，造成消息重复。
+- AGY 原生 Desktop 样本使用 trajectory type 4、step format 0 和每步 metadata field 20 的会话引用。不能把 SQLite 可解码当成 Desktop 可续聊。
+- 跨宿主思考摘要作为普通文本交接，不伪造原生 reasoning。实测含原生 reasoning 的导入首轮成功、次轮报 Rustresponses 无法重放；相同输入去掉该记录后连续两轮及工具调用通过。
+- `turn_context.summary = "none"` 是 Codex 配置，不是 AGY 会话摘要。误写为 AGY checkpoint 后，模型丢失检查点之前的口令；改为不移植原生检查点后，模型重新正确回答完整历史。可读摘要保留为普通文本。
+- 原生 `thread/fork` 后，同连接取消订阅并等待卸载，再把会话交给 Desktop。只关闭客户端连接可能导致 Desktop 提示会话仍在其他应用打开。
+- 回归入口为 `tests/test_desktop_rollout.py`、`tests/test_desktop_handoff.py`、`tests/test_native_codex_import.py`。这些测试不替代 Desktop 多轮验收。
+
+- AGY 会把导入的 generic 工具结果（磁盘 step type 132）在 RPC 中投影成原生 RUN_COMMAND（type 21）。当前七类步骤 decoder 未覆盖该投影，导致回传误补中断结果。Desktop handoff 将工具调用和原始输出平文化，避开运行态重放；旧 codec 不因此宣称支持全部宿主投影。Codex custom `exec` 的非 JSON 脚本输入也必须保留原文，不能按空命令解析。

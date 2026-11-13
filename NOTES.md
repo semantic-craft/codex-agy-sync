@@ -25,6 +25,11 @@
 
 ## 当前状态
 
+- 2026-11-14 新增 Desktop 专用 `handoff`。复用现有账本和编码器，AGY 以全新 ID 发布后由原生 RPC 加载，Codex 走原生 fork 并等待卸载。每次切换生成新会话，相同源历史重跑 `no_op`；不做实时镜像，不覆盖活跃会话。
+- 真实 Desktop 验收发现并修复格式、重复消息和跨宿主运行态问题。思考及检查点摘要保留为普通文本，不重放私有推理状态、原生检查点和明确宿主注入。当前验收对象为 AGY 2.31.2 与 ChatGPT 内嵌 Codex；普通文本、多轮上下文和 Python 工具历史文本已实际双向往返；工具名称、参数与原始输出平文化，不仿制宿主运行态。验收收据与截图位于 `$HOME/Projects/_artifacts/codex-agy-sync/verify-desktop-20261113T180734Z/acceptance-*`。
+- `scripts/check` 已通过，89 项测试、5 项既有实机夹具跳过。门禁明确选用本次创建的测试会话；默认继承控制聊天 ID 会因其无项目绑定失败。一次读取期间 AGY 后台更新摘要导致统计比较失败，随后同命令重跑通过。
+
+
 - 2026-11-10 完成正式项目立项（判断 ID `a607d12864a349a18ddb0d63345bd3d6`，Antigravity 项目 ID `c13d254c-e8dc-4b56-b9a9-2a8ed562b3a1`）、Phase 1 二进制 schema 提取以及初版双向同步原型与首次多模型审查。
 - 2026-11-11 完成子智能体血缘隔离、工具路径 `file://` 规范化、二次 `/interrogate` 对抗审查修复（提交 `e56b226`、`f46aac1`），并落地项目本地隔离沙盒验收技能 `skills/verify-codex-agy-sync/SKILL.md` 与全仓代码质量专项评审，制定 6 个模块化重构与功能收口单元。
 - 2026-11-12 按 `A2 + B2 + C1` 架构方案依次完成 Unit 1 至 Unit 5 落地并通过 `./scripts/check` 门禁：
@@ -38,7 +43,8 @@
 
 ## 下一步
 
-1. **桌面空闲窗口真实侧栏目视抽验** 在本机 Codex Desktop 与 Antigravity Desktop 2.30+ 空闲窗口执行一次真实项目的同步与侧栏目视确认。
+1. 使用 `handoff` 在 Desktop 间按需交接；同一会话 ID 的在线增量追加仍不在此路径内。
+2. 其他工具类型的 Desktop 运行态兼容性按实际使用反馈验证；现有编码器回归不等于这些工具的全部实机验收。
 
 ## 记录
 
@@ -48,7 +54,7 @@
 ## 坑
 
 - Antigravity Desktop 2.30+（Hub 架构）使用 `~/.gemini/antigravity/conversation_summaries.db`、`agyhub_summaries_proto.pb` 与 `~/.gemini/config/projects/<uuid>.json`，不再使用旧版 IDE 2.5.5 的 `User/globalStorage/state.vscdb`。
-- Antigravity Hub 前端仅展示 `source` 为 `0`、`18`、`20` 的会话，`source = 17`（CLI）会被隐藏到 `externalSummaries`，且标题必须同时写入 `TrajectorySummary.annotations.title`（field 15 -> 1）与 `annotations/<id>.pbtxt`。
+- Antigravity Hub 的 source 可见性以 `schema/sidebar_visibility_rules.json` 为准；`source = 17`（CLI）会进入外部会话。2.31.2 原生样本 trajectory source 为1、summary source为0，两者不能混用。离线投影的标题同时写入 `TrajectorySummary.annotations.title`（field 15 -> 1）与 `annotations/<id>.pbtxt`。
 - `agy --conversation=<id>` 强依赖 `~/.gemini/{antigravity,antigravity-cli}/brain/<id>/.system_generated/logs/` 目录存在，缺失会导致 CLI 挂起或报错。
 - Antigravity 2.30+ 的 `steps.step_payload` 二进制是 `gemini_coder.Step`，其中 `step_type = 14` 对应 field 19，`step_type = 15` 对应 field 20，`step_type = 17` 对应 field 24，`step_type = 23` 对应 field 30，`step_type = 81/82` 对应 field 93/94，`step_type = 101` 对应 field 114，`step_type = 132` 对应 field 140（内嵌 `exa.cortex.core.tools.*` `google.protobuf.Any` 载荷）。
 - macOS 上 Codex Desktop 的 `~/.codex/app-server-control/app-server-control.sock` 是指向 `/private/tmp/codex-...` 的符号链接，探测时必须用 `Path.stat()` 而非 `lstat()`，且连接时优先取解析后更短的目标路径以避开 `AF_UNIX` 104 字节 `sun_path` 上限。
