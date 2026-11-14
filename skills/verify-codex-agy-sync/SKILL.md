@@ -9,6 +9,17 @@ description: "Drive and verify the codex-agy-sync CLI and its multi-store SQLite
 
 Run the repository gate `./scripts/check` alongside this skill whenever source or schema files change. Read [`features/README.md`](./features/README.md) for the maintained feature map.
 
+## UI prototype route
+
+For the external workspace HTML prototype, follow [UI prototype verification](./features/ui-prototype.md). Supply the artifact explicitly. It stays outside the repository.
+
+```bash
+python3 skills/verify-codex-agy-sync/scripts/ui_prototype_verify.py doctor --prototype "$PROTOTYPE"
+python3 skills/verify-codex-agy-sync/scripts/ui_prototype_verify.py suite --prototype "$PROTOTYPE"
+```
+
+This independent browser suite records simulated UI behavior. It runs independently of the CLI suite below. `./scripts/check` does not run this prototype end-to-end suite. After the run, the verification Agent reads the screenshots and records a separate visual review. The script leaves visual semantics as `REVIEW_REQUIRED`, and actual Desktop behavior and message delivery as `NOT_RUN`.
+
 ## Quick suite
 
 For an automated end-to-end smoke verification covering `init`, `doctor`, read-only `status`, `pair`, initial `codex_to_agy` import with companion store readback and `transport_used` attribution, `incremental_append`, `B2` `--include-interrupted` stopped-turn rescue and `no_op` convergence, `hold-lock` deferral, and `cleanup`, run the `suite` subcommand.
@@ -107,3 +118,7 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py cleanup --ru
 - `hold-lock --run-dir <dir> --cascade-id <id> --slug <slug> -- <codex-agy-sync args...>`
 - `cleanup --run-dir <dir>`
 - `suite [--run-dir <dir>] [--run-id <id>]`
+
+`skills/verify-codex-agy-sync/scripts/ui_prototype_verify.py` is an executable Python 3 script supporting two subcommands:
+- `doctor --prototype <path>`
+- `suite --prototype <path> [--run-dir <dir>] [--timeout <seconds>]`
