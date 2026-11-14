@@ -6,6 +6,7 @@ import pathlib
 import re
 import sqlite3
 import sys
+import time
 
 _REPO_SRC = pathlib.Path(__file__).resolve().parent.parent / "src"
 if str(_REPO_SRC) not in sys.path:
@@ -109,6 +110,25 @@ def snapshot_file_stat(path: pathlib.Path) -> tuple:
     return (st.st_ino, st.st_size, st.st_mtime_ns, wal_mtime)
 
 
+def run_readonly_sqlite_query(path: pathlib.Path, query_fn, max_attempts: int = 5) -> tuple:
+    result = None
+    for attempt in range(max_attempts):
+        before_stat = snapshot_file_stat(path)
+        conn = open_sqlite_readonly(path)
+        try:
+            if conn.execute("PRAGMA query_only;").fetchone()[0] != 1:
+                raise RuntimeError(f"PRAGMA query_only was not enabled for {path}")
+            result = query_fn(conn)
+        finally:
+            conn.close()
+        after_stat = snapshot_file_stat(path)
+        if before_stat == after_stat:
+            return result, True
+        if attempt + 1 < max_attempts:
+            time.sleep(0.025)
+    return result, False
+
+
 def parse_pbtxt_title(pbtxt_path: pathlib.Path) -> str:
     if not pbtxt_path.is_file():
         return ""
@@ -157,37 +177,52 @@ def evaluate_codex_sidebar_visibility(project_binding: dict, sidebar_rules: dict
 
 def select_default_agy_conversation(agy_root: pathlib.Path) -> str:
     sum_db = agy_root / "conversation_summaries.db"
-    conn = open_sqlite_readonly(sum_db)
-    rows = conn.execute(
-        """
-        SELECT conversation_id
-        FROM conversation_summaries
-        WHERE source = ''
-          AND project_id NOT IN ('', 'default-cli-project', 'outside-of-project', 'null', 'none')
-          AND step_count >= 15
-        ORDER BY last_modified_time DESC
-        """
-    ).fetchall()
-    conn.close()
-    best_cid = None
-    best_score = -1
+    rows, _ = run_readonly_sqlite_query(
+        sum_db,
+        lambda conn: conn.execute(
+            """
+            SELECT conversation_id
+            FROM conversation_summaries
+            WHERE source = ''
+              AND project_id NOT IN ('', 'default-cli-project', 'outside-of-project', 'null', 'none')
+              AND step_count >= 15
+            ORDER BY last_modified_time DESC
+            LIMIT 150
+            """
+        ).fetchall(),
+    )
+    now_ns = time.time_ns()
+    idle_candidates = []
+    active_candidates = []
     for (cid,) in rows:
         db_file = agy_root / "conversations" / f"{cid}.db"
         if not db_file.is_file():
             continue
-        cconn = open_sqlite_readonly(db_file)
-        stypes = {r[0] for r in cconn.execute("SELECT DISTINCT step_type FROM steps").fetchall()}
-        cconn.close()
-        if not {14, 15, 132}.issubset(stypes):
-            continue
-        score = len(stypes & {14, 15, 23, 101, 132}) * 10
-        if score > best_score:
-            best_score = score
-            best_cid = cid
-        if score == 50:
-            return cid
-    if best_cid:
-        return best_cid
+        _, _, mtime_ns, wal_mtime_ns = snapshot_file_stat(db_file)
+        if now_ns - max(mtime_ns, wal_mtime_ns or 0) >= 120_000_000_000:
+            idle_candidates.append((cid, db_file))
+        else:
+            active_candidates.append((cid, db_file))
+
+    for pool in (idle_candidates, active_candidates):
+        best_cid = None
+        best_score = -1
+        for cid, db_file in pool:
+            cconn = open_sqlite_readonly(db_file)
+            try:
+                stypes = {r[0] for r in cconn.execute("SELECT DISTINCT step_type FROM steps").fetchall()}
+            finally:
+                cconn.close()
+            if not {14, 15, 132}.issubset(stypes):
+                continue
+            score = len(stypes & {14, 15, 23, 101, 132}) * 10
+            if score > best_score:
+                best_score = score
+                best_cid = cid
+            if score == 50:
+                return cid
+        if best_cid:
+            return best_cid
     raise RuntimeError("No suitable Antigravity 2.30+ conversation (.db) found with step_types 14, 15, 132")
 
 
@@ -252,36 +287,39 @@ def decode_antigravity_session(
     annot_pbtxt = agy_root / "annotations" / f"{cascade_id}.pbtxt"
     transcript_jsonl = agy_root / "brain" / cascade_id / ".system_generated" / "logs" / "transcript.jsonl"
 
-    before_conv_stat = snapshot_file_stat(conv_db)
-    before_sum_stat = snapshot_file_stat(sum_db)
-
     unknown_wire_fields = []
 
-    cconn = open_sqlite_readonly(conv_db)
-    user_version = cconn.execute("PRAGMA user_version;").fetchone()[0]
-    tmeta_row = cconn.execute(
-        "SELECT trajectory_id, cascade_id, trajectory_type, source FROM trajectory_meta LIMIT 1"
-    ).fetchone()
-    tblob_row = cconn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()
+    (user_version, tmeta_row, tblob_row, step_rows, gen_count, exec_count), conv_db_unchanged = (
+        run_readonly_sqlite_query(
+            conv_db,
+            lambda cconn: (
+                cconn.execute("PRAGMA user_version;").fetchone()[0],
+                cconn.execute(
+                    "SELECT trajectory_id, cascade_id, trajectory_type, source FROM trajectory_meta LIMIT 1"
+                ).fetchone(),
+                cconn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone(),
+                cconn.execute(
+                    "SELECT idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format FROM steps ORDER BY idx ASC"
+                ).fetchall(),
+                cconn.execute("SELECT count(*) FROM gen_metadata").fetchone()[0],
+                cconn.execute("SELECT count(*) FROM executor_metadata").fetchone()[0],
+            ),
+        )
+    )
+
+    srow, sum_db_unchanged = run_readonly_sqlite_query(
+        sum_db,
+        lambda sconn: sconn.execute(
+            "SELECT title, preview, step_count, workspace_uris, status, source, project_id, raw_summary FROM conversation_summaries WHERE conversation_id = ?",
+            (cascade_id,),
+        ).fetchone(),
+    )
+
     traj_meta = (
         decode_protobuf(tblob_row[0], "exa.cortex_pb.CortexTrajectoryMetadata", schema, unknown_wire_fields)
         if tblob_row and tblob_row[0]
         else {}
     )
-
-    step_rows = cconn.execute(
-        "SELECT idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format FROM steps ORDER BY idx ASC"
-    ).fetchall()
-    gen_count = cconn.execute("SELECT count(*) FROM gen_metadata").fetchone()[0]
-    exec_count = cconn.execute("SELECT count(*) FROM executor_metadata").fetchone()[0]
-    cconn.close()
-
-    sconn = open_sqlite_readonly(sum_db)
-    srow = sconn.execute(
-        "SELECT title, preview, step_count, workspace_uris, status, source, project_id, raw_summary FROM conversation_summaries WHERE conversation_id = ?",
-        (cascade_id,),
-    ).fetchone()
-    sconn.close()
 
     raw_summary_decoded = {}
     if srow and srow[7]:
@@ -389,9 +427,6 @@ def decode_antigravity_session(
         with open(transcript_jsonl, encoding="utf-8") as tf:
             transcript_lines = sum(1 for _ in tf)
 
-    after_conv_stat = snapshot_file_stat(conv_db)
-    after_sum_stat = snapshot_file_stat(sum_db)
-
     raw_binding = {
         "project_id": project_id,
         "project_config_exists": bool(project_json),
@@ -412,8 +447,8 @@ def decode_antigravity_session(
         "trajectory_id": tmeta_row[0] if tmeta_row else None,
         "pragma_user_version": user_version,
         "readonly_integrity": {
-            "conv_db_unchanged": before_conv_stat == after_conv_stat,
-            "summaries_db_unchanged": before_sum_stat == after_sum_stat,
+            "conv_db_unchanged": conv_db_unchanged,
+            "summaries_db_unchanged": sum_db_unchanged,
         },
         "project_binding": raw_binding,
         "counts": {
@@ -443,35 +478,36 @@ def decode_codex_session(codex_root: pathlib.Path, thread_id: str, sidebar_rules
     state_db = codex_root / "state_5.sqlite"
     global_state_json = codex_root / ".codex-global-state.json"
 
-    before_stat = snapshot_file_stat(state_db)
-    conn = open_sqlite_readonly(state_db)
-    trow = conn.execute(
-        """
-        SELECT id, rollout_path, cwd, title, preview, source, originator,
-               archived, project_id, created_at_ms, updated_at_ms, recency_at_ms,
-               model, reasoning_effort, git_branch, git_sha
-        FROM threads
-        WHERE id = ?
-        """,
-        (thread_id,),
-    ).fetchone()
-    if not trow:
-        conn.close()
-        raise ValueError(f"Codex thread_id {thread_id} not found in state_5.sqlite")
+    def _read_state(conn):
+        trow = conn.execute(
+            """
+            SELECT id, rollout_path, cwd, title, preview, source, originator,
+                   archived, project_id, created_at_ms, updated_at_ms, recency_at_ms,
+                   model, reasoning_effort, git_branch, git_sha
+            FROM threads
+            WHERE id = ?
+            """,
+            (thread_id,),
+        ).fetchone()
+        if not trow:
+            return None, None, []
+        project_id = trow[8]
+        proj_row = None
+        roots = []
+        if project_id:
+            proj_row = conn.execute("SELECT id, name, position FROM projects WHERE id = ?", (project_id,)).fetchone()
+            roots = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT path FROM project_roots WHERE project_id = ? ORDER BY position ASC", (project_id,)
+                ).fetchall()
+            ]
+        return trow, proj_row, roots
 
+    (trow, proj_row, roots), state_db_unchanged = run_readonly_sqlite_query(state_db, _read_state)
+    if not trow:
+        raise ValueError(f"Codex thread_id {thread_id} not found in state_5.sqlite")
     project_id = trow[8]
-    proj_row = None
-    roots = []
-    if project_id:
-        proj_row = conn.execute("SELECT id, name, position FROM projects WHERE id = ?", (project_id,)).fetchone()
-        roots = [
-            r[0]
-            for r in conn.execute(
-                "SELECT path FROM project_roots WHERE project_id = ? ORDER BY position ASC", (project_id,)
-            ).fetchall()
-        ]
-    conn.close()
-    after_stat = snapshot_file_stat(state_db)
 
     rollout_path = pathlib.Path(trow[1])
     if not rollout_path.is_file():
@@ -583,7 +619,7 @@ def decode_codex_session(codex_root: pathlib.Path, thread_id: str, sidebar_rules
         "thread_id": thread_id,
         "rollout_path": str(rollout_path),
         "readonly_integrity": {
-            "state_5_sqlite_unchanged": before_stat == after_stat,
+            "state_5_sqlite_unchanged": state_db_unchanged,
         },
         "project_binding": raw_binding,
         "session_meta": session_meta,
