@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from ..ledger import (
     AgyGuiSafeSource,
@@ -39,6 +39,25 @@ CODEX_ROOT_CLIENT_SOURCES = frozenset({"desktop", "vscode", "cli", "exec"})
 
 class SyncBusyLockError(RuntimeError):
     """Raised when an explicit workspace-pairing or offline operation cannot acquire write locks."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        host: str | None = None,
+        remediation: Sequence[str] = (),
+    ) -> None:
+        self.host = host
+        self.remediation = tuple(remediation)
+        super().__init__(message)
+
+    def to_error_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"error": "sync_busy_lock", "message": str(self)}
+        if self.host is not None:
+            payload["host"] = self.host
+        if self.remediation:
+            payload["remediation"] = list(self.remediation)
+        return payload
 
 
 def compute_codex_nesting_depth(
@@ -208,6 +227,62 @@ def reconcile_and_rescue_ledgers(
     return agy_ledger, codex_ledger, eff_cursor, agy_reconciled, codex_reconciled, was_agy_rescued, was_codex_rescued, False
 
 
+def _busy_pair_error(host: str, ws_str: str) -> SyncBusyLockError:
+    if host == "sync":
+        return SyncBusyLockError(
+            "Another sync or pairing operation currently holds sync.lock; wait and retry.",
+            host="sync",
+            remediation=(f'Wait for running sync or pair processes to finish, then retry: codex-agy-sync pair -w "{ws_str}"',),
+        )
+    app_label = "Antigravity" if host == "antigravity" else "Codex"
+    return SyncBusyLockError(
+        f"Cannot register {app_label} project while {app_label} Desktop or WAL lock is active. "
+        f"Open {ws_str!r} in {app_label} Desktop so it registers natively, or quit {app_label} Desktop and retry pairing.",
+        host=host,
+        remediation=(
+            f'Open "{ws_str}" in {app_label} Desktop so it registers natively.',
+            f'Or quit running Desktop apps and run: codex-agy-sync pair -w "{ws_str}"',
+        ),
+    )
+
+
+def _classify_busy_pair_error(
+    guard: PresenceWalGuard, ws_str: str, *, need_agy: bool, need_codex: bool,
+) -> SyncBusyLockError:
+    locks = guard.probe_locks(None, None)
+    if need_codex and not locks.can_write_codex_offline():
+        return _busy_pair_error("codex", ws_str)
+    if need_agy and not locks.can_write_agy_offline():
+        return _busy_pair_error("antigravity", ws_str)
+    return _busy_pair_error("sync", ws_str)
+
+
+def _pair_agy_only_offline(
+    paths: HostEnvironmentPaths,
+    guard: PresenceWalGuard,
+    registry: ProjectRegistry,
+    ro_binding: WorkspaceProjectBinding,
+    workspace: str | Path,
+) -> WorkspaceProjectBinding:
+    ws_str = str(ro_binding.workspace_path)
+    try:
+        with guard.acquire_offline_write_locks(HostKind.ANTIGRAVITY, None, None):
+            candidates = [paths.gemini_config_dir / "projects" / f"{ro_binding.agy_project_id}.json"]
+            backup = guard.create_offline_backup(
+                HostKind.ANTIGRAVITY,
+                str(ro_binding.agy_project_id),
+                expand_existing_with_sidecars(candidates),
+                expected_new_files=candidates,
+            )
+            try:
+                return registry.ensure_agy_binding(workspace)
+            except Exception:
+                backup.restore()
+                raise
+    except BlockingIOError as exc:
+        raise _classify_busy_pair_error(guard, ws_str, need_agy=True, need_codex=False) from exc
+
+
 def guarded_pair_workspace(
     paths: HostEnvironmentPaths,
     guard: PresenceWalGuard,
@@ -217,24 +292,41 @@ def guarded_pair_workspace(
     prefer_online_rpc: bool = True,
 ) -> WorkspaceProjectBinding:
     ro_binding = registry.resolve_readonly_binding(workspace)
+    agy_registered = registry._find_readonly_agy_project_id(ro_binding.workspace_uri) is not None
+    codex_registered = registry._find_readonly_codex_project_id(ro_binding.workspace_path) is not None
+    if agy_registered and codex_registered:
+        return ro_binding
+    if codex_registered and not agy_registered:
+        return _pair_agy_only_offline(paths, guard, registry, ro_binding, workspace)
+
+    ws_str = str(ro_binding.workspace_path)
     try:
-        with guard.acquire_offline_write_locks(HostKind.CODEX, None, None):
-            candidates = [
-                paths.gemini_config_dir / "projects" / f"{ro_binding.agy_project_id}.json",
+        with guard.acquire_offline_write_locks(HostKind.CODEX, None, None) as locks:
+            if not agy_registered and not locks.can_write_agy_offline():
+                raise _busy_pair_error("antigravity", ws_str)
+            codex_files = [
                 paths.codex_home_dir / "state_5.sqlite",
                 paths.codex_home_dir / ".codex-global-state.json",
             ]
+            candidates = codex_files if agy_registered else [
+                paths.gemini_config_dir / "projects" / f"{ro_binding.agy_project_id}.json",
+                *codex_files,
+            ]
             backup = guard.create_offline_backup(
-                HostKind.CODEX, str(ro_binding.codex_project_id),
-                expand_existing_with_sidecars(candidates), expected_new_files=candidates,
+                HostKind.CODEX,
+                str(ro_binding.codex_project_id),
+                expand_existing_with_sidecars(candidates),
+                expected_new_files=candidates,
             )
             try:
+                if agy_registered:
+                    return registry.ensure_codex_binding(workspace)
                 return registry.ensure_workspace_binding(workspace, prefer_online_rpc=prefer_online_rpc)
             except Exception:
                 backup.restore()
                 raise
     except BlockingIOError as exc:
-        raise SyncBusyLockError("Cannot raw-write Codex state_5.sqlite while Codex daemon or WAL lock is active.") from exc
+        raise _classify_busy_pair_error(guard, ws_str, need_agy=not agy_registered, need_codex=True) from exc
 
 
 def ensure_companion_stores_complete_guarded(

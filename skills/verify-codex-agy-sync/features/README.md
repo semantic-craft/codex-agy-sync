@@ -46,5 +46,6 @@ Browser prototype feature files keep the same four-section layout, list prototyp
 - [Bidirectional sync and companion stores](./bidirectional-sync-and-companion-stores.md) covers `sync-session` initial import in both directions, `transport_used` attribution (`A2`), sidebar visibility invariants, companion projections, and immediate re-run `no_op` idempotency.
 - [Incremental append and divergence policy](./incremental-append-and-divergence-policy.md) covers completed-turn cursor advancement, `B2` `--include-interrupted` stopped-turn rescue (`agy-interrupted`), and `halt_on_divergence`, `fork_new_session`, and `backup_and_overwrite_target` conflict resolution.
 - [Subagent isolation and lock deferral](./subagent-isolation-and-lock-deferral.md) covers `status` and `sync-workspace` subagent filtering (`--include-subagents`), active `presence/<id>.lock` deferral, and `online_rpc` write-guard deferral.
+- [Desktop session handoff](./desktop-handoff.md) covers `handoff` unpaired diagnosis (`exit 2`), `--pair-if-offline`, `--source-id` direction auto-inference, `--latest`, `--chain`, and `--pick` TTY behavior.
 
 - [Workspace UI prototype](./ui-prototype.md) covers search, shared draft, simulated review and handoff, reset, themes, and responsive views through an owned browser session.

@@ -25,6 +25,8 @@
 
 ## 当前状态
 
+- 2026-11-14 完成 `handoff` CLI/UX 增强（分支 `feat/handoff-cli-ux`）：新增 `bridge/handoff_resolve.py`（配对诊断、候选会话扫描、`--source-id` 方向自动推断、`--latest` 跳过未动过的接力目标、`--chain` 接力链游标/幂等 `no_op`、`--pick` 仅写 `stderr` 的 TTY 交互菜单及 `--pair-if-offline`），扩展 `HandoffReceipt` 向后兼容加载（`load_handoff_receipt`）与种子指纹（`ledger_seed_fingerprint`），使 `guarded_pair_workspace` 双端已注册时零锁零写入幂等，并在 `cli.py` 为未配对/忙锁/挂起返回退出码 `2` 与结构化 `stderr` JSON。单元测试补齐 `tests/test_handoff_cli_ux.py`。
+
 - 2026-11-14 为外置工作台原型新增独立浏览器验收入口，见 `skills/verify-codex-agy-sync/features/ui-prototype.md`。覆盖搜索、共享草稿、模拟请教、完整历史接续与重复接续；证据与原型留在仓库外。截图由 Agent 单独复核，真实 Desktop 与消息投递须另行验收。
 
 - 2026-11-14 `0.2.0` 已完成实现与发布包准备。GitHub 仓库已公开。Desktop handoff 的交付范围是可见历史文本与新会话续聊，不宣称跨宿主运行态无损迁移；同会话在线追加和其余工具的全面实机验收不在本次完成范围。
