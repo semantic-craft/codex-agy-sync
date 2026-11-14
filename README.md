@@ -72,18 +72,17 @@
 
 ## 模块化代码结构
 
-`src/codex_agy_sync/` 采用职责单一的分层包结构，所有单文件行数与函数长度均受 `./scripts/check` AST 门禁约束：
-- `_wire.py` 提供全仓唯一的 64 位 Protobuf varint、wire 字段解析与时间戳编解码原语。
-- `payloads.py` 定义 16 类结构化工具载荷（`CanonicalToolPayload`）与未知工具透传信封（`OpaqueToolPayload`）。
-- `ledger.py` 定义强类型标识、`SubagentLineage`、索引化事件账本 `TrajectoryLedger`、5 类伴生存储纯投影以及 `B2` 半途回合闭合纯函数。
-- `codecs/`（核心子模块 `schema_tags.py`、`tool_payloads.py`、`tools.py`、`steps.py`、`rollout.py`、`projections.py`、`__init__.py`）实现表驱动的 `gemini_coder.Step` Protobuf 与 Codex `.jsonl` / `.jsonl.zst` / RPC 线程编解码。
-- `bridge/`（核心子模块 `paths_and_locks.py`、`registry.py`、`state_machine.py`、`rpc.py`、`native_codex.py`、`handoff.py`、`handoff_resolve.py`、`_handoff_scan.py`、`rescue_and_fork.py`、`transport.py`、`sync.py`、`__init__.py`）实现双端项目配对、锁守卫与备份回滚、纯状态机、`A2` 在线回环 RPC 读取客户端、按需 `handoff` 解析/接力链诊断、多存储落盘自愈与对称分叉门面 `SyncBridge`。
-- `workbench/`（核心子模块 `models.py`、`_discovery.py`、`indexer.py`、`service.py`、`_lease.py`、`_handler.py`、`server.py`、`__init__.py`）实现 Stage 1 本地工作台的工作区发现、时间线聚类、Markdown 草稿渲染、`0o600` 租约管理与回环 HTTP/UI 托管。
-- `cli.py` 与 `bin/codex-agy-sync` 暴露命令行入口。
+`src/codex_agy_sync/` 采用严格的 6 层单向无环分层架构，单文件行数、函数规模与层间边界由 `./scripts/check` 与 `scripts/check_architecture.py` AST 门禁约束：
+- Tier 0 基础原语与领域模型（`_wire.py`、`workspace.py`、`payloads.py`）提供全仓唯一的 64 位 Protobuf varint / wire 解析、工作区标识归一化与 16 类结构化工具载荷（`CanonicalToolPayload` / `OpaqueToolPayload`）。
+- Tier 1 账本与规范事件（`events.py`、`ledger.py`）定义强类型标识、`SubagentLineage`、规范事件、5 类伴生存储纯投影、索引化事件账本 `TrajectoryLedger` 及 `B2` 半途回合闭合纯函数。
+- Tier 2 编解码（`codecs/`，含 `schema_tags.py`、`tool_payloads.py`、`tools.py`、`projections.py`、`steps.py`、`rpc_thread.py`、`rollout.py`、`__init__.py`）实现表驱动的 `gemini_coder.Step` Protobuf 与 Codex `.jsonl` / `.jsonl.zst`（统一 `compress_zstd_rollout_bytes`）/ RPC 线程编解码。
+- Tier 3 桥接编排（`bridge/`，含 `paths_and_locks.py`、`store_catalog.py`、`registry.py`、`state_machine.py`、`rpc.py`、`native_codex.py`、`transport.py`、`rescue_and_fork.py`、`sync.py`、`handoff_store.py`、`handoff.py`、`handoff_resolve.py`、`__init__.py`）实现双端配对诊断、锁守卫与备份回滚、`HostTransportPort` 与纯状态机、`A2` 在线回环 RPC、多存储目录扫描与落盘、按需 `handoff` 接力链及门面 `SyncBridge`。
+- Tier 4 本地工作台（`workbench/`，含 `models.py`、`discovery.py`、`lease.py`、`indexer.py`、`service.py`、`handler.py`、`server.py`、`__init__.py`）实现 Stage 1 工作区发现、时间线聚类、Markdown 草稿渲染、`0o600` 租约管理与回环 HTTP 服务。
+- Tier 5 公共入口（`cli.py`、`__init__.py`、`__main__.py` 与 `bin/codex-agy-sync`）暴露命令行与公开 API。
 
 ## 契约提取与验证入口
 
 - `python3 scripts/extract_schema.py` 从本机 `/Applications/Antigravity.app/Contents/Resources/bin/language_server`、`agy` CLI 与 `app.asar` 提取编译态 `FileDescriptorProto` 与侧栏可见性规则，生成 `schema/antigravity_2_30_schema.json`、`schema/antigravity_2_30.proto` 与 `schema/sidebar_visibility_rules.json`。
 - `python3 scripts/verify_session_mapping.py` 以 `SQLITE_OPEN_READONLY`（`?mode=ro` + `PRAGMA query_only=ON`）只读解码本机真实 Antigravity `.db` 会话与 Codex `rollout-*.jsonl`，校验 `unknown_wire_fields_count == 0` 且宿主数据库零变动。
 - `python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py doctor --prototype "<Main.html>"` 与 `suite --prototype "<Main.html>"` 在隔离沙盒 + 回环 AGY RPC 桩下通过 `agent-browser` 端到端验收 `serve` 启停、安全门禁、跨端检索、引用草稿 IME 保护及一键交接。
-- `./scripts/check` 一键运行描述符完整性校验、真实会话只读无损解码、包结构与函数规模 AST 检查、路径与 `csrfToken` 卫生扫描及全量行为回归测试。
+- `./scripts/check`（含 `scripts/check_architecture.py`）一键运行描述符完整性校验、真实会话只读无损解码、6 层 DAG 与边界 AST 门禁、路径与 `csrfToken` 卫生扫描及全量行为回归测试。
