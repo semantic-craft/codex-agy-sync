@@ -91,3 +91,14 @@
 - 正确做法（Done right）：所有宿主机侧栏谓词改动同步更新 schema 规则、验证脚本与反例测试；任何新增包内模块须归属清晰层级并通过 `./scripts/check` AST 检查。
 - 验证点：运行 `./scripts/check`（确认 Step `[2/5]`、`[3/5]` AST coherence gate 与 `tests/test_architecture_coherence.py` 全部通过）。
 - 复发记录：Seen 1x (2026-11-14)，在阶段架构一致性重构中发现并固化。
+
+### 只读宿主数据库探针必须优先选静默会话并将文件指纹窗口收紧到连接期
+
+**Antigravity 或 Codex 只读探针挑选默认会话时应优先跳过仍在活跃写入 `.db-wal` 的会话，并将只读指纹前后快照严格收紧到 SQLite 只读连接期而非跨过后续 CPU 解码阶段。**
+
+- 标签：#只读探针 #WAL并发 #验收
+- 起因与后果：`select_default_agy_conversation` 按 `last_modified_time DESC` 直接挑选活跃会话，且 `decode_antigravity_session` 将 `before_*_stat` 与 `after_*_stat` 跨越了约 1.5s 的 Protobuf 全量解码窗口；当活跃会话在解码期间持续追加 `.db-wal` 时，探针触发 `Read-only violation detected on Antigravity SQLite files!` 误报并中断验收。
+- 修复与证据：在 `scripts/verify_session_mapping.py` 新增 `run_readonly_sqlite_query`（校验 `PRAGMA query_only == 1`，仅在 `open_sqlite_readonly` 到 `conn.close()` 之间对比 `snapshot_file_stat`，遇并发写入抖动重试最多 5 次），并在 `select_default_agy_conversation` 按主库与 `-wal` 最近修改时间划分 120s 静默 `idle_candidates` 优先扫描、无命中再回退 `active_candidates`，收紧 `decode_antigravity_session` 与 `decode_codex_session` 的快照范围；连续两次运行 `./scripts/check` 全量通过验证。
+- 正确做法（Done right）：所有只读 SQLite 探针通过 `run_readonly_sqlite_query` 在纯连接查询窗口内校验文件指纹，默认样本挑选以主库与 `-wal` 静默超过 120 秒为优先，禁止让只读完整性快照跨越后续 CPU 解码或磁盘伴生文件读取。
+- 验证点：连续两次运行 `./scripts/check`（核对 `[2/5]` 只读无损解码与 `readonly_integrity` 字段均为 `True` 且全量 5 步检查通过）。
+- 复发记录：Seen 2x (2026-11-14, 2026-11-15)，在活跃宿主会话并发写入期间执行只读探针及 `./scripts/check` 时暴露竞态误报。
