@@ -35,13 +35,13 @@ from codex_agy_sync import (
     resolve_handoff_request,
 )
 from codex_agy_sync.bridge.handoff import HandoffPendingError
-from codex_agy_sync.bridge.registry import _ensure_agy_summaries_db_schema
-from codex_agy_sync.bridge.rescue_and_fork import SyncBusyLockError, guarded_pair_workspace
+from codex_agy_sync.bridge.paths_and_locks import SyncBusyLockError
+from codex_agy_sync.bridge.registry import ensure_agy_summaries_db_schema, guarded_pair_workspace
 from codex_agy_sync.bridge.rpc import AgyRpcReadResult
 from codex_agy_sync.bridge.state_machine import generate_uuid7
 from codex_agy_sync.bridge.transport import DefaultHostTransport
 from codex_agy_sync.cli import main as cli_main
-from codex_agy_sync.codecs import TrajectoryWireCodec, iter_codex_rollout_lines
+from codex_agy_sync.codecs import decode_codex_rollout, encode_codex_rollout, iter_codex_rollout_lines
 from codex_agy_sync.ledger import (
     AssistantTextEvent,
     EventOriginAnchor,
@@ -79,7 +79,6 @@ class HandoffCliUxTest(unittest.TestCase):
         self.workspace.mkdir()
         self.bridge = SyncBridge(self.paths)
         self.transport = DefaultHostTransport(self.paths)
-        self.codec = TrajectoryWireCodec()
         self.cli_bin = Path(__file__).resolve().parents[1] / "bin" / "codex-agy-sync"
 
     def tearDown(self) -> None:
@@ -121,11 +120,11 @@ class HandoffCliUxTest(unittest.TestCase):
     def _activate_agy_rpc(self, endpoint: object, cid: CascadeId, **kwargs: object) -> AgyRpcReadResult:
         _ = endpoint, kwargs
         db = self.paths.agy_data_dir / "conversations" / f"{cid}.db"
-        return AgyRpcReadResult(tuple(self.transport._read_persisted_agy_steps(db)), 1)
+        return AgyRpcReadResult(tuple(self.transport.read_persisted_agy_steps(db)), 1)
 
     def _fetch_codex_rpc(self, endpoint: object, tid: CodexThreadId, **kwargs: object) -> CodexRpcReadResult:
         _ = endpoint, kwargs
-        rp, title = self.transport._find_codex_rollout_and_title(tid)
+        rp, title = self.transport.find_codex_rollout_and_title(tid)
         return CodexRpcReadResult(
             thread={"id": str(tid), "name": title or "", "path": str(rp), "turns": []},
             is_active=False,
@@ -143,7 +142,7 @@ class HandoffCliUxTest(unittest.TestCase):
         _ = endpoint, ws_path, codex_project_id, timeout_s
         binding = self.bridge.registry.resolve_readonly_binding(self.workspace)
         lines = tuple(iter_codex_rollout_lines(rollout_path))
-        ledger = self.codec.decode_codex_rollout_to_ledger(
+        ledger = decode_codex_rollout(
             binding.workspace_path, binding.workspace_uri, lines, explicit_title_override=title,
         )
         new_tid = CodexThreadId(generate_uuid7())
@@ -155,11 +154,11 @@ class HandoffCliUxTest(unittest.TestCase):
     def _mock_live_daemons(self):
         fake_codex_ep = CodexDaemonEndpoint(socket_path=self.root / "codex.sock", pid=os.getpid())
         with (
-            mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()),
-            mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_codex_daemon", return_value=fake_codex_ep),
+            mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()),
+            mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_codex_daemon", return_value=fake_codex_ep),
             mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self._activate_agy_rpc),
             mock.patch("codex_agy_sync.bridge.rpc.fetch_codex_thread_via_rpc", side_effect=self._fetch_codex_rpc),
-            mock.patch("codex_agy_sync.bridge.handoff.rpc.import_codex_rollout_via_rpc", create=True, side_effect=self._materialize_codex_rpc),
+            mock.patch("codex_agy_sync.bridge.handoff.import_codex_rollout_via_rpc", side_effect=self._materialize_codex_rpc),
         ):
             yield
 
@@ -210,7 +209,7 @@ class HandoffCliUxTest(unittest.TestCase):
             codex_only_binding, "01960000-0000-7000-8000-000000000001",
             _turn_pair(HostKind.CODEX, "turn-1", "2026-11-14T01:00:00Z", "Hi", "Hello"),
         )
-        with mock.patch("codex_agy_sync.bridge.paths_and_locks.PresenceWalGuard._discover_agy_daemon", return_value=object()):
+        with mock.patch("codex_agy_sync.bridge.paths_and_locks.PresenceWalGuard.discover_agy_daemon", return_value=object()):
             diag = diagnose_workspace_binding(self.paths, self.workspace)
             self.assertFalse(diag.is_paired())
             self.assertTrue(diag.codex_registered and not diag.agy_registered)
@@ -247,7 +246,7 @@ class HandoffCliUxTest(unittest.TestCase):
 
         with (
             mock.patch(
-                "codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon",
+                "codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon",
                 side_effect=itertools.chain([None, None], itertools.repeat(object())),
             ),
             mock.patch("codex_agy_sync.bridge.rpc.fetch_codex_thread_via_rpc", side_effect=self._fetch_codex_rpc),
@@ -306,7 +305,7 @@ class HandoffCliUxTest(unittest.TestCase):
             binding.workspace_path, binding.workspace_uri,
             _turn_pair(HostKind.CODEX, "turn-1", "2026-11-14T02:02:00Z", "Rollout only", "Ack rollout"),
         )
-        rollout_rows = self.codec.encode_ledger_to_codex_rollout(
+        rollout_rows = encode_codex_rollout(
             rollout_ledger, session_id=rollout_only_id, cwd=str(binding.workspace_path),
         )
         rollout_file = self.paths.codex_home_dir / "sessions" / "2026" / "11" / "14" / f"rollout-2026-11-14T02-02-00-{rollout_only_id}.jsonl"
@@ -577,7 +576,7 @@ class HandoffCliUxTest(unittest.TestCase):
             bind_b.workspace_path, bind_b.workspace_uri,
             _turn_pair(HostKind.CODEX, "turn-1", "2026-11-14T01:06:00Z", "B rollout", "Ack"),
         )
-        r_rows = self.codec.encode_ledger_to_codex_rollout(r_ledger, session_id=rollout_only_b, cwd=str(bind_b.workspace_path))
+        r_rows = encode_codex_rollout(r_ledger, session_id=rollout_only_b, cwd=str(bind_b.workspace_path))
         r_file = self.paths.codex_home_dir / "sessions" / "2026" / "11" / "14" / f"rollout-2026-11-14T01-06-00-{rollout_only_b}.jsonl"
         r_file.parent.mkdir(parents=True, exist_ok=True)
         r_file.write_text("\n".join(r.raw_json for r in r_rows) + "\n", encoding="utf-8")
@@ -647,7 +646,7 @@ class HandoffCliUxTest(unittest.TestCase):
         chosen_new = resolve_handoff_request(self.paths, self.workspace, chain=True)
         self.assertEqual((chosen_new.already_ready_receipt.status, chosen_new.already_ready_receipt.target_id), ("no_op", str(t_new)))
 
-        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), \
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), \
              mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", return_value=AgyRpcReadResult((), 2)):
             with self.assertRaisesRegex(ValueError, "active"):
                 resolve_handoff_request(self.paths, self.workspace, chain=True)
@@ -701,7 +700,7 @@ class HandoffCliUxTest(unittest.TestCase):
         ghost_cid = "77777777-7777-4777-8777-777777777901"
         sum_db = self.paths.agy_data_dir / "conversation_summaries.db"
         with contextlib.closing(sqlite3.connect(sum_db)) as conn:
-            _ensure_agy_summaries_db_schema(conn)
+            ensure_agy_summaries_db_schema(conn)
             conn.execute(
                 "INSERT INTO conversation_summaries (conversation_id, title, step_count, last_modified_time, workspace_uris, project_id, last_user_input_time) "
                 "VALUES (?, ?, 4, '2026-11-14T05:00:00Z', ?, ?, '2026-11-14T05:00:00Z')",

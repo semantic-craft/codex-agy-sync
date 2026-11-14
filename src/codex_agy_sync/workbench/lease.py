@@ -8,12 +8,11 @@ import json
 import os
 from pathlib import Path
 import signal
-import subprocess
 import time
 from typing import Any
 import urllib.request
 
-from ..bridge.paths_and_locks import HostEnvironmentPaths, _atomic_write_text
+from ..bridge.paths_and_locks import HostEnvironmentPaths, atomic_write_text, is_pid_alive
 
 
 def default_workbench_ui_path() -> Path:
@@ -81,13 +80,13 @@ def load_workbench_lease(paths: HostEnvironmentPaths) -> WorkbenchLease | None:
         return None
 
 
-def _write_lease_file(path: Path, lease: WorkbenchLease) -> None:
+def write_lease_file(path: Path, lease: WorkbenchLease) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
-    _atomic_write_text(path, json.dumps(lease.to_dict(), ensure_ascii=False, indent=2) + "\n")
+    atomic_write_text(path, json.dumps(lease.to_dict(), ensure_ascii=False, indent=2) + "\n")
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -110,30 +109,6 @@ def _probe_health(port: int, timeout_sec: float = 1.5) -> dict[str, Any] | None:
         return None
 
 
-def _pid_is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    try:
-        proc = subprocess.run(
-            ["ps", "-o", "stat=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=1.0,
-            check=False,
-        )
-        if proc.stdout.strip().startswith("Z"):
-            return False
-    except (subprocess.SubprocessError, OSError):
-        pass
-    return True
-
-
 def query_workbench_status(paths: HostEnvironmentPaths) -> dict[str, Any]:
     lease_path = workbench_lease_path(paths)
     lease = load_workbench_lease(paths)
@@ -141,7 +116,7 @@ def query_workbench_status(paths: HostEnvironmentPaths) -> dict[str, Any]:
         if lease_path.is_file():
             return {"running": False, "reason": "malformed_lease"}
         return {"running": False, "reason": "no_lease"}
-    alive = _pid_is_alive(lease.pid)
+    alive = is_pid_alive(lease.pid)
     health = _probe_health(lease.port)
     if not (alive and health is not None and health.get("pid") == lease.pid):
         return {"running": False, "stale_lease": True, **lease.to_dict()}
@@ -156,7 +131,7 @@ def stop_workbench_server(paths: HostEnvironmentPaths, *, timeout_sec: float = 3
             lease_path.unlink(missing_ok=True)
             return {"stopped": False, "running": False, "stale_cleaned": True, "reason": "malformed_lease"}
         return {"stopped": False, "running": False, "reason": "no_lease"}
-    alive = _pid_is_alive(lease.pid)
+    alive = is_pid_alive(lease.pid)
     health = _probe_health(lease.port)
     if not alive or health is None or health.get("pid") != lease.pid:
         lease_path.unlink(missing_ok=True)
@@ -170,11 +145,11 @@ def stop_workbench_server(paths: HostEnvironmentPaths, *, timeout_sec: float = 3
         return {"stopped": False, "running": True, "reason": "permission_denied", "pid": lease.pid, "port": lease.port}
     deadline = time.monotonic() + max(0.1, timeout_sec)
     while time.monotonic() < deadline:
-        if not _pid_is_alive(lease.pid):
+        if not is_pid_alive(lease.pid):
             lease_path.unlink(missing_ok=True)
             return {"stopped": True, "pid": lease.pid, "port": lease.port}
         time.sleep(0.05)
-    if not _pid_is_alive(lease.pid):
+    if not is_pid_alive(lease.pid):
         lease_path.unlink(missing_ok=True)
         return {"stopped": True, "pid": lease.pid, "port": lease.port}
     return {"stopped": False, "running": True, "reason": "stop_timeout", "pid": lease.pid, "port": lease.port}

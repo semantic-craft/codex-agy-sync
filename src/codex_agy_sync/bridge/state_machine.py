@@ -5,22 +5,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import os
+from pathlib import Path
 import threading
 import time
-from typing import Literal, Tuple, TypeAlias
+from typing import Literal, Protocol, Sequence, Tuple, TypeAlias
 import uuid
 
-from ..ledger import (
-    CanonicalEvent, CascadeId, CodexThreadId, CompletedTurnWatermark, ContentDigest,
-    HostKind, RolloutLineNo, StepIndex, TrajectoryLedger, TurnId, WorkspaceRootUri,
+from ..events import (
+    AgyGuiSafeSource,
+    CanonicalEvent,
+    CascadeId,
+    CodexThreadId,
+    CompletedTurnWatermark,
+    ContentDigest,
+    HostKind,
+    RolloutLineNo,
+    StepIndex,
+    SubagentLineage,
+    TurnId,
+    WorkspaceRootUri,
 )
-from .paths_and_locks import HostLockSnapshot, TransportMode, _now_iso
+from ..ledger import TrajectoryLedger
+from .paths_and_locks import HostLockSnapshot, PresenceWalGuard, TransportMode, now_iso
+from .registry import ProjectRegistry, WorkspaceProjectBinding
 
 _UUID7_LOCK = threading.Lock()
 _UUID7_LAST_MS = 0
 _UUID7_SEQ = 0
-_NULL_CID = CascadeId("00000000-0000-0000-0000-000000000000")
-_NULL_TID = CodexThreadId("00000000-0000-0000-0000-000000000000")
+NULL_CASCADE_ID = CascadeId("00000000-0000-0000-0000-000000000000")
+NULL_CODEX_THREAD_ID = CodexThreadId("00000000-0000-0000-0000-000000000000")
 
 
 def generate_uuid7() -> str:
@@ -163,11 +176,104 @@ CursorTransition: TypeAlias = (
 )
 
 
+class HostTransportPort(Protocol):
+    """Port abstracting Online RPC (`LanguageServerService` / `codex app-server`) and Offline Storage."""
+
+    supports_online_rpc_write: bool
+
+    def read_agy_ledger_with_meta(
+        self,
+        binding: WorkspaceProjectBinding,
+        cascade_id: CascadeId,
+        lock_snapshot: HostLockSnapshot,
+        mode: TransportMode,
+    ) -> tuple[TrajectoryLedger, TransportMode, bool]: ...
+
+    def read_agy_ledger(
+        self,
+        binding: WorkspaceProjectBinding,
+        cascade_id: CascadeId,
+        lock_snapshot: HostLockSnapshot,
+        mode: TransportMode,
+    ) -> TrajectoryLedger: ...
+
+    def read_codex_ledger_with_meta(
+        self,
+        binding: WorkspaceProjectBinding,
+        thread_id: CodexThreadId,
+        lock_snapshot: HostLockSnapshot,
+        mode: TransportMode,
+    ) -> tuple[TrajectoryLedger, TransportMode, bool]: ...
+
+    def read_codex_ledger(
+        self,
+        binding: WorkspaceProjectBinding,
+        thread_id: CodexThreadId,
+        lock_snapshot: HostLockSnapshot,
+        mode: TransportMode,
+    ) -> TrajectoryLedger: ...
+
+    def candidate_target_paths(
+        self,
+        target_host: HostKind,
+        cascade_id: CascadeId | None,
+        codex_thread_id: CodexThreadId | None,
+        *,
+        binding: WorkspaceProjectBinding | None = None,
+        lineage: SubagentLineage | None = None,
+        include_primary_store: bool = True,
+    ) -> tuple[list[Path], list[tuple[Path, str]]]: ...
+
+    def apply_to_agy(
+        self,
+        binding: WorkspaceProjectBinding,
+        cascade_id: CascadeId | None,
+        events: Sequence[CanonicalEvent],
+        full_ledger: TrajectoryLedger,
+        lock_snapshot: HostLockSnapshot,
+        mode: TransportMode,
+        parent_cascade_id: CascadeId | None = None,
+        source_tag: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
+        incremental: bool = False,
+        lineage: SubagentLineage | None = None,
+        forked_from_cascade_id: CascadeId | None = None,
+    ) -> CascadeId: ...
+
+    def apply_to_codex(
+        self,
+        binding: WorkspaceProjectBinding,
+        thread_id: CodexThreadId | None,
+        events: Sequence[CanonicalEvent],
+        full_ledger: TrajectoryLedger,
+        lock_snapshot: HostLockSnapshot,
+        mode: TransportMode,
+        parent_thread_id: CodexThreadId | None = None,
+        incremental: bool = False,
+        lineage: SubagentLineage | None = None,
+    ) -> CodexThreadId: ...
+
+    def ensure_companion_stores_complete(
+        self,
+        binding: WorkspaceProjectBinding,
+        cascade_id: CascadeId,
+        codex_thread_id: CodexThreadId,
+        agy_ledger: TrajectoryLedger | None,
+        codex_ledger: TrajectoryLedger | None,
+        locks: HostLockSnapshot,
+        mode: TransportMode,
+        source_tag: AgyGuiSafeSource,
+        lineage: SubagentLineage,
+        guard: PresenceWalGuard,
+        registry: ProjectRegistry,
+    ) -> WorkspaceProjectBinding: ...
+
+
 class CursorForkStateMachine:
     """Pure state machine computing the sync transition from source/target ledgers and cursor."""
 
-    @staticmethod
+    @classmethod
     def _select_transport_or_defer(
+        cls,
         target_host: HostKind,
         lock_snapshot: HostLockSnapshot,
         requested_mode: TransportMode,
@@ -198,21 +304,22 @@ class CursorForkStateMachine:
             return DeferredBusyTransition("deferred_busy", target_host, f"Online write RPC for {target_host.value} is not enabled; deferring to avoid raw-writing active WAL storage.")
         return DeferredBusyTransition("deferred_busy", HostKind.CODEX, "Codex thread cannot be written safely right now due to active WAL lock.")
 
-    @staticmethod
-    def _find_watermark(ledger: TrajectoryLedger | None, turn_id: TurnId) -> CompletedTurnWatermark | None:
+    @classmethod
+    def _find_watermark(cls, ledger: TrajectoryLedger | None, turn_id: TurnId) -> CompletedTurnWatermark | None:
         if ledger is None:
             return None
         return next((wm for wm in ledger.completed_turn_watermarks if wm.turn_id == turn_id), None)
 
-    @staticmethod
+    @classmethod
     def _plan_divergence(
+        cls,
         source_host: HostKind, source_ledger: TrajectoryLedger | None, cursor: SessionSyncCursor,
         ancestor_wm: CompletedTurnWatermark | None, agy_head: CompletedTurnWatermark | None,
         codex_head: CompletedTurnWatermark | None, reason: str, lock_snapshot: HostLockSnapshot,
         transport_mode: TransportMode, fork_policy: ForkResolutionPolicy, online_rpc_write_supported: bool,
     ) -> DivergedConflictTransition | DeferredBusyTransition:
         target_host = HostKind.ANTIGRAVITY if source_host == HostKind.CODEX else HostKind.CODEX
-        sel = CursorForkStateMachine._select_transport_or_defer(
+        sel = cls._select_transport_or_defer(
             target_host, lock_snapshot, transport_mode, online_rpc_write_supported=online_rpc_write_supported
         )
         if isinstance(sel, DeferredBusyTransition):
@@ -226,8 +333,9 @@ class CursorForkStateMachine:
             fork_events_to_apply=fork_events, selected_transport=sel,
         )
 
-    @staticmethod
+    @classmethod
     def _build_initial_import(
+        cls,
         source_host: HostKind, target_host: HostKind, source_ledger: TrajectoryLedger | None,
         source_head: CompletedTurnWatermark | None, lock_snapshot: HostLockSnapshot,
         transport_mode: TransportMode, online_rpc_write_supported: bool,
@@ -237,7 +345,7 @@ class CursorForkStateMachine:
             if source_ledger is not None and source_ledger.has_inflight_turn:
                 return DeferredBusyTransition("deferred_busy", source_host, f"Source {host_label} only has an uncompleted in-flight turn.")
             raise EmptySessionError(f"Source {host_label} has no completed turns to sync.")
-        sel = CursorForkStateMachine._select_transport_or_defer(
+        sel = cls._select_transport_or_defer(
             target_host, lock_snapshot, transport_mode, online_rpc_write_supported=online_rpc_write_supported
         )
         if isinstance(sel, DeferredBusyTransition):
@@ -247,8 +355,9 @@ class CursorForkStateMachine:
             events_to_apply=source_ledger.slice_after_watermark(None), new_watermark=source_head, selected_transport=sel,
         )
 
-    @staticmethod
+    @classmethod
     def _evaluate_without_cursor(
+        cls,
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
         agy_head: CompletedTurnWatermark | None, codex_head: CompletedTurnWatermark | None,
         direction: SyncDirection, lock_snapshot: HostLockSnapshot, transport_mode: TransportMode,
@@ -263,19 +372,19 @@ class CursorForkStateMachine:
                     "deferred_busy", blocking, "deferred_busy", agy_busy=agy_inf, codex_busy=codex_inf,
                 )
         if codex_head is None and (direction == SyncDirection.AGY_TO_CODEX or (direction == SyncDirection.AUTO_INCREMENTAL and agy_head is not None)):
-            return CursorForkStateMachine._build_initial_import(
+            return cls._build_initial_import(
                 HostKind.ANTIGRAVITY, HostKind.CODEX, agy_ledger, agy_head, lock_snapshot, transport_mode, online_rpc_write_supported
             )
         if direction == SyncDirection.AGY_TO_CODEX and agy_head is None:
-            return CursorForkStateMachine._build_initial_import(
+            return cls._build_initial_import(
                 HostKind.ANTIGRAVITY, HostKind.CODEX, agy_ledger, agy_head, lock_snapshot, transport_mode, online_rpc_write_supported
             )
         if agy_head is None and (direction == SyncDirection.CODEX_TO_AGY or (direction == SyncDirection.AUTO_INCREMENTAL and codex_head is not None)):
-            return CursorForkStateMachine._build_initial_import(
+            return cls._build_initial_import(
                 HostKind.CODEX, HostKind.ANTIGRAVITY, codex_ledger, codex_head, lock_snapshot, transport_mode, online_rpc_write_supported
             )
         if direction == SyncDirection.CODEX_TO_AGY and codex_head is None:
-            return CursorForkStateMachine._build_initial_import(
+            return cls._build_initial_import(
                 HostKind.CODEX, HostKind.ANTIGRAVITY, codex_ledger, codex_head, lock_snapshot, transport_mode, online_rpc_write_supported
             )
 
@@ -283,17 +392,17 @@ class CursorForkStateMachine:
             ws_uri = agy_ledger.workspace_uri if agy_ledger else WorkspaceRootUri("file:///workspace")
             if agy_head.turn_id == codex_head.turn_id and agy_head.boundary_digest == codex_head.boundary_digest:
                 return NoOpTransition("no_op", SessionSyncCursor(
-                    ws_uri, _NULL_CID, _NULL_TID, agy_head.turn_id, agy_head.last_agy_step_index or StepIndex(0),
-                    codex_head.last_codex_line_no or RolloutLineNo(1), agy_head.boundary_digest, codex_head.boundary_digest, _now_iso(),
+                    ws_uri, NULL_CASCADE_ID, NULL_CODEX_THREAD_ID, agy_head.turn_id, agy_head.last_agy_step_index or StepIndex(0),
+                    codex_head.last_codex_line_no or RolloutLineNo(1), agy_head.boundary_digest, codex_head.boundary_digest, now_iso(),
                 ))
             src_host = HostKind.CODEX if direction == SyncDirection.CODEX_TO_AGY else HostKind.ANTIGRAVITY
             src_ledger = codex_ledger if src_host == HostKind.CODEX else agy_ledger
             assert src_ledger is not None
             synth_cursor = SessionSyncCursor(
-                src_ledger.workspace_uri, _NULL_CID, _NULL_TID, TurnId("turn-0"), StepIndex(0), RolloutLineNo(0),
-                agy_head.boundary_digest, codex_head.boundary_digest, _now_iso(),
+                src_ledger.workspace_uri, NULL_CASCADE_ID, NULL_CODEX_THREAD_ID, TurnId("turn-0"), StepIndex(0), RolloutLineNo(0),
+                agy_head.boundary_digest, codex_head.boundary_digest, now_iso(),
             )
-            return CursorForkStateMachine._plan_divergence(
+            return cls._plan_divergence(
                 src_host, src_ledger, synth_cursor, None, agy_head, codex_head,
                 "Both sessions already contain independent non-empty histories without a prior sync cursor.",
                 lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
@@ -301,8 +410,9 @@ class CursorForkStateMachine:
 
         raise EmptySessionError("Neither Antigravity nor Codex has any completed turns to synchronize.")
 
-    @staticmethod
+    @classmethod
     def _converged_noop(
+        cls,
         cursor: SessionSyncCursor, agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
         agy_head: CompletedTurnWatermark, codex_head: CompletedTurnWatermark,
     ) -> NoOpTransition:
@@ -313,11 +423,12 @@ class CursorForkStateMachine:
         return NoOpTransition("no_op", SessionSyncCursor(
             cursor.workspace_uri, cursor.cascade_id, cursor.codex_thread_id, agy_head.turn_id,
             agy_head.last_agy_step_index or StepIndex(0), codex_head.last_codex_line_no or RolloutLineNo(1),
-            agy_head.boundary_digest, codex_head.boundary_digest, _now_iso(),
+            agy_head.boundary_digest, codex_head.boundary_digest, now_iso(),
         ), deferred_inflight_host=inflight)
 
-    @staticmethod
+    @classmethod
     def _evaluate_missing_peer_with_cursor(
+        cls,
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
         agy_head: CompletedTurnWatermark | None, codex_head: CompletedTurnWatermark | None,
         cursor: SessionSyncCursor, direction: SyncDirection, lock_snapshot: HostLockSnapshot,
@@ -339,25 +450,26 @@ class CursorForkStateMachine:
         )
         if from_missing and fork_policy != ForkResolutionPolicy.FORK_NEW_SESSION:
             if fork_policy == ForkResolutionPolicy.HALT_ON_DIVERGENCE:
-                return CursorForkStateMachine._plan_divergence(
+                return cls._plan_divergence(
                     surviving_host, surviving_ledger, cursor, None, agy_head, codex_head,
                     "Source peer session was deleted since last sync.",
                     lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
                 )
             raise EmptySessionError("Cannot overwrite surviving session from a deleted peer.")
         if fork_policy == ForkResolutionPolicy.FORK_NEW_SESSION:
-            return CursorForkStateMachine._plan_divergence(
+            return cls._plan_divergence(
                 surviving_host, surviving_ledger, cursor, None, agy_head, codex_head,
                 "Peer session missing; re-materializing onto missing host.",
                 lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
             )
-        return CursorForkStateMachine._build_initial_import(
+        return cls._build_initial_import(
             surviving_host, missing_host, surviving_ledger, surviving_head,
             lock_snapshot, transport_mode, online_rpc_write_supported,
         )
 
-    @staticmethod
+    @classmethod
     def evaluate(
+        cls,
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
         cursor: SessionSyncCursor | None, direction: SyncDirection, lock_snapshot: HostLockSnapshot,
         transport_mode: TransportMode, fork_policy: ForkResolutionPolicy, online_rpc_write_supported: bool = False,
@@ -366,25 +478,25 @@ class CursorForkStateMachine:
         agy_head = agy_ledger.latest_watermark() if agy_ledger is not None else None
         codex_head = codex_ledger.latest_watermark() if codex_ledger is not None else None
         if cursor is None:
-            return CursorForkStateMachine._evaluate_without_cursor(
+            return cls._evaluate_without_cursor(
                 agy_ledger, codex_ledger, agy_head, codex_head,
                 direction, lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
             )
         if agy_ledger is None or codex_ledger is None:
-            return CursorForkStateMachine._evaluate_missing_peer_with_cursor(
+            return cls._evaluate_missing_peer_with_cursor(
                 agy_ledger, codex_ledger, agy_head, codex_head, cursor,
                 direction, lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
             )
 
-        agy_anchor_wm = CursorForkStateMachine._find_watermark(agy_ledger, cursor.last_synced_turn_id)
-        codex_anchor_wm = CursorForkStateMachine._find_watermark(codex_ledger, cursor.last_synced_turn_id)
+        agy_anchor_wm = cls._find_watermark(agy_ledger, cursor.last_synced_turn_id)
+        codex_anchor_wm = cls._find_watermark(codex_ledger, cursor.last_synced_turn_id)
         if (agy_anchor_wm is None or agy_anchor_wm.boundary_digest != cursor.agy_boundary_digest) or (
             codex_anchor_wm is None or codex_anchor_wm.boundary_digest != cursor.codex_boundary_digest
         ):
             if agy_head and codex_head and agy_head.turn_id == codex_head.turn_id and agy_head.boundary_digest == codex_head.boundary_digest:
-                return CursorForkStateMachine._converged_noop(cursor, agy_ledger, codex_ledger, agy_head, codex_head)
+                return cls._converged_noop(cursor, agy_ledger, codex_ledger, agy_head, codex_head)
             src_host = HostKind.CODEX if direction == SyncDirection.CODEX_TO_AGY else HostKind.ANTIGRAVITY
-            return CursorForkStateMachine._plan_divergence(
+            return cls._plan_divergence(
                 src_host, codex_ledger if src_host == HostKind.CODEX else agy_ledger, cursor, None, agy_head, codex_head,
                 "Watermark turn missing or boundary digest mutated since last sync.",
                 lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
@@ -400,12 +512,12 @@ class CursorForkStateMachine:
 
         if agy_advanced and not codex_advanced:
             if direction == SyncDirection.CODEX_TO_AGY:
-                return CursorForkStateMachine._plan_divergence(
+                return cls._plan_divergence(
                     HostKind.CODEX, codex_ledger, cursor, agy_anchor_wm, agy_head, codex_head,
                     "Target Antigravity session has uncommitted turns ahead of Codex source.",
                     lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
                 )
-            sel = CursorForkStateMachine._select_transport_or_defer(HostKind.CODEX, lock_snapshot, transport_mode, online_rpc_write_supported)
+            sel = cls._select_transport_or_defer(HostKind.CODEX, lock_snapshot, transport_mode, online_rpc_write_supported)
             return sel if isinstance(sel, DeferredBusyTransition) else IncrementalAppendTransition(
                 "incremental_append", HostKind.ANTIGRAVITY, HostKind.CODEX, cursor,
                 agy_ledger.slice_after_watermark(cursor.last_synced_turn_id), agy_head, sel,
@@ -413,22 +525,22 @@ class CursorForkStateMachine:
 
         if codex_advanced and not agy_advanced:
             if direction == SyncDirection.AGY_TO_CODEX:
-                return CursorForkStateMachine._plan_divergence(
+                return cls._plan_divergence(
                     HostKind.ANTIGRAVITY, agy_ledger, cursor, codex_anchor_wm, agy_head, codex_head,
                     "Target Codex thread has uncommitted turns ahead of Antigravity source.",
                     lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,
                 )
-            sel = CursorForkStateMachine._select_transport_or_defer(HostKind.ANTIGRAVITY, lock_snapshot, transport_mode, online_rpc_write_supported)
+            sel = cls._select_transport_or_defer(HostKind.ANTIGRAVITY, lock_snapshot, transport_mode, online_rpc_write_supported)
             return sel if isinstance(sel, DeferredBusyTransition) else IncrementalAppendTransition(
                 "incremental_append", HostKind.CODEX, HostKind.ANTIGRAVITY, cursor,
                 codex_ledger.slice_after_watermark(cursor.last_synced_turn_id), codex_head, sel,
             )
 
         if agy_head.turn_id == codex_head.turn_id and agy_head.boundary_digest == codex_head.boundary_digest:
-            return CursorForkStateMachine._converged_noop(cursor, agy_ledger, codex_ledger, agy_head, codex_head)
+            return cls._converged_noop(cursor, agy_ledger, codex_ledger, agy_head, codex_head)
 
         src_host = HostKind.CODEX if direction == SyncDirection.CODEX_TO_AGY else HostKind.ANTIGRAVITY
-        return CursorForkStateMachine._plan_divergence(
+        return cls._plan_divergence(
             src_host, codex_ledger if src_host == HostKind.CODEX else agy_ledger, cursor, agy_anchor_wm, agy_head, codex_head,
             "Both Antigravity and Codex advanced independently past the last sync watermark.",
             lock_snapshot, transport_mode, fork_policy, online_rpc_write_supported,

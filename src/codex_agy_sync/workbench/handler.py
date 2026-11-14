@@ -15,9 +15,9 @@ import time
 from typing import Any, Mapping
 import urllib.parse
 
-from ..bridge.handoff import HandoffPendingError
-from ..bridge.handoff_resolve import UnpairedWorkspaceError
-from ..bridge.rescue_and_fork import SyncBusyLockError
+from ..bridge.handoff_store import HandoffPendingError
+from ..bridge.paths_and_locks import SyncBusyLockError
+from ..bridge.registry import UnpairedWorkspaceError
 
 _MAX_BODY_BYTES = 1_048_576
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -25,7 +25,7 @@ _ALLOWED_ORIGINS = frozenset({"127.0.0.1", "localhost", "::1"})
 _BAD_HOST_CHARS = frozenset("@/?#\\")
 
 
-def _validate_host_header(raw_host: str | None, bound_port: int) -> bool:
+def validate_host_header(raw_host: str | None, bound_port: int) -> bool:
     candidate = (raw_host or "").strip()
     if not candidate or candidate.endswith(":") or any(ch.isspace() or ch in _BAD_HOST_CHARS for ch in candidate):
         return False
@@ -44,7 +44,7 @@ def _validate_host_header(raw_host: str | None, bound_port: int) -> bool:
         return False
 
 
-def _validate_origin_header(raw_origin: str | None, bound_port: int) -> bool:
+def validate_origin_header(raw_origin: str | None, bound_port: int) -> bool:
     if raw_origin is None:
         return True
     cleaned = raw_origin.strip()
@@ -92,7 +92,7 @@ def _find_head_close_offset(html_text: str) -> int:
     return pos + col
 
 
-def _inject_html_metas(html_text: str, token: str) -> str:
+def inject_html_metas(html_text: str, token: str) -> str:
     escaped = html.escape(token, quote=True)
     metas = f'<meta name="workbench-token" content="{escaped}">\n<meta name="workbench-mode" content="stage1-live">\n'
     idx = _find_head_close_offset(html_text)
@@ -103,7 +103,7 @@ def _parse_bool_param(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
+class WorkbenchRequestHandler(BaseHTTPRequestHandler):
     server: Any
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -130,11 +130,11 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
     def _check_security_headers(self) -> bool:
         port = self.server.owner.port
         host_headers = self.headers.get_all("Host") or []
-        if len(host_headers) != 1 or not _validate_host_header(host_headers[0], port):
+        if len(host_headers) != 1 or not validate_host_header(host_headers[0], port):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden_host"})
             return False
         origin_headers = self.headers.get_all("Origin") or []
-        if len(origin_headers) > 1 or (origin_headers and not _validate_origin_header(origin_headers[0], port)):
+        if len(origin_headers) > 1 or (origin_headers and not validate_origin_header(origin_headers[0], port)):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden_origin"})
             return False
         if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
@@ -225,7 +225,7 @@ class _WorkbenchRequestHandler(BaseHTTPRequestHandler):
             except (OSError, UnicodeDecodeError) as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "ui_read_failed", "message": str(exc)})
                 return
-            rendered = _inject_html_metas(ui_text, self.server.owner.token)
+            rendered = inject_html_metas(ui_text, self.server.owner.token)
             self._send_bytes(HTTPStatus.OK, rendered.encode("utf-8"), "text/html; charset=utf-8")
             return
         if not path.startswith("/api/"):

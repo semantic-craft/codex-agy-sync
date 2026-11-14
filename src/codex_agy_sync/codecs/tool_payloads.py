@@ -13,7 +13,7 @@ from .._wire import (
     signed_int32,
     signed_int64,
 )
-from ..ledger import (
+from ..payloads import (
     AskQuestionPayload,
     DefineSubagentPayload,
     FileEditPayload,
@@ -33,8 +33,8 @@ from ..ledger import (
     SearchWebDocument,
     SearchWebPayload,
     SendMessagePayload,
-    normalize_tool_file_path,
 )
+from ..workspace import normalize_tool_file_path
 from .schema_tags import (
     AnyEnvelopeTag,
     ArtifactMetaTag,

@@ -1,4 +1,4 @@
-"""Dual-mode `HostTransportPort`, offline store projection writers, and companion store self-heal."""
+"""Dual-mode `HostTransportPort` implementation, offline store writers, and companion self-heal."""
 
 from __future__ import annotations
 
@@ -8,88 +8,48 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
-import subprocess
 import time
-from typing import Any, Protocol, Sequence
+from typing import Any, Sequence
 import uuid
 
 from .._wire import encode_string_field
 from ..codecs import (
-    AgyRawStepRow, TrajectoryWireCodec, decode_cascade_summary_proto, decode_summaries_state_proto,
-    encode_trajectory_metadata_proto, parse_annotation_pbtxt_title, read_codex_rollout_lines,
+    AgyRawStepRow, compress_zstd_rollout_bytes, decode_agy_trajectory, decode_cascade_summary_proto,
+    decode_codex_rollout, decode_summaries_state_proto, encode_agy_trajectory, encode_cascade_summary_proto,
+    encode_codex_rollout, encode_summaries_state_proto, encode_trajectory_metadata_proto,
+    parse_annotation_pbtxt_title, read_codex_rollout_lines, render_annotation_pbtxt,
+    render_transcript_row_jsonl,
 )
 from ..codecs.steps import bind_agy_step
-from ..ledger import (
+from ..events import (
     AgyGuiSafeSource, CanonicalEvent, CascadeId, CascadeSummaryProjection, CodexThreadId,
-    HostKind, RolloutLineNo, StepIndex, SubagentLineage, SummariesStateProjection,
-    TrajectoryId, TrajectoryLedger, validate_session_id,
+    HostKind, RolloutLineNo, StepIndex, SubagentLineage, SummariesStateProjection, TrajectoryId,
 )
+from ..ledger import TrajectoryLedger
+from ..workspace import validate_session_id
 from .paths_and_locks import (
     HostEnvironmentPaths, HostLockSnapshot, PresenceWalGuard, TransportMode,
-    _atomic_write_bytes, _atomic_write_text, _deterministic_uuid, _now_iso,
-    _open_readonly_sqlite, _validated_child_path,
+    atomic_write_bytes, atomic_write_text, deterministic_uuid, expand_existing_with_sidecars,
+    now_iso, open_readonly_sqlite, validated_child_path,
 )
-from .registry import (
-    ProjectRegistry, WorkspaceProjectBinding, _ensure_agy_conversation_db_schema,
-    _ensure_agy_summaries_db_schema, _ensure_codex_state_db_schema,
-)
-from .rescue_and_fork import ensure_companion_stores_complete_guarded
+from .registry import ProjectRegistry, WorkspaceProjectBinding
 from .rpc import read_agy_ledger_dual_mode, read_codex_ledger_dual_mode
-from .state_machine import generate_uuid7
+from .state_machine import HostTransportPort, generate_uuid7
+from .store_catalog import (
+    ensure_agy_conversation_db_schema, ensure_agy_summaries_db_schema, ensure_codex_state_db_schema,
+)
+
+__all__ = ["DefaultHostTransport", "HostTransportPort", "atomic_write_rollout", "resolve_effective_agy_lineage"]
 
 
-def _atomic_write_rollout(path: Path, text: str) -> None:
+def atomic_write_rollout(path: Path, text: str) -> None:
     if path.name.endswith(".zst"):
-        payload = text.encode("utf-8")
-        try:
-            from compression import zstd  # type: ignore[attr-defined]
-
-            compressed = zstd.compress(payload)
-        except ImportError:
-            try:
-                import zstandard  # type: ignore[import-not-found]
-
-                compressed = zstandard.ZstdCompressor().compress(payload)
-            except ImportError:
-                compressed = subprocess.run(["zstd", "-q", "-c"], input=payload, capture_output=True, check=True).stdout
-        _atomic_write_bytes(path, compressed)
+        atomic_write_bytes(path, compress_zstd_rollout_bytes(text))
         return
-    _atomic_write_text(path, text)
+    atomic_write_text(path, text)
 
 
-class HostTransportPort(Protocol):
-    """Port abstracting Online RPC (`LanguageServerService` / `codex app-server`) and Offline Storage."""
-
-    def read_agy_ledger(
-        self, binding: WorkspaceProjectBinding, cascade_id: CascadeId,
-        lock_snapshot: HostLockSnapshot, mode: TransportMode,
-    ) -> TrajectoryLedger: ...
-
-    def read_codex_ledger(
-        self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId,
-        lock_snapshot: HostLockSnapshot, mode: TransportMode,
-    ) -> TrajectoryLedger: ...
-
-    def apply_to_agy(
-        self, binding: WorkspaceProjectBinding, cascade_id: CascadeId | None,
-        events: Sequence[CanonicalEvent], full_ledger: TrajectoryLedger,
-        lock_snapshot: HostLockSnapshot, mode: TransportMode,
-        parent_cascade_id: CascadeId | None = None,
-        source_tag: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
-        incremental: bool = False, lineage: SubagentLineage | None = None,
-        forked_from_cascade_id: CascadeId | None = None,
-    ) -> CascadeId: ...
-
-    def apply_to_codex(
-        self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId | None,
-        events: Sequence[CanonicalEvent], full_ledger: TrajectoryLedger,
-        lock_snapshot: HostLockSnapshot, mode: TransportMode,
-        parent_thread_id: CodexThreadId | None = None,
-        incremental: bool = False, lineage: SubagentLineage | None = None,
-    ) -> CodexThreadId: ...
-
-
-def _resolve_effective_agy_lineage(
+def resolve_effective_agy_lineage(
     parent_cascade_id: CascadeId | None, lineage: SubagentLineage | None,
 ) -> SubagentLineage:
     eff_parent = parent_cascade_id or (lineage.parent_cascade_id if lineage is not None else None)
@@ -125,17 +85,20 @@ class DefaultHostTransport:
 
     def __init__(self, paths: HostEnvironmentPaths) -> None:
         self._paths = paths
-        self._codec = TrajectoryWireCodec()
 
-    def _read_agy_explicit_title(self, cascade_id: CascadeId) -> str | None:
+    @property
+    def paths(self) -> HostEnvironmentPaths:
+        return self._paths
+
+    def read_agy_explicit_title(self, cascade_id: CascadeId) -> str | None:
         validate_session_id(str(cascade_id), label="cascade_id")
-        annot_path = _validated_child_path(self._paths.agy_data_dir, "annotations", f"{cascade_id}.pbtxt", label="cascade_id")
+        annot_path = validated_child_path(self._paths.agy_data_dir, "annotations", f"{cascade_id}.pbtxt", label="cascade_id")
         pbtxt_title = parse_annotation_pbtxt_title(annot_path.read_text(encoding="utf-8", errors="replace")) if annot_path.is_file() else None
         db_title = summary_annot_title = None
         sum_db = self._paths.agy_data_dir / "conversation_summaries.db"
         if sum_db.is_file():
             try:
-                with contextlib.closing(_open_readonly_sqlite(sum_db)) as conn:
+                with contextlib.closing(open_readonly_sqlite(sum_db)) as conn:
                     row = conn.execute("SELECT title, raw_summary FROM conversation_summaries WHERE conversation_id = ?", (str(cascade_id),)).fetchone()
                 if row:
                     db_title = str(row[0]).strip() if row[0] and str(row[0]).strip() else None
@@ -146,26 +109,26 @@ class DefaultHostTransport:
                 pass
         return next((c for c in (pbtxt_title, summary_annot_title, db_title) if c), None)
 
-    def _read_persisted_agy_steps(self, conv_db: Path) -> list[AgyRawStepRow]:
-        with contextlib.closing(_open_readonly_sqlite(conv_db)) as conn:
+    def read_persisted_agy_steps(self, conv_db: Path) -> list[AgyRawStepRow]:
+        with contextlib.closing(open_readonly_sqlite(conv_db)) as conn:
             rows = conn.execute("SELECT idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format FROM steps ORDER BY idx ASC").fetchall()
         return _rows_to_raw_agy_steps(rows)
 
     def _read_agy_ledger_disk(self, binding: WorkspaceProjectBinding, cascade_id: CascadeId) -> TrajectoryLedger:
-        conv_db = _validated_child_path(self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id")
+        conv_db = validated_child_path(self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id")
         if not conv_db.is_file():
             raise FileNotFoundError(f"Antigravity conversation database not found: {conv_db}")
-        return self._codec.decode_agy_steps_to_ledger(
-            binding.workspace_path, binding.workspace_uri, self._read_persisted_agy_steps(conv_db),
-            explicit_title_override=self._read_agy_explicit_title(cascade_id),
+        return decode_agy_trajectory(
+            binding.workspace_path, binding.workspace_uri, self.read_persisted_agy_steps(conv_db),
+            explicit_title_override=self.read_agy_explicit_title(cascade_id),
         )
 
     def read_agy_ledger_with_meta(
         self, binding: WorkspaceProjectBinding, cascade_id: CascadeId, lock_snapshot: HostLockSnapshot, mode: TransportMode,
     ) -> tuple[TrajectoryLedger, TransportMode, bool]:
         return read_agy_ledger_dual_mode(
-            self._codec, binding, cascade_id, lock_snapshot, mode,
-            read_disk_fn=lambda: self._read_agy_ledger_disk(binding, cascade_id), read_title_fn=self._read_agy_explicit_title,
+            binding, cascade_id, lock_snapshot, mode,
+            read_disk_fn=lambda: self._read_agy_ledger_disk(binding, cascade_id), read_title_fn=self.read_agy_explicit_title,
         )
 
     def read_agy_ledger(
@@ -179,14 +142,14 @@ class DefaultHostTransport:
                 return cand
         return None
 
-    def _probe_codex_rollout_and_title(self, thread_id: CodexThreadId) -> tuple[Path | None, str | None]:
+    def probe_codex_rollout_and_title(self, thread_id: CodexThreadId) -> tuple[Path | None, str | None]:
         validate_session_id(str(thread_id), label="codex_thread_id")
         resolved_codex_home = self._paths.codex_home_dir.resolve(strict=False)
         state_db = self._paths.codex_home_dir / "state_5.sqlite"
         rollout_path = db_title = None
         if state_db.is_file():
             with contextlib.suppress(sqlite3.OperationalError):
-                with contextlib.closing(_open_readonly_sqlite(state_db)) as conn:
+                with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
                     row = conn.execute("SELECT rollout_path, title, name FROM threads WHERE id = ?", (str(thread_id),)).fetchone()
                 if row:
                     rollout_path = self._resolve_codex_rollout_candidate(str(row[0]), resolved_codex_home) if row[0] else None
@@ -199,13 +162,16 @@ class DefaultHostTransport:
                         db_title = str(obj["thread_name"]).strip()
         return rollout_path, db_title
 
-    def _find_codex_rollout_and_title(self, thread_id: CodexThreadId) -> tuple[Path, str | None]:
-        rollout_path, db_title = self._probe_codex_rollout_and_title(thread_id)
+    def find_codex_rollout_and_title(self, thread_id: CodexThreadId) -> tuple[Path, str | None]:
+        rollout_path, db_title = self.probe_codex_rollout_and_title(thread_id)
         if rollout_path is None:
             for sub in ("sessions", "archived_sessions"):
                 if (sroot := self._paths.codex_home_dir / sub).is_dir():
                     rsroot = sroot.resolve(strict=False)
-                    matches = [m for pat in (f"*{thread_id}.jsonl", f"*{thread_id}.jsonl.zst") for m in sorted(sroot.rglob(pat)) if m.is_file() and m.resolve(strict=False).is_relative_to(rsroot)]
+                    matches = [
+                        m for pat in (f"*{thread_id}.jsonl", f"*{thread_id}.jsonl.zst")
+                        for m in sorted(sroot.rglob(pat)) if m.is_file() and m.resolve(strict=False).is_relative_to(rsroot)
+                    ]
                     if matches:
                         rollout_path = matches[-1]
                         break
@@ -217,12 +183,12 @@ class DefaultHostTransport:
         self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId, lock_snapshot: HostLockSnapshot, mode: TransportMode,
     ) -> tuple[TrajectoryLedger, TransportMode, bool]:
         def _disk() -> TrajectoryLedger:
-            rp, title = self._find_codex_rollout_and_title(thread_id)
-            return self._codec.decode_codex_rollout_to_ledger(binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(rp), explicit_title_override=title)
+            rp, title = self.find_codex_rollout_and_title(thread_id)
+            return decode_codex_rollout(binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(rp), explicit_title_override=title)
 
         return read_codex_ledger_dual_mode(
-            self._codec, self._paths.codex_home_dir, binding, thread_id, lock_snapshot, mode,
-            read_disk_fn=_disk, read_optional_title_fn=lambda tid: self._probe_codex_rollout_and_title(tid)[1],
+            self._paths.codex_home_dir, binding, thread_id, lock_snapshot, mode,
+            read_disk_fn=_disk, read_optional_title_fn=lambda tid: self.probe_codex_rollout_and_title(tid)[1],
             resolve_rollout_fn=self._resolve_codex_rollout_candidate,
         )
 
@@ -231,31 +197,75 @@ class DefaultHostTransport:
     ) -> TrajectoryLedger:
         return self.read_codex_ledger_with_meta(binding, thread_id, lock_snapshot, mode)[0]
 
-    def _write_agy_conversation_db(
+    def candidate_target_paths(
+        self,
+        target_host: HostKind,
+        cascade_id: CascadeId | None,
+        codex_thread_id: CodexThreadId | None,
+        *,
+        binding: WorkspaceProjectBinding | None = None,
+        lineage: SubagentLineage | None = None,
+        include_primary_store: bool = True,
+    ) -> tuple[list[Path], list[tuple[Path, str]]]:
+        if cascade_id is not None:
+            validate_session_id(str(cascade_id), label="cascade_id")
+        if codex_thread_id is not None:
+            validate_session_id(str(codex_thread_id), label="codex_thread_id")
+        if target_host == HostKind.ANTIGRAVITY:
+            files = [self._paths.agy_data_dir / "conversation_summaries.db", self._paths.agy_data_dir / "agyhub_summaries_proto.pb"]
+            if binding is not None:
+                files.append(self._paths.gemini_config_dir / "projects" / f"{binding.agy_project_id}.json")
+            if cascade_id is not None:
+                files.extend(
+                    validated_child_path(rdir, "brain", str(cascade_id), ".system_generated", "logs", "transcript.jsonl", label="cascade_id")
+                    for rdir in (self._paths.agy_data_dir, self._paths.agy_cli_data_dir) if rdir is not None
+                )
+                if include_primary_store:
+                    files.append(validated_child_path(self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id"))
+                files.append(validated_child_path(self._paths.agy_data_dir, "annotations", f"{cascade_id}.pbtxt", label="cascade_id"))
+                if lineage is not None and lineage.is_subagent and lineage.parent_cascade_id is not None:
+                    files.append(validated_child_path(
+                        self._paths.agy_data_dir, "brain", str(lineage.parent_cascade_id), ".system_generated", "subagents", f"{cascade_id}.json", label="cascade_id"
+                    ))
+            return files, []
+        files = [
+            self._paths.codex_home_dir / "state_5.sqlite",
+            self._paths.codex_home_dir / ".codex-global-state.json",
+            self._paths.codex_home_dir / "session_index.jsonl",
+        ]
+        if not include_primary_store or codex_thread_id is None:
+            return files, []
+        for sub in ("sessions", "archived_sessions"):
+            if (sroot := self._paths.codex_home_dir / sub).is_dir():
+                rsroot = sroot.resolve(strict=False)
+                for pat in (f"*{codex_thread_id}.jsonl", f"*{codex_thread_id}.jsonl.zst"):
+                    files.extend(m for m in sroot.rglob(pat) if m.resolve(strict=False).is_relative_to(rsroot))
+        return files, [
+            (self._paths.codex_home_dir / "sessions", f"*{codex_thread_id}.jsonl"),
+            (self._paths.codex_home_dir / "sessions", f"*{codex_thread_id}.jsonl.zst"),
+        ]
+
+    def write_agy_conversation_db(
         self, binding: WorkspaceProjectBinding, target_cid: CascadeId,
         events: Sequence[CanonicalEvent], full_ledger: TrajectoryLedger,
         source_tag: AgyGuiSafeSource, incremental: bool,
         effective_lineage: SubagentLineage, forked_from_cascade_id: CascadeId | None,
     ) -> tuple[Path, list[AgyRawStepRow]]:
-        conv_db = _validated_child_path(self._paths.agy_data_dir, "conversations", f"{target_cid}.db", label="cascade_id")
+        conv_db = validated_child_path(self._paths.agy_data_dir, "conversations", f"{target_cid}.db", label="cascade_id")
         conv_db.parent.mkdir(parents=True, exist_ok=True)
-        traj_id = TrajectoryId(_deterministic_uuid("agy-trajectory", str(target_cid)))
+        traj_id = TrajectoryId(deterministic_uuid("agy-trajectory", str(target_cid)))
         is_incremental = incremental and conv_db.is_file() and len(events) > 0
-
         conn = sqlite3.connect(str(conv_db), timeout=10.0)
         try:
-            _ensure_agy_conversation_db_schema(conn)
-            existing_meta = conn.execute("SELECT trajectory_id FROM trajectory_meta LIMIT 1").fetchone()
-            if existing_meta:
+            ensure_agy_conversation_db_schema(conn)
+            if existing_meta := conn.execute("SELECT trajectory_id FROM trajectory_meta LIMIT 1").fetchone():
                 traj_id = TrajectoryId(existing_meta[0])
             if is_incremental:
                 max_row = conn.execute("SELECT COALESCE(MAX(idx), -1) FROM steps").fetchone()
-                start_idx = StepIndex(int(max_row[0]) + 1 if max_row else 0)
-                step_rows = self._codec.encode_events_to_agy_steps(events, starting_step_idx=start_idx)
+                step_rows = encode_agy_trajectory(events, starting_step_idx=StepIndex(int(max_row[0]) + 1 if max_row else 0))
             else:
                 conn.execute("DELETE FROM steps")
-                step_rows = self._codec.encode_ledger_to_agy_steps(full_ledger, starting_step_idx=StepIndex(0))
-
+                step_rows = encode_agy_trajectory(full_ledger, starting_step_idx=StepIndex(0))
             for raw_row in step_rows:
                 r = bind_agy_step(raw_row, str(traj_id), str(target_cid))
                 conn.execute(
@@ -267,11 +277,10 @@ class DefaultHostTransport:
                 "INSERT INTO trajectory_meta (trajectory_id, cascade_id, trajectory_type, source) VALUES (?, ?, 4, ?)",
                 (str(traj_id), str(target_cid), source_tag.proto_enum_value),
             )
-            created_iso = full_ledger.events[0].anchor.timestamp_iso if full_ledger.events else _now_iso()
+            created_iso = full_ledger.events[0].anchor.timestamp_iso if full_ledger.events else now_iso()
             tmeta_blob = encode_trajectory_metadata_proto(
                 project_id=binding.agy_project_id, workspace_uris=(binding.workspace_uri,), created_at_iso=created_iso,
-                nesting_depth=effective_lineage.nesting_depth,
-                parent_conversation_id=str(effective_lineage.parent_cascade_id or ""),
+                nesting_depth=effective_lineage.nesting_depth, parent_conversation_id=str(effective_lineage.parent_cascade_id or ""),
                 root_conversation_id=str(effective_lineage.root_cascade_id or target_cid),
                 agent_type_name=effective_lineage.agent_type_name, agent_role=effective_lineage.agent_role,
             )
@@ -289,90 +298,71 @@ class DefaultHostTransport:
 
     def _load_or_seed_hub_summaries_state(self, hub_pb_path: Path, sum_db: Path) -> SummariesStateProjection | None:
         if hub_pb_path.is_file():
-            try:
+            with contextlib.suppress(ValueError):
                 return decode_summaries_state_proto(hub_pb_path.read_bytes())
-            except ValueError:
-                pass
         if not sum_db.is_file():
             return None
         seeded: dict[CascadeId, CascadeSummaryProjection] = {}
         try:
-            conn = _open_readonly_sqlite(sum_db)
-            try:
+            with contextlib.closing(open_readonly_sqlite(sum_db)) as conn:
                 rows = conn.execute("SELECT conversation_id, raw_summary FROM conversation_summaries").fetchall()
-            finally:
-                conn.close()
             for raw_cid, raw_blob in rows:
                 if raw_cid and raw_blob:
-                    try:
+                    with contextlib.suppress(ValueError):
                         cid_obj = CascadeId(validate_session_id(str(raw_cid), label="cascade_id"))
                         seeded[cid_obj] = decode_cascade_summary_proto(bytes(raw_blob), fallback_cascade_id=cid_obj)
-                    except ValueError:
-                        continue
         except sqlite3.OperationalError:
             return None
         return SummariesStateProjection(summaries=seeded, file_mod_times={}) if seeded else None
 
-    def _write_agy_brain_and_pbtxt(
+    def write_agy_brain_and_pbtxt(
         self, binding: WorkspaceProjectBinding, target_cid: CascadeId,
         persisted_ledger: TrajectoryLedger, summary_proj: CascadeSummaryProjection,
         viewed_iso: str, effective_lineage: SubagentLineage,
     ) -> None:
-        annot_path = _validated_child_path(self._paths.agy_data_dir, "annotations", f"{target_cid}.pbtxt", label="cascade_id")
-        _atomic_write_text(annot_path, persisted_ledger.project_annotation_pbtxt(target_cid, viewed_iso).render_pbtxt())
-
+        annot_path = validated_child_path(self._paths.agy_data_dir, "annotations", f"{target_cid}.pbtxt", label="cascade_id")
+        atomic_write_text(annot_path, render_annotation_pbtxt(persisted_ledger.project_annotation_pbtxt(target_cid, viewed_iso)))
         transcript_rows = persisted_ledger.project_transcript_rows()
-        transcript_text = "\n".join(row.to_json_line() for row in transcript_rows) + ("\n" if transcript_rows else "")
+        transcript_text = "\n".join(render_transcript_row_jsonl(row) for row in transcript_rows) + ("\n" if transcript_rows else "")
         for root_dir in (self._paths.agy_data_dir, self._paths.agy_cli_data_dir):
             if root_dir is not None:
-                tx_path = _validated_child_path(
-                    root_dir, "brain", str(target_cid), ".system_generated", "logs", "transcript.jsonl", label="cascade_id"
-                )
-                _atomic_write_text(tx_path, transcript_text)
-
+                tx_path = validated_child_path(root_dir, "brain", str(target_cid), ".system_generated", "logs", "transcript.jsonl", label="cascade_id")
+                atomic_write_text(tx_path, transcript_text)
         eff_parent = effective_lineage.parent_cascade_id
         if eff_parent is not None and effective_lineage.is_subagent:
-            sidecar_path = _validated_child_path(
-                self._paths.agy_data_dir, "brain", str(eff_parent), ".system_generated", "subagents", f"{target_cid}.json", label="cascade_id"
-            )
+            sidecar_path = validated_child_path(self._paths.agy_data_dir, "brain", str(eff_parent), ".system_generated", "subagents", f"{target_cid}.json", label="cascade_id")
             sidecar_doc: dict[str, Any] = {
                 "conversationId": str(target_cid),
-                "subagentDescriptor": {
-                    "typeName": effective_lineage.agent_type_name or "self",
-                    "role": effective_lineage.agent_role or summary_proj.title,
-                },
+                "subagentDescriptor": {"typeName": effective_lineage.agent_type_name or "self", "role": effective_lineage.agent_role or summary_proj.title},
                 "state": "SUBAGENT_STATE_ALIVE",
                 "workspaceUris": [str(binding.workspace_uri)],
             }
             if effective_lineage.spawn_step_index is not None:
                 sidecar_doc["spawnStepIndex"] = int(effective_lineage.spawn_step_index)
-            _atomic_write_text(sidecar_path, json.dumps(sidecar_doc, ensure_ascii=False, separators=(",", ":")) + "\n")
+            atomic_write_text(sidecar_path, json.dumps(sidecar_doc, ensure_ascii=False, separators=(",", ":")) + "\n")
 
-    def _write_agy_companion_stores(
+    def write_agy_companion_stores(
         self, binding: WorkspaceProjectBinding, target_cid: CascadeId,
         persisted_ledger: TrajectoryLedger, persisted_step_count: int,
         conv_db: Path, source_tag: AgyGuiSafeSource, effective_lineage: SubagentLineage,
     ) -> None:
-        viewed_iso = _now_iso()
+        viewed_iso = now_iso()
         summary_proj = persisted_ledger.project_agy_cascade_summary(
-            cascade_id=target_cid, project_id=binding.agy_project_id, viewed_at_iso=viewed_iso,
-            source=source_tag, lineage=effective_lineage,
+            cascade_id=target_cid, project_id=binding.agy_project_id, viewed_at_iso=viewed_iso, source=source_tag, lineage=effective_lineage,
         )
         if summary_proj.step_count != persisted_step_count:
             summary_proj = dataclasses.replace(summary_proj, step_count=persisted_step_count)
-        self._write_agy_brain_and_pbtxt(binding, target_cid, persisted_ledger, summary_proj, viewed_iso, effective_lineage)
-
+        self.write_agy_brain_and_pbtxt(binding, target_cid, persisted_ledger, summary_proj, viewed_iso, effective_lineage)
         last_user_time, last_user_idx = summary_proj.created_at_iso, -1
         for ev in persisted_ledger.events:
             if ev.kind == "user_input":
                 last_user_time = ev.anchor.timestamp_iso or last_user_time
                 if ev.anchor.agy_step_index is not None:
                     last_user_idx = int(ev.anchor.agy_step_index)
-
         sum_db = self._paths.agy_data_dir / "conversation_summaries.db"
         sconn = sqlite3.connect(str(sum_db), timeout=10.0)
         try:
-            _ensure_agy_summaries_db_schema(sconn)
+            ensure_agy_summaries_db_schema(sconn)
             sconn.execute(
                 """
                 INSERT OR REPLACE INTO conversation_summaries (
@@ -386,20 +376,19 @@ class DefaultHostTransport:
                     summary_proj.updated_at_iso, json.dumps([str(u) for u in summary_proj.workspace_uris]),
                     summary_proj.source.summary_column_name, str(summary_proj.project_id), summary_proj.agent_name,
                     str(effective_lineage.parent_cascade_id or ""), summary_proj.nesting_depth, last_user_time,
-                    last_user_idx, str(self._paths.agy_data_dir), summary_proj.summary_proto_bytes,
+                    last_user_idx, str(self._paths.agy_data_dir), encode_cascade_summary_proto(summary_proj),
                 ),
             )
             sconn.commit()
         finally:
             sconn.close()
-
         hub_pb_path = self._paths.agy_data_dir / "agyhub_summaries_proto.pb"
         existing_hub = self._load_or_seed_hub_summaries_state(hub_pb_path, sum_db)
         conv_mtime = int(conv_db.stat().st_mtime) if conv_db.is_file() else int(time.time())
         hub_proj = persisted_ledger.project_agy_hub_summaries_state(
             existing_state=existing_hub, updated_summary=summary_proj, conv_db_path=str(conv_db), conv_db_mtime=conv_mtime,
         )
-        _atomic_write_bytes(hub_pb_path, hub_proj.proto_bytes)
+        atomic_write_bytes(hub_pb_path, encode_summaries_state_proto(hub_proj))
 
     def apply_to_agy(
         self, binding: WorkspaceProjectBinding, cascade_id: CascadeId | None,
@@ -418,18 +407,17 @@ class DefaultHostTransport:
             validate_session_id(str(cascade_id), label="cascade_id")
         if forked_from_cascade_id is not None:
             validate_session_id(str(forked_from_cascade_id), label="forked_from_cascade_id")
-
         target_cid = cascade_id or CascadeId(str(uuid.uuid4()))
         validate_session_id(str(target_cid), label="cascade_id")
-        eff_lineage = _resolve_effective_agy_lineage(parent_cascade_id, lineage)
-        conv_db, raw_persisted = self._write_agy_conversation_db(
+        eff_lineage = resolve_effective_agy_lineage(parent_cascade_id, lineage)
+        conv_db, raw_persisted = self.write_agy_conversation_db(
             binding, target_cid, events, full_ledger, source_tag, incremental, eff_lineage, forked_from_cascade_id
         )
-        persisted_ledger = self._codec.decode_agy_steps_to_ledger(
+        persisted_ledger = decode_agy_trajectory(
             workspace_path=binding.workspace_path, workspace_uri=binding.workspace_uri,
             raw_steps=raw_persisted, explicit_title_override=full_ledger.title,
         )
-        self._write_agy_companion_stores(binding, target_cid, persisted_ledger, len(raw_persisted), conv_db, source_tag, eff_lineage)
+        self.write_agy_companion_stores(binding, target_cid, persisted_ledger, len(raw_persisted), conv_db, source_tag, eff_lineage)
         return target_cid
 
     def _resolve_or_allocate_codex_rollout_path(self, target_tid: CodexThreadId, *, had_explicit_tid: bool) -> Path:
@@ -437,11 +425,8 @@ class DefaultHostTransport:
         state_db = self._paths.codex_home_dir / "state_5.sqlite"
         if state_db.is_file() and had_explicit_tid:
             try:
-                rconn = _open_readonly_sqlite(state_db)
-                try:
+                with contextlib.closing(open_readonly_sqlite(state_db)) as rconn:
                     row = rconn.execute("SELECT rollout_path FROM threads WHERE id = ?", (str(target_tid),)).fetchone()
-                finally:
-                    rconn.close()
                 if row and row[0]:
                     cand = Path(str(row[0]))
                     if not cand.is_file() and Path(f"{cand}.zst").is_file():
@@ -450,17 +435,15 @@ class DefaultHostTransport:
                         return cand
             except sqlite3.OperationalError:
                 pass
-
         now_dt = datetime.now(tz=timezone.utc)
-        ts_str = now_dt.strftime("%Y-%m-%dT%H-%M-%S")
-        rollout_path = _validated_child_path(
+        rollout_path = validated_child_path(
             self._paths.codex_home_dir, "sessions", now_dt.strftime("%Y"), now_dt.strftime("%m"),
-            now_dt.strftime("%d"), f"rollout-{ts_str}-{target_tid}.jsonl", label="codex_thread_id",
+            now_dt.strftime("%d"), f"rollout-{now_dt.strftime('%Y-%m-%dT%H-%M-%S')}-{target_tid}.jsonl", label="codex_thread_id",
         )
         rollout_path.parent.mkdir(parents=True, exist_ok=True)
         return rollout_path
 
-    def _write_codex_index_and_global_state(
+    def write_codex_index_and_global_state(
         self, binding: WorkspaceProjectBinding, target_tid: CodexThreadId, title: str,
     ) -> None:
         session_idx_path = self._paths.codex_home_dir / "session_index.jsonl"
@@ -475,32 +458,28 @@ class DefaultHostTransport:
                 except Exception:
                     pass
                 kept_lines.append(ln)
-        kept_lines.append(json.dumps({"id": str(target_tid), "thread_name": title, "updated_at": _now_iso()}, ensure_ascii=False))
-        _atomic_write_text(session_idx_path, "\n".join(kept_lines) + "\n")
-
+        kept_lines.append(json.dumps({"id": str(target_tid), "thread_name": title, "updated_at": now_iso()}, ensure_ascii=False))
+        atomic_write_text(session_idx_path, "\n".join(kept_lines) + "\n")
         global_state_path = self._paths.codex_home_dir / ".codex-global-state.json"
         gs_data: dict[str, Any] = {}
         if global_state_path.is_file():
-            try:
+            with contextlib.suppress(Exception):
                 loaded = json.loads(global_state_path.read_text(encoding="utf-8"))
                 gs_data = loaded if isinstance(loaded, dict) else {}
-            except Exception:
-                gs_data = {}
-        assignments = gs_data.get("thread-project-assignments")
+        assignments = gs_data.setdefault("thread-project-assignments", {})
         if not isinstance(assignments, dict):
             assignments = {}
             gs_data["thread-project-assignments"] = assignments
         assignments[str(target_tid)] = {"projectKind": "local", "projectId": str(binding.codex_legacy_project_id)}
-        _atomic_write_text(global_state_path, json.dumps(gs_data, ensure_ascii=False, indent=2) + "\n")
+        atomic_write_text(global_state_path, json.dumps(gs_data, ensure_ascii=False, indent=2) + "\n")
 
-    def _write_codex_companion_stores(
+    def write_codex_companion_stores(
         self, binding: WorkspaceProjectBinding, target_tid: CodexThreadId,
         rollout_path: Path, full_ledger: TrajectoryLedger,
         lineage: SubagentLineage | None, effective_parent_tid: CodexThreadId | None,
     ) -> None:
         thread_proj = full_ledger.project_codex_thread_summary(thread_id=target_tid, project_id=binding.codex_project_id)
-        created_sec = max(1, thread_proj.created_at_ms // 1000)
-        updated_sec = max(1, thread_proj.updated_at_ms // 1000)
+        created_sec, updated_sec = max(1, thread_proj.created_at_ms // 1000), max(1, thread_proj.updated_at_ms // 1000)
         eff_agent_role = (lineage.agent_type_name or None) if lineage is not None else None
         eff_agent_nick = (lineage.agent_role or None) if lineage is not None else None
         thread_source_val = (
@@ -515,11 +494,9 @@ class DefaultHostTransport:
             )
             if (lineage is not None and lineage.is_subagent) else "desktop"
         )
-
-        state_db = self._paths.codex_home_dir / "state_5.sqlite"
-        conn = sqlite3.connect(str(state_db), timeout=10.0)
+        conn = sqlite3.connect(str(self._paths.codex_home_dir / "state_5.sqlite"), timeout=10.0)
         try:
-            _ensure_codex_state_db_schema(conn)
+            ensure_codex_state_db_schema(conn)
             conn.execute(
                 """
                 INSERT OR REPLACE INTO threads (
@@ -540,7 +517,7 @@ class DefaultHostTransport:
             conn.commit()
         finally:
             conn.close()
-        self._write_codex_index_and_global_state(binding, target_tid, thread_proj.title)
+        self.write_codex_index_and_global_state(binding, target_tid, thread_proj.title)
 
     def apply_to_codex(
         self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId | None,
@@ -557,82 +534,59 @@ class DefaultHostTransport:
             validate_session_id(str(thread_id), label="codex_thread_id")
         if parent_thread_id is not None:
             validate_session_id(str(parent_thread_id), label="parent_codex_thread_id")
-
         target_tid = thread_id or CodexThreadId(generate_uuid7())
         validate_session_id(str(target_tid), label="codex_thread_id")
         eff_parent_tid = parent_thread_id or (lineage.parent_codex_thread_id if lineage is not None else None)
         if eff_parent_tid is not None:
             validate_session_id(str(eff_parent_tid), label="parent_codex_thread_id")
-
         rollout_path = self._resolve_or_allocate_codex_rollout_path(target_tid, had_explicit_tid=(thread_id is not None))
         if incremental and rollout_path.is_file() and len(events) > 0:
             prior_lines = [r.raw_json for r in read_codex_rollout_lines(rollout_path)]
-            delta_rollout = self._codec.encode_events_to_codex_rollout(
+            delta_rollout = encode_codex_rollout(
                 events, starting_line_no=RolloutLineNo(len(prior_lines) + 1),
                 session_id=str(target_tid), cwd=str(binding.workspace_path),
             )
-            _atomic_write_rollout(rollout_path, "\n".join([*prior_lines, *(r.raw_json for r in delta_rollout)]) + "\n")
+            atomic_write_rollout(rollout_path, "\n".join([*prior_lines, *(r.raw_json for r in delta_rollout)]) + "\n")
         else:
-            full_rollout = self._codec.encode_ledger_to_codex_rollout(
+            full_rollout = encode_codex_rollout(
                 full_ledger, starting_line_no=RolloutLineNo(1),
                 session_id=str(target_tid), cwd=str(binding.workspace_path),
             )
-            _atomic_write_rollout(rollout_path, "\n".join(r.raw_json for r in full_rollout) + ("\n" if full_rollout else ""))
-
-        self._write_codex_companion_stores(binding, target_tid, rollout_path, full_ledger, lineage, eff_parent_tid)
+            atomic_write_rollout(rollout_path, "\n".join(r.raw_json for r in full_rollout) + ("\n" if full_rollout else ""))
+        self.write_codex_companion_stores(binding, target_tid, rollout_path, full_ledger, lineage, eff_parent_tid)
         return target_tid
 
-    def _agy_companions_missing(
+    def agy_companions_missing(
         self, binding: WorkspaceProjectBinding, cascade_id: CascadeId, lineage: SubagentLineage,
     ) -> bool:
-        if not (self._paths.gemini_config_dir / "projects" / f"{binding.agy_project_id}.json").is_file():
+        cands, _ = self.candidate_target_paths(
+            HostKind.ANTIGRAVITY, cascade_id, None, binding=binding, lineage=lineage, include_primary_store=False
+        )
+        if any(not p.is_file() for p in cands):
             return True
-        if not _validated_child_path(self._paths.agy_data_dir, "annotations", f"{cascade_id}.pbtxt", label="cascade_id").is_file():
-            return True
-        for root_dir in (self._paths.agy_data_dir, self._paths.agy_cli_data_dir):
-            if root_dir is not None and not _validated_child_path(
-                root_dir, "brain", str(cascade_id), ".system_generated", "logs", "transcript.jsonl", label="cascade_id"
-            ).is_file():
-                return True
-        if lineage.is_subagent and lineage.parent_cascade_id is not None and not _validated_child_path(
-            self._paths.agy_data_dir, "brain", str(lineage.parent_cascade_id), ".system_generated", "subagents", f"{cascade_id}.json", label="cascade_id"
-        ).is_file():
-            return True
-
         sum_db = self._paths.agy_data_dir / "conversation_summaries.db"
         hub_pb = self._paths.agy_data_dir / "agyhub_summaries_proto.pb"
-        if not sum_db.is_file() or not hub_pb.is_file():
-            return True
         try:
-            conn = _open_readonly_sqlite(sum_db)
-            try:
+            with contextlib.closing(open_readonly_sqlite(sum_db)) as conn:
                 has_row = conn.execute("SELECT 1 FROM conversation_summaries WHERE conversation_id = ?", (str(cascade_id),)).fetchone() is not None
-            finally:
-                conn.close()
-            if not has_row:
-                return True
-            return cascade_id not in decode_summaries_state_proto(hub_pb.read_bytes()).summaries
+            return (not has_row) or (cascade_id not in decode_summaries_state_proto(hub_pb.read_bytes()).summaries)
         except (sqlite3.OperationalError, ValueError):
             return True
 
-    def _codex_companions_missing(self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId) -> bool:
+    def codex_companions_missing(self, binding: WorkspaceProjectBinding, thread_id: CodexThreadId) -> bool:
         state_db = self._paths.codex_home_dir / "state_5.sqlite"
         session_idx = self._paths.codex_home_dir / "session_index.jsonl"
         gs_path = self._paths.codex_home_dir / ".codex-global-state.json"
         if not (state_db.is_file() and session_idx.is_file() and gs_path.is_file()):
             return True
         try:
-            conn = _open_readonly_sqlite(state_db)
-            try:
+            with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
                 has_thread = conn.execute("SELECT 1 FROM threads WHERE id = ?", (str(thread_id),)).fetchone() is not None
                 has_proj = conn.execute("SELECT 1 FROM project_roots WHERE project_id = ?", (str(binding.codex_project_id),)).fetchone() is not None
-            finally:
-                conn.close()
             if not (has_thread and has_proj):
                 return True
         except sqlite3.OperationalError:
             return True
-
         found_idx = any(
             str(thread_id) in ln and json.loads(ln).get("id") == str(thread_id)
             for ln in session_idx.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -652,13 +606,68 @@ class DefaultHostTransport:
             and isinstance(local_projects, dict) and str(binding.codex_legacy_project_id) in local_projects
         )
 
+    def _heal_agy_companions(
+        self, binding: WorkspaceProjectBinding, cascade_id: CascadeId, codex_thread_id: CodexThreadId,
+        agy_ledger: TrajectoryLedger, source_tag: AgyGuiSafeSource, lineage: SubagentLineage,
+        guard: PresenceWalGuard, registry: ProjectRegistry, conv_db: Path,
+    ) -> WorkspaceProjectBinding:
+        with contextlib.suppress(BlockingIOError):
+            with guard.acquire_offline_write_locks(HostKind.ANTIGRAVITY, cascade_id, codex_thread_id):
+                agy_cands, _ = self.candidate_target_paths(
+                    HostKind.ANTIGRAVITY, cascade_id, None, binding=binding, lineage=lineage, include_primary_store=False
+                )
+                backup = guard.create_offline_backup(
+                    HostKind.ANTIGRAVITY, str(cascade_id), expand_existing_with_sidecars(agy_cands), expected_new_files=agy_cands
+                )
+                try:
+                    binding = registry.ensure_agy_binding(binding.workspace_path)
+                    raw_rows = self.read_persisted_agy_steps(conv_db)
+                    persisted = decode_agy_trajectory(
+                        workspace_path=binding.workspace_path, workspace_uri=binding.workspace_uri,
+                        raw_steps=raw_rows, explicit_title_override=agy_ledger.title,
+                    )
+                    self.write_agy_companion_stores(
+                        binding, cascade_id, persisted, len(raw_rows), conv_db, source_tag,
+                        resolve_effective_agy_lineage(lineage.parent_cascade_id, lineage),
+                    )
+                except Exception:
+                    backup.restore()
+                    raise
+        return binding
+
+    def _heal_codex_companions(
+        self, binding: WorkspaceProjectBinding, cascade_id: CascadeId, codex_thread_id: CodexThreadId,
+        codex_ledger: TrajectoryLedger, lineage: SubagentLineage,
+        guard: PresenceWalGuard, registry: ProjectRegistry,
+    ) -> WorkspaceProjectBinding:
+        with contextlib.suppress(BlockingIOError, FileNotFoundError):
+            with guard.acquire_offline_write_locks(HostKind.CODEX, cascade_id, codex_thread_id):
+                rollout_path, _ = self.find_codex_rollout_and_title(codex_thread_id)
+                cx_cands, _ = self.candidate_target_paths(HostKind.CODEX, None, None, include_primary_store=False)
+                backup = guard.create_offline_backup(
+                    HostKind.CODEX, str(codex_thread_id), expand_existing_with_sidecars(cx_cands), expected_new_files=cx_cands
+                )
+                try:
+                    binding = registry.ensure_codex_binding(binding.workspace_path)
+                    self.write_codex_companion_stores(
+                        binding, codex_thread_id, rollout_path, codex_ledger, lineage, lineage.parent_codex_thread_id
+                    )
+                except Exception:
+                    backup.restore()
+                    raise
+        return binding
+
     def ensure_companion_stores_complete(
         self, binding: WorkspaceProjectBinding, cascade_id: CascadeId, codex_thread_id: CodexThreadId,
         agy_ledger: TrajectoryLedger | None, codex_ledger: TrajectoryLedger | None,
         locks: HostLockSnapshot, mode: TransportMode, source_tag: AgyGuiSafeSource,
         lineage: SubagentLineage, guard: PresenceWalGuard, registry: ProjectRegistry,
     ) -> WorkspaceProjectBinding:
-        return ensure_companion_stores_complete_guarded(
-            self, binding, cascade_id, codex_thread_id, agy_ledger, codex_ledger,
-            locks, mode, source_tag, lineage, guard, registry,
-        )
+        if mode == TransportMode.ONLINE_RPC or agy_ledger is None or codex_ledger is None:
+            return binding
+        conv_db = validated_child_path(self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id")
+        if conv_db.is_file() and locks.can_write_agy_offline() and self.agy_companions_missing(binding, cascade_id, lineage):
+            binding = self._heal_agy_companions(binding, cascade_id, codex_thread_id, agy_ledger, source_tag, lineage, guard, registry, conv_db)
+        if locks.can_write_codex_offline() and self.codex_companions_missing(binding, codex_thread_id):
+            binding = self._heal_codex_companions(binding, cascade_id, codex_thread_id, codex_ledger, lineage, guard, registry)
+        return binding

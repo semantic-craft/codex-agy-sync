@@ -19,9 +19,9 @@ from codex_agy_sync.codecs import (
     decode_agy_trajectory, decode_codex_rollout, encode_agy_trajectory, encode_codex_rollout,
 )
 from codex_agy_sync.ledger import (
-    _canonical_event_digest_payload, AssistantTextEvent, CascadeId, CodexThreadId,
+    AssistantTextEvent, CascadeId, CodexThreadId,
     EventOriginAnchor, HostKind, ThinkingEvent, ToolCallEvent, ToolResultEvent,
-    TrajectoryLedger, TurnId, UserInputEvent,
+    TrajectoryLedger, TurnId, UserInputEvent, canonical_event_digest_payload,
 )
 from tests._helpers import BridgeSandboxBase
 
@@ -124,8 +124,8 @@ class TestRoundtripAndCli(BridgeSandboxBase):
         )
         for orig_call, rt_call in zip(orig_calls, rt_calls):
             self.assertEqual(
-                _canonical_event_digest_payload(rt_call),
-                _canonical_event_digest_payload(orig_call),
+                canonical_event_digest_payload(rt_call),
+                canonical_event_digest_payload(orig_call),
             )
             self.assertEqual(rt_call.payload, orig_call.payload)
             paired_call, paired_res = rt_agy_ledger.call_and_result(rt_call.call_id)
@@ -145,17 +145,17 @@ class TestRoundtripAndCli(BridgeSandboxBase):
             hop_calls = [e for e in cur_ledger.events if isinstance(e, ToolCallEvent)]
             self.assertEqual([c.payload for c in hop_calls], [c.payload for c in orig_calls])
             self.assertEqual(
-                [_canonical_event_digest_payload(c) for c in hop_calls],
-                [_canonical_event_digest_payload(c) for c in orig_calls],
+                [canonical_event_digest_payload(c) for c in hop_calls],
+                [canonical_event_digest_payload(c) for c in orig_calls],
             )
 
         self.assertEqual(
-            [_canonical_event_digest_payload(r) for r in codex_results],
-            [_canonical_event_digest_payload(r) for r in orig_results],
+            [canonical_event_digest_payload(r) for r in codex_results],
+            [canonical_event_digest_payload(r) for r in orig_results],
         )
         self.assertEqual(
-            [_canonical_event_digest_payload(r) for r in rt_results],
-            [_canonical_event_digest_payload(r) for r in orig_results],
+            [canonical_event_digest_payload(r) for r in rt_results],
+            [canonical_event_digest_payload(r) for r in orig_results],
         )
         self.assertEqual(codex_ledger.title, orig_agy_ledger.title)
         self.assertEqual(rt_agy_ledger.title, orig_agy_ledger.title)
@@ -247,12 +247,12 @@ class TestRoundtripAndCli(BridgeSandboxBase):
             [(c.tool_name, c.payload) for c in orig_calls],
         )
         self.assertEqual(
-            [_canonical_event_digest_payload(c) for c in agy_calls],
-            [_canonical_event_digest_payload(c) for c in orig_calls],
+            [canonical_event_digest_payload(c) for c in agy_calls],
+            [canonical_event_digest_payload(c) for c in orig_calls],
         )
         self.assertEqual(
-            [_canonical_event_digest_payload(r) for r in agy_results],
-            [_canonical_event_digest_payload(r) for r in orig_results],
+            [canonical_event_digest_payload(r) for r in agy_results],
+            [canonical_event_digest_payload(r) for r in orig_results],
         )
         self.assertEqual(
             [(str(r.call_id), r.output_text, r.is_error) for r in rt_results],
@@ -441,7 +441,7 @@ class TestRoundtripAndCli(BridgeSandboxBase):
                 text="Created.",
             ),
         ]
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             cid,
             t1_events,
@@ -481,7 +481,7 @@ class TestRoundtripAndCli(BridgeSandboxBase):
                 text="Preserved.",
             ),
         ]
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             cid,
             t2_events,
@@ -515,20 +515,20 @@ class TestRoundtripAndCli(BridgeSandboxBase):
             sock_path = spaths.codex_home_dir / "app-server.sock"
 
             sock_path.write_text("not-a-socket", encoding="utf-8")
-            self.assertIsNone(sguard._discover_codex_daemon())
+            self.assertIsNone(sguard.discover_codex_daemon())
             sock_path.unlink()
 
             srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 srv.bind(str(sock_path))
                 srv.listen(1)
-                live_ep = sguard._discover_codex_daemon()
+                live_ep = sguard.discover_codex_daemon()
                 self.assertIsNotNone(live_ep)
             finally:
                 srv.close()
 
             self.assertTrue(sock_path.exists())
-            self.assertIsNone(sguard._discover_codex_daemon())
+            self.assertIsNone(sguard.discover_codex_daemon())
 
     def test_verify_skill_tmp_guard_rejects_tmp_run_dir(self) -> None:
         verify_script = (

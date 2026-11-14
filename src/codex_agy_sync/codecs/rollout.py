@@ -9,15 +9,43 @@ import re
 import subprocess
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, Tuple
 
-from .. import __version__
-from ..ledger import (
-    INTERRUPTED_TOOL_OUTPUT, AssistantTextEvent, CanonicalEvent, CanonicalToolPayload,
-    CheckpointEvent, EventOriginAnchor, FileEditPayload, HostExtensionEnvelope, HostKind,
-    MediaAttachment, OpaqueToolPayload, RolloutLineNo, RunCommandPayload,
-    SearchWebDocument, SearchWebPayload, SystemEvent, TaskBoundaryEvent,
-    ThinkingEvent, ToolCallEvent, ToolCallId, ToolResultEvent, TrajectoryLedger,
-    TurnId, UserInputEvent, WorkspacePath, WorkspaceRootUri, normalize_tool_file_path,
+from ..events import (
+    INTERRUPTED_TOOL_OUTPUT,
+    AssistantTextEvent,
+    CanonicalEvent,
+    CheckpointEvent,
+    EventOriginAnchor,
+    HostExtensionEnvelope,
+    MediaAttachment,
+    SystemEvent,
+    TaskBoundaryEvent,
+    ThinkingEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    UserInputEvent,
+    is_nonterminal_work_or_abort_event,
+    is_terminal_completion_event,
 )
+from ..ledger import TrajectoryLedger
+from ..payloads import (
+    CanonicalToolPayload,
+    FileEditPayload,
+    OpaqueToolPayload,
+    RunCommandPayload,
+    SearchWebDocument,
+    SearchWebPayload,
+)
+from ..workspace import (
+    PACKAGE_VERSION,
+    HostKind,
+    RolloutLineNo,
+    ToolCallId,
+    TurnId,
+    WorkspacePath,
+    WorkspaceRootUri,
+    normalize_tool_file_path,
+)
+from .rpc_thread import decode_codex_rpc_thread_to_ledger, splice_rollout_completed_prefix
 from .schema_tags import CodexRawRolloutLine
 from .tools import (
     TOOL_SPEC_BY_PAYLOAD_KIND, apply_tool_result_meta, decode_tool_payload,
@@ -74,20 +102,39 @@ class _RolloutTurnTracker:
         return self.current_turn_id
 
 
-def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
-    """Decompress zstd-compressed Codex rollout bytes into UTF-8 text."""
+def _zstd_module() -> tuple[str, Any] | None:
     try:
         from compression import zstd  # type: ignore[attr-defined]
 
-        return zstd.decompress(raw_bytes).decode("utf-8", errors="replace")
+        return ("stdlib", zstd)
     except ImportError:
         try:
             import zstandard  # type: ignore[import-not-found]
 
-            return zstandard.ZstdDecompressor().decompress(raw_bytes).decode("utf-8", errors="replace")
+            return ("zstandard", zstandard)
         except ImportError:
-            proc = subprocess.run(["zstd", "-d", "-c"], input=raw_bytes, capture_output=True, check=True)
-            return proc.stdout.decode("utf-8", errors="replace")
+            return None
+
+
+def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
+    """Decompress zstd-compressed Codex rollout bytes into UTF-8 text."""
+    backend = _zstd_module()
+    if backend is not None:
+        kind, mod = backend
+        data = mod.decompress(raw_bytes) if kind == "stdlib" else mod.ZstdDecompressor().decompress(raw_bytes)
+        return data.decode("utf-8", errors="replace")
+    proc = subprocess.run(["zstd", "-d", "-c"], input=raw_bytes, capture_output=True, check=True)
+    return proc.stdout.decode("utf-8", errors="replace")
+
+
+def compress_zstd_rollout_bytes(text: str) -> bytes:
+    """Compress UTF-8 Codex rollout text into zstd frame bytes."""
+    payload = text.encode("utf-8")
+    backend = _zstd_module()
+    if backend is not None:
+        kind, mod = backend
+        return mod.compress(payload) if kind == "stdlib" else mod.ZstdCompressor().compress(payload)
+    return subprocess.run(["zstd", "-q", "-c"], input=payload, capture_output=True, check=True).stdout
 
 
 def iter_codex_rollout_lines(path: Path) -> Iterator[CodexRawRolloutLine]:
@@ -538,19 +585,25 @@ def _encode_single_codex_event(
 
 
 def encode_codex_rollout(
-    events: Sequence[CanonicalEvent],
+    ledger_or_events: TrajectoryLedger | Sequence[CanonicalEvent],
     starting_line_no: RolloutLineNo = RolloutLineNo(1),
     session_id: str | None = None,
     cwd: str | None = None,
 ) -> Tuple[CodexRawRolloutLine, ...]:
-    """Serialize a slice of `CanonicalEvent` nodes into Codex `rollout-*.jsonl` lines."""
+    """Serialize a `TrajectoryLedger` or slice of `CanonicalEvent` nodes into Codex `rollout-*.jsonl` lines."""
+    if isinstance(ledger_or_events, TrajectoryLedger):
+        events: Sequence[CanonicalEvent] = ledger_or_events.events
+        if cwd is None:
+            cwd = str(ledger_or_events.workspace_path)
+    else:
+        events = ledger_or_events
     lines: list[CodexRawRolloutLine] = []
     next_line = int(starting_line_no)
 
     def _append_record(ts: str, rtype: str, payload: Mapping[str, Any]) -> None:
         nonlocal next_line
         if rtype == "session_meta":
-            payload = {"cli_version": __version__, **payload}
+            payload = {"cli_version": PACKAGE_VERSION, **payload}
         record = {"timestamp": ts or "2026-01-01T00:00:00Z", "ordinal": next_line - 1, "type": rtype, "payload": payload}
         lines.append(CodexRawRolloutLine(line_no=RolloutLineNo(next_line), raw_json=json.dumps(record, ensure_ascii=False, separators=(",", ":"))))
         next_line += 1
@@ -598,29 +651,8 @@ def encode_codex_rollout(
             dangling_turn_calls.append(ev)
 
     if active_turn is not None and not active_turn_closed and not dangling_turn_calls:
-        from ..ledger import _is_nonterminal_work_or_abort_event, _is_terminal_completion_event
-
-        lw = max((i for i, e in enumerate(turn_events_buf) if _is_nonterminal_work_or_abort_event(e)), default=-1)
-        lc = max((i for i, e in enumerate(turn_events_buf) if _is_terminal_completion_event(e)), default=-1)
+        lw = max((i for i, e in enumerate(turn_events_buf) if is_nonterminal_work_or_abort_event(e)), default=-1)
+        lc = max((i for i, e in enumerate(turn_events_buf) if is_terminal_completion_event(e)), default=-1)
         if lw <= lc and not any(ext.extension_type == "agy_step_status" for e in turn_events_buf for ext in e.anchor.host_extensions):
             _append_record(last_ts, "event_msg", {"type": "task_complete", "turn_id": str(active_turn), "root_turn_id": str(active_turn), "last_agent_message": "Turn complete"})
     return tuple(lines)
-
-
-decode_codex_rollout_to_ledger = decode_codex_rollout
-encode_events_to_codex_rollout = encode_codex_rollout
-
-
-def encode_ledger_to_codex_rollout(
-    ledger_or_events: TrajectoryLedger | Sequence[CanonicalEvent],
-    starting_line_no: RolloutLineNo = RolloutLineNo(1),
-    session_id: str | None = None,
-    cwd: str | None = None,
-) -> Tuple[CodexRawRolloutLine, ...]:
-    """Encode a `TrajectoryLedger` or event sequence into Codex `rollout-*.jsonl` lines."""
-    if isinstance(ledger_or_events, TrajectoryLedger):
-        return encode_codex_rollout(ledger_or_events.events, starting_line_no, session_id=session_id, cwd=cwd if cwd is not None else str(ledger_or_events.workspace_path))
-    return encode_codex_rollout(ledger_or_events, starting_line_no, session_id=session_id, cwd=cwd)
-
-
-from .rpc_thread import decode_codex_rpc_thread_to_ledger, splice_rollout_completed_prefix  # noqa: E402,F401

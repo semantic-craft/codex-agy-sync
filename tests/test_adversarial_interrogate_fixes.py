@@ -24,18 +24,18 @@ from codex_agy_sync import (
     ToolCallEvent, ToolCallId, ToolResultEvent, TrajectoryLedger, TransportMode,
     TurnId, UserInputEvent, normalize_tool_file_path, parse_workspace_identity,
 )
-from codex_agy_sync.bridge.paths_and_locks import _is_sqlite_shm_wal_locked, _open_nonblocking_ex_flock
+from codex_agy_sync.bridge.paths_and_locks import is_sqlite_shm_wal_locked, open_nonblocking_ex_flock
 from codex_agy_sync.cli import main as cli_main
 from codex_agy_sync.codecs import (
-    decode_agy_steps_to_ledger, decode_codex_rpc_thread_to_ledger, encode_events_to_agy_steps,
-    encode_ledger_to_codex_rollout, read_codex_rollout_lines,
+    decode_agy_trajectory, decode_codex_rpc_thread_to_ledger, encode_agy_trajectory,
+    encode_codex_rollout, read_codex_rollout_lines,
 )
 from codex_agy_sync.codecs.tool_payloads import decode_unified_diff_block, encode_unified_diff_block
 from tests._helpers import BridgeSandboxBase
 
 
 def _render_rollout_jsonl(ledger: TrajectoryLedger, tid: CodexThreadId) -> str:
-    return "".join(f"{ln.raw_json}\n" for ln in encode_ledger_to_codex_rollout(ledger, session_id=str(tid)))
+    return "".join(f"{ln.raw_json}\n" for ln in encode_codex_rollout(ledger, session_id=str(tid)))
 
 
 def _turn_events(
@@ -69,7 +69,7 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         ledger = TrajectoryLedger.from_events(
             self.ws_path, self.ws_uri, events, recompute_agy_step_indices=True, explicit_title_override=title,  # type: ignore[arg-type]
         )
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding, cid, list(ledger.events), ledger, self.bridge.guard.probe_locks(cid, None), TransportMode.OFFLINE_STORAGE,
         )
         return ledger
@@ -168,7 +168,7 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
             anchor=EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("turn-1"), timestamp_iso="2026-11-12T10:00:02Z", agy_step_index=StepIndex(2)),
             call_id=ToolCallId("call-diff-1"), tool_name="edit_file", output_text="Applied diff", is_error=False, payload=edit_pl,
         )
-        raw_steps = encode_events_to_agy_steps([
+        raw_steps = encode_agy_trajectory([
             UserInputEvent(
                 kind="user_input",
                 anchor=EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("turn-1"), timestamp_iso="2026-11-12T10:00:00Z", agy_step_index=StepIndex(0)),
@@ -177,7 +177,7 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
             edit_ev,
             res_ev,
         ])
-        rt_ledger = decode_agy_steps_to_ledger(self.ws_path, self.ws_uri, raw_steps)
+        rt_ledger = decode_agy_trajectory(self.ws_path, self.ws_uri, raw_steps)
         rt_calls = [e for e in rt_ledger.events if isinstance(e, ToolCallEvent)]
         self.assertEqual(len(rt_calls), 1)
         assert isinstance(rt_calls[0].payload, FileEditPayload)
@@ -193,8 +193,8 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         zst_path = zst_dir / f"rollout-2026-11-12T10-00-00-{tid}.jsonl.zst"
         zst_path.write_bytes(zstd.compress(_render_rollout_jsonl(t1_ledger, tid).encode("utf-8")))
         with self.bridge.guard.acquire_offline_write_locks(HostKind.CODEX, None, tid):
-            self.bridge._transport._write_codex_companion_stores(
-                binding, tid, zst_path, t1_ledger, self.bridge._resolve_session_lineage(binding, None, tid), None,
+            self.bridge.transport.write_codex_companion_stores(
+                binding, tid, zst_path, t1_ledger, self.bridge.resolve_session_lineage(binding, None, tid), None,
             )
 
         rec1 = self.bridge.sync_session(self.workspace_dir, codex_thread_id=tid, direction=SyncDirection.CODEX_TO_AGY)
@@ -231,7 +231,7 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         presence_dir = self.paths.agy_data_dir / "presence"
         presence_dir.mkdir(parents=True, exist_ok=True)
         lock_file = presence_dir / f"{cid}.lock"
-        lock_fd = _open_nonblocking_ex_flock(lock_file, create=True)
+        lock_fd = open_nonblocking_ex_flock(lock_file, create=True)
         try:
             busy_rec = self.bridge.sync_session(
                 self.workspace_dir, cascade_id=cid, codex_thread_id=tid,
@@ -339,8 +339,8 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         rpath = rdir / f"rollout-2026-11-12T11-00-00-{tid_stream}.jsonl"
         rpath.write_text(_render_rollout_jsonl(t1_led, tid_stream), encoding="utf-8")
         with self.bridge.guard.acquire_offline_write_locks(HostKind.CODEX, None, tid_stream):
-            self.bridge._transport._write_codex_companion_stores(
-                binding, tid_stream, rpath, t1_led, self.bridge._resolve_session_lineage(binding, None, tid_stream), None,
+            self.bridge.transport.write_codex_companion_stores(
+                binding, tid_stream, rpath, t1_led, self.bridge.resolve_session_lineage(binding, None, tid_stream), None,
             )
 
         rec_init = self.bridge.sync_session(
@@ -478,7 +478,7 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         try:
             assert proc.stdout is not None
             self.assertEqual(proc.stdout.readline().strip(), "LOCKED")
-            self.assertTrue(_is_sqlite_shm_wal_locked(state_db) and _is_sqlite_shm_wal_locked(conv_db))
+            self.assertTrue(is_sqlite_shm_wal_locked(state_db) and is_sqlite_shm_wal_locked(conv_db))
             active_snap = self.bridge.guard.probe_locks(cid, tid)
             self.assertTrue(active_snap.codex_wal_active and active_snap.agy_wal_active)
 
@@ -504,14 +504,14 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         agy_proj_json = self.paths.gemini_config_dir / "projects" / f"{ro_b.agy_project_id}.json"
         from codex_agy_sync.bridge import registry as reg_mod
 
-        real_write = reg_mod._atomic_write_text
+        real_write = reg_mod.atomic_write_text
 
         def _fail_gs(target: Path, content: str) -> None:
             if target.name == ".codex-global-state.json":
                 raise OSError("Simulated global state write failure")
             real_write(target, content)
 
-        with mock.patch("codex_agy_sync.bridge.registry._atomic_write_text", side_effect=_fail_gs):
+        with mock.patch("codex_agy_sync.bridge.registry.atomic_write_text", side_effect=_fail_gs):
             with self.assertRaises(OSError):
                 self.bridge.pair_workspace(fresh_ws)
         self.assertFalse(agy_proj_json.exists())
@@ -528,21 +528,21 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         tx_file.unlink()
         from codex_agy_sync.bridge import transport as tp_mod
 
-        real_tp_write = tp_mod._atomic_write_text
+        real_tp_write = tp_mod.atomic_write_text
 
         def _fail_tx(target: Path, content: str) -> None:
             if target.name == "transcript.jsonl":
                 raise RuntimeError("boom")
             real_tp_write(target, content)
 
-        with mock.patch("codex_agy_sync.bridge.transport._atomic_write_text", side_effect=_fail_tx):
+        with mock.patch("codex_agy_sync.bridge.transport.atomic_write_text", side_effect=_fail_tx):
             with self.assertRaises(RuntimeError):
                 self.bridge.sync_session(self.workspace_dir, cascade_id=cid, codex_thread_id=tid)
         self.assertFalse(annot_file.exists())
 
         self._seed_agy_session(cid, t1 + _turn_events(HostKind.ANTIGRAVITY, "turn-2-agy", "AGY branch", "AGY reply", ts_base="2026-11-12T12:01:0"))
         t2_codex = t1 + _turn_events(HostKind.CODEX, "turn-2-codex", "Codex branch", "Codex reply", ts_base="2026-11-12T12:02:0")
-        rpath, _ = self.bridge._transport._find_codex_rollout_and_title(tid)
+        rpath, _ = self.bridge.transport.find_codex_rollout_and_title(tid)
         rpath.write_text(
             _render_rollout_jsonl(TrajectoryLedger.from_events(self.ws_path, self.ws_uri, t2_codex), tid),
             encoding="utf-8",
@@ -609,9 +609,9 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
             if lock_path == cand and not create:
                 lock_path.unlink(missing_ok=True)
                 raise FileNotFoundError(str(lock_path))
-            return _open_nonblocking_ex_flock(lock_path, create=create)
+            return open_nonblocking_ex_flock(lock_path, create=create)
 
-        with mock.patch("codex_agy_sync.bridge.paths_and_locks._open_nonblocking_ex_flock", side_effect=_racy_open):
+        with mock.patch("codex_agy_sync.bridge.paths_and_locks.open_nonblocking_ex_flock", side_effect=_racy_open):
             with self.bridge.guard.acquire_offline_write_locks(HostKind.ANTIGRAVITY, cid, None) as snap:
                 self.assertTrue(snap.can_write_agy_offline() and cand.exists())
         self.assertFalse(cand.exists())

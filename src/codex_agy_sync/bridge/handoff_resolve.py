@@ -1,4 +1,4 @@
-"""Workspace pairing diagnosis, candidate discovery, and UX mode resolution for `handoff`."""
+"""Handoff candidate discovery, UX mode resolution, and single execution entrypoint."""
 
 from __future__ import annotations
 
@@ -6,83 +6,48 @@ from dataclasses import dataclass
 import dataclasses
 from pathlib import Path
 import sys
-from typing import Any, Callable, Sequence
+from typing import Callable, Sequence
 
-from ..ledger import HostKind, TrajectoryLedger, WorkspacePath, WorkspaceRootUri, parse_workspace_identity, validate_session_id
-from ._handoff_scan import (
+from ..events import HostKind
+from ..ledger import TrajectoryLedger
+from ..workspace import validate_session_id
+from .handoff import handoff_ledger, handoff_session, read_handoff_source
+from .handoff_store import (
+    HandoffCancelledError,
+    HandoffPendingError,
+    HandoffReceipt,
     assert_source_belongs_to_binding,
     discover_agy_entries,
     discover_codex_entries,
     infer_direction_from_source_id,
+    ledger_seed_fingerprint,
     load_workspace_receipts,
     resolve_chain_tip,
 )
-from .handoff import HandoffPendingError, HandoffReceipt, _handoff_ledger, _read_source, ledger_seed_fingerprint
 from .paths_and_locks import HostEnvironmentPaths, PresenceWalGuard
-from .registry import ProjectRegistry, WorkspaceProjectBinding
-from .rescue_and_fork import guarded_pair_workspace
+from .registry import (
+    ProjectRegistry,
+    UnpairedWorkspaceError,
+    WorkspaceBindingDiagnosis,
+    WorkspaceProjectBinding,
+    diagnose_workspace_binding,
+    guarded_pair_workspace,
+)
 from .state_machine import SyncDirection, generate_uuid7
 from .transport import DefaultHostTransport
 
-
-@dataclass(frozen=True)
-class WorkspaceBindingDiagnosis:
-    """Read-only report of Antigravity/Codex project pairing and live daemon status."""
-
-    workspace_path: WorkspacePath
-    workspace_uri: WorkspaceRootUri
-    workspace_name: str
-    agy_registered: bool
-    codex_registered: bool
-    agy_project_id: str | None
-    codex_project_id: str | None
-    agy_daemon_active: bool
-    codex_daemon_active: bool
-    remediation_steps: tuple[str, ...]
-
-    def is_paired(self) -> bool:
-        return self.agy_registered and self.codex_registered
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "workspace_path": str(self.workspace_path),
-            "workspace_uri": str(self.workspace_uri),
-            "workspace_name": self.workspace_name,
-            "agy_registered": self.agy_registered,
-            "codex_registered": self.codex_registered,
-            "agy_project_id": self.agy_project_id,
-            "codex_project_id": self.codex_project_id,
-            "agy_daemon_active": self.agy_daemon_active,
-            "codex_daemon_active": self.codex_daemon_active,
-            "remediation_steps": list(self.remediation_steps),
-        }
-
-
-class UnpairedWorkspaceError(ValueError):
-    """Raised when `handoff` requires bidirectional pairing that has not yet completed."""
-
-    def __init__(self, diagnosis: WorkspaceBindingDiagnosis, message: str | None = None) -> None:
-        self.diagnosis = diagnosis
-        if message is None:
-            missing = [
-                label for flag, label in ((diagnosis.agy_registered, "Antigravity"), (diagnosis.codex_registered, "Codex")) if not flag
-            ]
-            missing_desc = " and ".join(missing) if missing else "both hosts"
-            steps = "; ".join(diagnosis.remediation_steps)
-            message = f"Workspace {str(diagnosis.workspace_path)!r} is not paired for {missing_desc}. {steps}".strip()
-        super().__init__(message)
-
-    def to_error_payload(self) -> dict[str, Any]:
-        return {
-            "error": "unpaired_workspace",
-            "message": str(self),
-            "diagnosis": self.diagnosis.to_dict(),
-            "remediation": list(self.diagnosis.remediation_steps),
-        }
-
-
-class HandoffCancelledError(ValueError):
-    """Raised when an interactive `--pick` selection is cancelled by the user."""
+__all__ = [
+    "HandoffCancelledError",
+    "HandoffCandidate",
+    "ResolvedHandoffRequest",
+    "UnpairedWorkspaceError",
+    "WorkspaceBindingDiagnosis",
+    "diagnose_workspace_binding",
+    "execute_handoff",
+    "list_handoff_candidates",
+    "resolve_handoff_request",
+    "validate_handoff_selector_flags",
+]
 
 
 @dataclass(frozen=True)
@@ -120,29 +85,22 @@ class ResolvedHandoffRequest:
     paired_now: bool = False
 
 
-def diagnose_workspace_binding(paths: HostEnvironmentPaths, workspace: str | Path) -> WorkspaceBindingDiagnosis:
-    """Inspect read-only workspace registrations and daemon presence without mutating host files."""
-    ws_path, ws_uri = parse_workspace_identity(workspace)
-    registry = ProjectRegistry(paths)
-    guard = PresenceWalGuard(paths)
-    agy_pid = registry._find_readonly_agy_project_id(ws_uri)
-    codex_pid = registry._find_readonly_codex_project_id(ws_path)
-    agy_active = guard._discover_agy_daemon() is not None
-    codex_active = guard._discover_codex_daemon() is not None
-    steps: list[str] = []
-    if agy_pid is None and agy_active:
-        steps.append(f'Open "{ws_path}" in Antigravity Desktop so it registers natively, or quit Antigravity Desktop before offline pairing.')
-    if codex_pid is None and codex_active:
-        steps.append(f'Open "{ws_path}" in Codex Desktop so it registers natively, or quit Codex Desktop before offline pairing.')
-    if agy_pid is None or codex_pid is None:
-        steps.append(f'Retry handoff with auto-pairing when missing host is offline: codex-agy-sync handoff -w "{ws_path}" --pair-if-offline')
-        steps.append(f'Or pair explicitly offline: codex-agy-sync pair -w "{ws_path}"')
-    return WorkspaceBindingDiagnosis(
-        ws_path, ws_uri, ws_path.name or "workspace",
-        agy_pid is not None, codex_pid is not None,
-        str(agy_pid) if agy_pid is not None else None, codex_pid,
-        agy_active, codex_active, tuple(steps),
-    )
+def validate_handoff_selector_flags(
+    *,
+    source_id: str | None = None,
+    latest: bool = False,
+    chain: bool = False,
+    pick: bool = False,
+    require_selector: bool = False,
+) -> None:
+    if chain and (latest or pick):
+        raise ValueError("--chain cannot be combined with --latest or --pick.")
+    if source_id is not None and (latest or pick):
+        raise ValueError("--source-id cannot be combined with --latest or --pick.")
+    if latest and pick:
+        raise ValueError("--latest cannot be combined with --pick.")
+    if require_selector and source_id is None and not latest and not chain and not pick:
+        raise ValueError("Specify source_id, latest, chain, or pick for handoff.")
 
 
 def _read_ledger_for_chain(
@@ -154,7 +112,7 @@ def _read_ledger_for_chain(
     propagate_active: bool = False,
 ) -> TrajectoryLedger | None:
     try:
-        return _read_source(paths, binding, direction, sid)
+        return read_handoff_source(paths, binding, direction, sid)
     except FileNotFoundError:
         return None
     except ValueError as exc:
@@ -197,7 +155,7 @@ def _did_target_advance_beyond_seed(
         s_ledger.events[: int(matched_wm.last_ledger_seq) + 1],
         explicit_title_override=s_ledger.title,
     )
-    seed_turns, seed_dig = ledger_seed_fingerprint(_handoff_ledger(seeded_source, None))
+    seed_turns, seed_dig = ledger_seed_fingerprint(handoff_ledger(seeded_source, None))
     if t_turns == seed_turns and t_digest == seed_dig:
         return False
     return (t_turns > seed_turns) or (t_turns == seed_turns and t_digest != seed_dig)
@@ -210,7 +168,6 @@ def list_handoff_candidates(
     direction: SyncDirection | None = None,
 ) -> tuple[HandoffCandidate, ...]:
     """List non-subagent workspace candidates newest-first without mutating host or receipt state."""
-    registry = ProjectRegistry(paths)
     transport = DefaultHostTransport(paths)
     ready_by_source: dict[tuple[str, str], tuple[str, float, int, HandoffReceipt]] = {}
     ready_by_target: dict[tuple[str, str], tuple[str, float, int, HandoffReceipt]] = {}
@@ -226,9 +183,9 @@ def list_handoff_candidates(
             if tgt_k not in ready_by_target or rank[:3] > ready_by_target[tgt_k][:3]:
                 ready_by_target[tgt_k] = rank
 
-    raw_entries: list[dict[str, Any]] = []
+    raw_entries: list[dict] = []
     if direction != SyncDirection.CODEX_TO_AGY:
-        raw_entries.extend(discover_agy_entries(paths, registry, transport, binding))
+        raw_entries.extend(discover_agy_entries(paths, transport, binding))
     if direction != SyncDirection.AGY_TO_CODEX:
         raw_entries.extend(discover_codex_entries(paths, binding, transport))
 
@@ -269,7 +226,7 @@ def _select_latest_candidate(paths: HostEnvironmentPaths, binding: WorkspaceProj
             or (rec.target_id and rec.target_host == chosen.host.value and rec.target_id == chosen.session_id)
         ):
             raise HandoffPendingError(rec, p_path)
-    _read_source(paths, binding, chosen.direction, chosen.session_id)
+    read_handoff_source(paths, binding, chosen.direction, chosen.session_id)
     return chosen
 
 
@@ -373,12 +330,7 @@ def resolve_handoff_request(
     stderr_isatty: bool | None = None,
 ) -> ResolvedHandoffRequest:
     """Resolve CLI/API handoff flags into a concrete direction, source ID, and chain lineage."""
-    if chain and (latest or pick):
-        raise ValueError("--chain cannot be combined with --latest or --pick.")
-    if source_id is not None and (latest or pick):
-        raise ValueError("--source-id cannot be combined with --latest or --pick.")
-    if latest and pick:
-        raise ValueError("--latest cannot be combined with --pick.")
+    validate_handoff_selector_flags(source_id=source_id, latest=latest, chain=chain, pick=pick)
     if direction is not None and direction not in (SyncDirection.CODEX_TO_AGY, SyncDirection.AGY_TO_CODEX):
         raise ValueError("Handoff direction must be codex_to_agy or agy_to_codex.")
 
@@ -412,3 +364,34 @@ def resolve_handoff_request(
         chooser=interactive_chooser, stdin_isatty=stdin_isatty, stderr_isatty=stderr_isatty,
     )
     return ResolvedHandoffRequest(binding, chosen.direction, chosen.session_id, title, "pick", paired_now=paired_now)
+
+
+def execute_handoff(
+    paths: HostEnvironmentPaths,
+    workspace: str | Path,
+    *,
+    direction: SyncDirection | None = None,
+    source_id: str | None = None,
+    title: str | None = None,
+    latest: bool = False,
+    chain: bool = False,
+    pick: bool = False,
+    pair_if_offline: bool = False,
+    interactive_chooser: Callable[[Sequence[HandoffCandidate]], HandoffCandidate] | None = None,
+    stdin_isatty: bool | None = None,
+    stderr_isatty: bool | None = None,
+) -> tuple[HandoffReceipt, bool]:
+    """Resolve a handoff request and execute it, returning `(receipt, mutated_state)`."""
+    resolved = resolve_handoff_request(
+        paths, workspace, direction=direction, source_id=source_id, title=title,
+        latest=latest, chain=chain, pick=pick, pair_if_offline=pair_if_offline,
+        interactive_chooser=interactive_chooser, stdin_isatty=stdin_isatty, stderr_isatty=stderr_isatty,
+    )
+    if resolved.already_ready_receipt is not None:
+        return resolved.already_ready_receipt, resolved.paired_now
+    receipt = handoff_session(
+        paths, resolved.binding.workspace_path, direction=resolved.direction, source_id=resolved.source_id,
+        title=resolved.title, chain_id=resolved.chain_id, chained_from_source_id=resolved.chained_from_source_id,
+        chain_depth=resolved.chain_depth,
+    )
+    return receipt, True

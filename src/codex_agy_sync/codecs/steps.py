@@ -19,12 +19,30 @@ from .._wire import (
     signed_int32,
     signed_int64,
 )
-from ..ledger import (
-    INTERRUPTED_TOOL_OUTPUT, AssistantTextEvent, CanonicalEvent, CheckpointEvent,
-    EventOriginAnchor, HostExtensionEnvelope, HostKind, MediaAttachment, StepIndex,
-    SystemEvent, TaskBoundaryEvent, ThinkingEvent, TokenUsageAccounting, ToolCallEvent,
-    ToolCallId, ToolResultEvent, TrajectoryLedger, TurnId, UserInputEvent,
-    WorkspacePath, WorkspaceRootUri,
+from ..events import (
+    INTERRUPTED_TOOL_OUTPUT,
+    AssistantTextEvent,
+    CanonicalEvent,
+    CheckpointEvent,
+    EventOriginAnchor,
+    HostExtensionEnvelope,
+    MediaAttachment,
+    SystemEvent,
+    TaskBoundaryEvent,
+    ThinkingEvent,
+    TokenUsageAccounting,
+    ToolCallEvent,
+    ToolResultEvent,
+    UserInputEvent,
+)
+from ..ledger import TrajectoryLedger
+from ..workspace import (
+    HostKind,
+    StepIndex,
+    ToolCallId,
+    TurnId,
+    WorkspacePath,
+    WorkspaceRootUri,
 )
 from .schema_tags import (
     ACTIVE_STEP_STATUS_CODES, STEP_TAG_TO_SPEC, STEP_WIRE_TABLE, AgyRawStepRow,
@@ -42,6 +60,7 @@ from .tools import (
 )
 
 _KNOWN_STEP_TAGS = frozenset({1, 4, 5, 6, 31, 56, 69, 133, 147, 148, 155, 158, 159} | {int(t) for t in GeminiStepWireTag})
+KNOWN_STEP_TYPE_CODES = frozenset(int(c) for c in CortexStepTypeCode)
 
 
 def _decode_duration_ms(raw: bytes) -> int:
@@ -355,7 +374,7 @@ def _classify_raw_step_row(row: AgyRawStepRow) -> tuple[dict[str, Any], bytes, S
     step_fields = iter_wire_fields(row.step_payload_blob) if row.step_payload_blob else []
     raw_meta = row.metadata_blob or next((raw for fn, wt, _, raw in step_fields if fn == StepFieldTag.METADATA and wt == 2), b"")
     meta_dict, meta_extra = _decode_step_metadata(raw_meta) if raw_meta else (_decode_step_metadata(b"")[0], b"")
-    spec = STEP_WIRE_TABLE.get(CortexStepTypeCode(row.step_type)) if row.step_type in CortexStepTypeCode._value2member_map_ else None
+    spec = STEP_WIRE_TABLE.get(CortexStepTypeCode(row.step_type)) if row.step_type in KNOWN_STEP_TYPE_CODES else None
     is_err_msg = row.step_type == int(CortexStepTypeCode.ERROR_MESSAGE)
     oneof_bytes = b""
     step_unknowns: list[UnknownWireField] = []
@@ -634,10 +653,11 @@ def _encode_single_agy_event(ev: CanonicalEvent, next_idx: int, call_by_id: Mapp
 
 
 def encode_agy_trajectory(
-    events: Sequence[CanonicalEvent],
+    ledger_or_events: TrajectoryLedger | Sequence[CanonicalEvent],
     starting_step_idx: StepIndex = StepIndex(0),
 ) -> Tuple[AgyRawStepRow, ...]:
-    """Serialize a slice of `CanonicalEvent` nodes into Antigravity `steps` rows."""
+    """Serialize a `TrajectoryLedger` or slice of `CanonicalEvent` nodes into Antigravity `steps` rows."""
+    events = ledger_or_events.events if isinstance(ledger_or_events, TrajectoryLedger) else ledger_or_events
     rows: list[AgyRawStepRow] = []
     next_idx = int(starting_step_idx)
     resolved_ids = frozenset(ev.call_id for ev in events if isinstance(ev, ToolResultEvent))
@@ -655,16 +675,3 @@ def encode_agy_trajectory(
                 next_idx += 1
             pos += 1
     return tuple(rows)
-
-
-decode_agy_steps_to_ledger = decode_agy_trajectory
-encode_events_to_agy_steps = encode_agy_trajectory
-
-
-def encode_ledger_to_agy_steps(
-    ledger_or_events: TrajectoryLedger | Sequence[CanonicalEvent],
-    starting_step_idx: StepIndex = StepIndex(0),
-) -> Tuple[AgyRawStepRow, ...]:
-    """Encode a `TrajectoryLedger` or event sequence into Antigravity `steps` rows."""
-    events = ledger_or_events.events if isinstance(ledger_or_events, TrajectoryLedger) else ledger_or_events
-    return encode_agy_trajectory(events, starting_step_idx)

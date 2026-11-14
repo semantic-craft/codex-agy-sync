@@ -11,7 +11,7 @@ from unittest import mock
 
 from codex_agy_sync._wire import iter_wire_fields
 from codex_agy_sync.bridge import HostEnvironmentPaths, SyncBridge, SyncDirection, TransportMode
-from codex_agy_sync.bridge.handoff import HandoffPendingError, _read_source, _handoff_ledger, _publish_new_file, handoff_session
+from codex_agy_sync.bridge.handoff import HandoffPendingError, handoff_ledger, handoff_session, publish_new_file, read_handoff_source
 from codex_agy_sync.bridge.rpc import AgyRpcReadResult
 from codex_agy_sync.bridge.transport import DefaultHostTransport
 from codex_agy_sync.codecs import decode_trajectory_metadata_proto
@@ -41,7 +41,7 @@ class DesktopHandoffTest(unittest.TestCase):
 
     def activate(self, endpoint, cid, **kwargs):
         db = self.paths.agy_data_dir / "conversations" / f"{cid}.db"
-        return AgyRpcReadResult(tuple(self.transport._read_persisted_agy_steps(db)), 1)
+        return AgyRpcReadResult(tuple(self.transport.read_persisted_agy_steps(db)), 1)
 
     def handoff(self):
         return handoff_session(self.paths, self.workspace, direction=SyncDirection.CODEX_TO_AGY, source_id=str(self.tid))
@@ -51,7 +51,7 @@ class DesktopHandoffTest(unittest.TestCase):
         summary.parent.mkdir(parents=True, exist_ok=True)
         summary.write_bytes(b"host-owned summary")
         before_codex = (self.paths.codex_home_dir / "state_5.sqlite").read_bytes()
-        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self.activate) as activate:
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self.activate) as activate:
             receipt = self.handoff()
             again = self.handoff()
         self.assertEqual(receipt.status, "ready")
@@ -78,7 +78,7 @@ class DesktopHandoffTest(unittest.TestCase):
         self.assertIn("CEDAR", (self.paths.agy_data_dir / "brain" / cid / ".system_generated/logs/transcript.jsonl").read_text())
 
     def test_pending_activation_does_not_allocate_a_second_target(self):
-        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=RuntimeError("lost response")) as activate:
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=RuntimeError("lost response")) as activate:
             with self.assertRaises(HandoffPendingError) as first:
                 self.handoff()
             with self.assertRaises(HandoffPendingError) as second:
@@ -92,7 +92,7 @@ class DesktopHandoffTest(unittest.TestCase):
             result = self.activate(endpoint, cid, **kwargs)
             rows = tuple(dataclasses.replace(row, step_payload_blob=row.step_payload_blob.replace(b"Remembered CEDAR 523", b"Different! CEDAR 523")) for row in result.raw_steps)
             return dataclasses.replace(result, raw_steps=rows)
-        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=wrong_context):
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=wrong_context):
             with self.assertRaises(HandoffPendingError) as failure:
                 self.handoff()
         self.assertIn("does not match", failure.exception.receipt.error)
@@ -115,18 +115,18 @@ class DesktopHandoffTest(unittest.TestCase):
         src.write_bytes(b"new")
         dst.write_bytes(b"existing")
         with self.assertRaises(FileExistsError):
-            _publish_new_file(src, dst)
+            publish_new_file(src, dst)
         self.assertEqual(dst.read_bytes(), b"existing")
         self.assertEqual(list(self.root.glob(".handoff-*")), [])
 
     def test_source_advance_creates_a_new_target(self):
-        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self.activate):
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self.activate):
             first = self.handoff()
         anchor = dataclasses.replace(self.anchor, turn_id=TurnId("turn-2"))
         events = self.events + [UserInputEvent(kind="user_input", anchor=anchor, query_text="New history"), AssistantTextEvent(kind="assistant_text", anchor=anchor, text="New answer")]
         ledger = TrajectoryLedger.from_events(self.binding.workspace_path, self.binding.workspace_uri, events)
         self.transport.apply_to_codex(self.binding, self.tid, events, ledger, self.bridge.guard.probe_locks(None, self.tid), TransportMode.OFFLINE_STORAGE)
-        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self.activate):
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self.activate):
             second = self.handoff()
         self.assertNotEqual(first.target_id, second.target_id)
         self.assertNotEqual(first.source_digest, second.source_digest)
@@ -134,7 +134,7 @@ class DesktopHandoffTest(unittest.TestCase):
     def test_codex_rpc_receives_staged_history_and_records_real_target(self):
         cid = CascadeId("00000000-0000-4000-8000-000000000011")
         actual_tid = CodexThreadId("01960000-0000-7000-8000-000000000099")
-        with mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta", return_value=(self.ledger, TransportMode.ONLINE_RPC, False)), mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_codex_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.import_codex_rollout_via_rpc", create=True, return_value=actual_tid) as importer:
+        with mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta", return_value=(self.ledger, TransportMode.ONLINE_RPC, False)), mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_codex_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.import_codex_rollout_via_rpc", return_value=actual_tid) as importer:
             result = handoff_session(self.paths, self.workspace, direction=SyncDirection.AGY_TO_CODEX, source_id=str(cid), title="Chosen title")
             again = handoff_session(self.paths, self.workspace, direction=SyncDirection.AGY_TO_CODEX, source_id=str(cid))
         self.assertEqual(result.target_id, actual_tid)
@@ -146,16 +146,16 @@ class DesktopHandoffTest(unittest.TestCase):
         self.assertEqual(importer.call_args.args[4], "Chosen title")
 
     def test_reasoning_summary_is_visible_text_without_native_runtime_state(self):
-        from codex_agy_sync.codecs import TrajectoryWireCodec
+        from codex_agy_sync.codecs import encode_codex_rollout
         source_id = "00000000-0000-4000-8000-000000000077"
         anchor = dataclasses.replace(self.anchor, host_extensions=(HostExtensionEnvelope(HostKind.CODEX, "response_item", b'{"encrypted_content":"private-runtime"}'),))
         events = [SystemEvent(kind="system_message", anchor=anchor, event_type="session_meta", message_text=source_id), self.events[0], ThinkingEvent(kind="thinking", anchor=anchor, summary_text="Visible analysis", raw_thinking="private-runtime", thinking_signature=b"private-runtime"), self.events[1]]
         ledger = TrajectoryLedger.from_events(self.binding.workspace_path, self.binding.workspace_uri, events)
-        handed = _handoff_ledger(ledger, None)
+        handed = handoff_ledger(ledger, None)
         self.assertEqual([e.kind for e in handed.events], ["user_input", "assistant_text", "assistant_text"])
         self.assertEqual(handed.events[1].text, "[Imported reasoning summary]\nVisible analysis")
         self.assertTrue(all(not e.anchor.host_extensions for e in handed.events))
-        rows = TrajectoryWireCodec.encode_ledger_to_codex_rollout(handed, session_id=str(self.tid), cwd=str(self.workspace))
+        rows = encode_codex_rollout(handed, session_id=str(self.tid), cwd=str(self.workspace))
         encoded = "\n".join(row.raw_json for row in rows)
         self.assertNotIn("private-runtime", encoded)
         self.assertNotIn(source_id, encoded)
@@ -167,20 +167,20 @@ class DesktopHandoffTest(unittest.TestCase):
         events = [self.events[0]] + [SystemEvent(kind="system_message", anchor=self.anchor, event_type=kind, message_text=kind) for kind in runtime_types]
         events += [SystemEvent(kind="system_message", anchor=self.anchor, event_type="codex_event_msg:unknown_history", message_text="Retain unknown history"), SystemEvent(kind="system_message", anchor=dataclasses.replace(self.anchor, origin_host=HostKind.ANTIGRAVITY), event_type="hook_json_SessionStart", message_text="AGY hook history"), self.events[1]]
         ledger = TrajectoryLedger.from_events(self.binding.workspace_path, self.binding.workspace_uri, events)
-        handed = _handoff_ledger(ledger, None)
+        handed = handoff_ledger(ledger, None)
         retained = [event.event_type for event in handed.events if isinstance(event, SystemEvent)]
         self.assertEqual(retained, ["codex_event_msg:unknown_history", "hook_json_SessionStart"])
         self.assertEqual(handed.events[0].query_text, self.events[0].query_text)
         self.assertEqual(handed.events[-1].text, self.events[1].text)
 
     def test_handoff_does_not_transfer_native_checkpoint_history_boundaries(self):
-        from codex_agy_sync.codecs import TrajectoryWireCodec
+        from codex_agy_sync.codecs import encode_agy_trajectory
         runtime = CheckpointEvent(kind="checkpoint", anchor=dataclasses.replace(self.anchor, host_extensions=(HostExtensionEnvelope(HostKind.CODEX, "turn_context", b'{"summary":"none","model":"gpt-6-astra"}'),)), checkpoint_index=2, user_intent="", session_summary="none", code_change_summary="")
         useful = CheckpointEvent(kind="checkpoint", anchor=dataclasses.replace(self.anchor, origin_host=HostKind.ANTIGRAVITY), checkpoint_index=8, user_intent="Remember ORCHID", session_summary="The earlier number was 317.", code_change_summary="")
         ledger = TrajectoryLedger.from_events(self.binding.workspace_path, self.binding.workspace_uri, [self.events[0], runtime, useful, self.events[1]])
-        handed = _handoff_ledger(ledger, None)
+        handed = handoff_ledger(ledger, None)
         self.assertFalse(any(isinstance(event, CheckpointEvent) for event in handed.events))
-        rows = TrajectoryWireCodec.encode_ledger_to_agy_steps(handed)
+        rows = encode_agy_trajectory(handed)
         self.assertNotIn(23, [row.step_type for row in rows])
         self.assertIn("[Imported checkpoint summary]\nRemember ORCHID\nThe earlier number was 317.", [event.text for event in handed.events if isinstance(event, AssistantTextEvent)])
         self.assertFalse(any(getattr(event, "text", "") == "[Imported checkpoint summary]\nnone" for event in handed.events))
@@ -194,7 +194,7 @@ class DesktopHandoffTest(unittest.TestCase):
         user = [{"provenance": {"type": "user"}}]
         events = [message("Injected project instructions", ["agents_md.instructions", "environments.environment_context"], host), message("Real user", ["user.text"], user), message("Mixed user and host", [], host + user), message("Incomplete metadata", [], host + [{}]), self.events[0], self.events[1]]
         ledger = TrajectoryLedger.from_events(self.binding.workspace_path, self.binding.workspace_uri, events)
-        handed = _handoff_ledger(ledger, None)
+        handed = handoff_ledger(ledger, None)
         self.assertEqual([event.query_text for event in handed.events if isinstance(event, UserInputEvent)], ["Real user", "Mixed user and host", "Incomplete metadata", self.events[0].query_text])
 
     def test_only_unpaired_codex_apps_runtime_outputs_are_filtered(self):
@@ -205,7 +205,7 @@ class DesktopHandoffTest(unittest.TestCase):
         injected = dataclasses.replace(result, call_id=ToolCallId("page-injection"), tool_name="unknown_tool", output_text="Injected page", anchor=dataclasses.replace(self.anchor, host_extensions=(HostExtensionEnvelope(HostKind.CODEX, "codex_unpaired_tool_output", raw),)))
         unknown = dataclasses.replace(result, call_id=ToolCallId("unpaired-history"), tool_name="unknown_tool", output_text="Keep unknown output")
         ledger = TrajectoryLedger.from_events(self.binding.workspace_path, self.binding.workspace_uri, [self.events[0], call, result, injected, unknown, self.events[1]])
-        handed = _handoff_ledger(ledger, None)
+        handed = handoff_ledger(ledger, None)
         text = "\n".join(event.text for event in handed.events if isinstance(event, AssistantTextEvent))
         self.assertIn("[Imported tool call] exec_command", text)
         self.assertIn("Output:\n5663", text)
@@ -214,7 +214,10 @@ class DesktopHandoffTest(unittest.TestCase):
         self.assertFalse(any(isinstance(event, (ToolCallEvent, ToolResultEvent)) for event in handed.events))
 
     def test_real_custom_exec_history_preserves_input_and_output_across_both_hosts(self):
-        from codex_agy_sync.codecs import CodexRawRolloutLine, TrajectoryWireCodec
+        from codex_agy_sync.codecs import (
+            CodexRawRolloutLine, decode_agy_trajectory, decode_codex_rollout,
+            encode_agy_trajectory, encode_codex_rollout,
+        )
         from codex_agy_sync.ledger import RolloutLineNo, OpaqueToolPayload, INTERRUPTED_TOOL_OUTPUT
         source_input = "const r = await tools.exec_command({cmd:\"python3 -c 'print(809 * 7)'\",login:false,max_output_tokens:100});text(r.output);\n"
         source_output = "Script completed\nWall time 0.0 seconds\nOutput:\n\n5663\n"
@@ -227,18 +230,17 @@ class DesktopHandoffTest(unittest.TestCase):
             {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "native-turn"}},
         ]
         lines = [CodexRawRolloutLine(RolloutLineNo(i + 1), json.dumps(record)) for i, record in enumerate(records)]
-        codec = TrajectoryWireCodec()
-        source = codec.decode_codex_rollout_to_ledger(self.binding.workspace_path, self.binding.workspace_uri, lines)
+        source = decode_codex_rollout(self.binding.workspace_path, self.binding.workspace_uri, lines)
         call = next(event for event in source.events if isinstance(event, ToolCallEvent))
         self.assertIsInstance(call.payload, OpaqueToolPayload)
         self.assertEqual(call.payload.raw_arguments_json, source_input)
-        first = _handoff_ledger(source, None)
-        agy_rows = codec.encode_ledger_to_agy_steps(first)
+        first = handoff_ledger(source, None)
+        agy_rows = encode_agy_trajectory(first)
         self.assertNotIn(132, [row.step_type for row in agy_rows])
-        agy = codec.decode_agy_steps_to_ledger(self.binding.workspace_path, self.binding.workspace_uri, agy_rows)
-        second = _handoff_ledger(agy, None)
-        codex_rows = codec.encode_ledger_to_codex_rollout(second, session_id=str(self.tid), cwd=str(self.workspace))
-        returned = codec.decode_codex_rollout_to_ledger(self.binding.workspace_path, self.binding.workspace_uri, codex_rows)
+        agy = decode_agy_trajectory(self.binding.workspace_path, self.binding.workspace_uri, agy_rows)
+        second = handoff_ledger(agy, None)
+        codex_rows = encode_codex_rollout(second, session_id=str(self.tid), cwd=str(self.workspace))
+        returned = decode_codex_rollout(self.binding.workspace_path, self.binding.workspace_uri, codex_rows)
         texts = [event.text for event in returned.events if isinstance(event, AssistantTextEvent)]
         self.assertIn(f"[Imported tool call] exec\nCall ID: call-real-exec\nArguments:\n{source_input}", texts)
         self.assertIn(f"[Imported tool result] exec\nCall ID: call-real-exec\nis_error: false\nOutput:\n{source_output}", texts)
@@ -249,7 +251,7 @@ class DesktopHandoffTest(unittest.TestCase):
         payload = RunCommandPayload(kind="run_command", command_line="false", cwd=str(self.workspace), exit_code=1)
         result = ToolResultEvent(kind="tool_result", anchor=self.anchor, call_id=ToolCallId("failed-call"), tool_name="exec_command", output_text="Process exited with code 1", is_error=True, payload=payload)
         source = TrajectoryLedger.from_events(self.binding.workspace_path, self.binding.workspace_uri, [self.events[0], result, self.events[1]])
-        handed = _handoff_ledger(source, None)
+        handed = handoff_ledger(source, None)
         text = next(event.text for event in handed.events if isinstance(event, AssistantTextEvent) and event.text.startswith("[Imported tool result]"))
         self.assertIn("is_error: true\nOutput:\nProcess exited with code 1", text)
 
@@ -263,30 +265,30 @@ class DesktopHandoffTest(unittest.TestCase):
         self.transport.apply_to_agy(self.binding, cid, source.events, source, self.bridge.guard.probe_locks(cid, None), TransportMode.OFFLINE_STORAGE)
         db = self.paths.agy_data_dir / "conversations" / f"{cid}.db"
         before = db.read_bytes()
-        rows = self.transport._read_persisted_agy_steps(db)
+        rows = self.transport.read_persisted_agy_steps(db)
         native_rows = tuple(dataclasses.replace(row, step_type=21) if row.step_type == 132 else row for row in rows)
-        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", return_value=AgyRpcReadResult(native_rows, 1)) as status:
-            read = _read_source(self.paths, self.binding, SyncDirection.AGY_TO_CODEX, str(cid))
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", return_value=AgyRpcReadResult(native_rows, 1)) as status:
+            read = read_handoff_source(self.paths, self.binding, SyncDirection.AGY_TO_CODEX, str(cid))
         self.assertFalse(read.has_inflight_turn)
         actual_result = next(event for event in read.events if isinstance(event, ToolResultEvent))
         self.assertEqual(actual_result.call_id, call.call_id)
         self.assertEqual(actual_result.output_text, result.output_text)
         self.assertEqual(db.read_bytes(), before)
         status.assert_called_once()
-        portable = _handoff_ledger(read, None)
+        portable = handoff_ledger(read, None)
         self.assertTrue(any(result.output_text in event.text for event in portable.events if isinstance(event, AssistantTextEvent)))
 
     def test_active_agy_status_blocks_disk_history_read(self):
         cid = CascadeId("00000000-0000-4000-8000-000000000042")
-        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", return_value=AgyRpcReadResult((), 2)), mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta") as disk:
+        with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", return_value=AgyRpcReadResult((), 2)), mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta") as disk:
             with self.assertRaisesRegex(ValueError, "active"):
-                _read_source(self.paths, self.binding, SyncDirection.AGY_TO_CODEX, str(cid))
+                read_handoff_source(self.paths, self.binding, SyncDirection.AGY_TO_CODEX, str(cid))
         disk.assert_not_called()
 
     def test_codex_uncertain_response_preserves_known_target(self):
         error = RuntimeError("response timeout")
         error.thread_id = "01960000-0000-7000-8000-000000000099"
-        with mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta", return_value=(self.ledger, TransportMode.ONLINE_RPC, False)), mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_codex_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.import_codex_rollout_via_rpc", create=True, side_effect=error):
+        with mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta", return_value=(self.ledger, TransportMode.ONLINE_RPC, False)), mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_codex_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.import_codex_rollout_via_rpc", side_effect=error):
             with self.assertRaises(HandoffPendingError) as failure:
                 handoff_session(self.paths, self.workspace, direction=SyncDirection.AGY_TO_CODEX, source_id="00000000-0000-4000-8000-000000000011")
         self.assertEqual(failure.exception.receipt.target_id, error.thread_id)

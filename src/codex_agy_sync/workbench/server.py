@@ -14,35 +14,35 @@ import time
 from typing import Any, Callable
 import webbrowser
 
-from ..bridge.paths_and_locks import HostEnvironmentPaths, _now_iso
-from ._handler import (
-    _WorkbenchRequestHandler,
-    _inject_html_metas,
-    _validate_host_header,
-    _validate_origin_header,
+from ..bridge.paths_and_locks import HostEnvironmentPaths, now_iso
+from .handler import (
+    WorkbenchRequestHandler,
+    inject_html_metas,
+    validate_host_header,
+    validate_origin_header,
 )
-from ._lease import (
+from .lease import (
     WorkbenchLease,
-    _write_lease_file,
     default_workbench_ui_path,
     load_workbench_lease,
     query_workbench_status,
     stop_workbench_server,
     workbench_lease_path,
+    write_lease_file,
 )
 from .service import WorkbenchService
 
 __all__ = [
     "WorkbenchLease",
     "WorkbenchServer",
-    "_inject_html_metas",
-    "_validate_host_header",
-    "_validate_origin_header",
     "default_workbench_ui_path",
+    "inject_html_metas",
     "load_workbench_lease",
     "query_workbench_status",
     "run_serve_server",
     "stop_workbench_server",
+    "validate_host_header",
+    "validate_origin_header",
 ]
 
 
@@ -52,7 +52,7 @@ class _BoundThreadingHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, server_address: tuple[str, int], owner: WorkbenchServer) -> None:
         self.owner = owner
-        super().__init__(server_address, _WorkbenchRequestHandler)
+        super().__init__(server_address, WorkbenchRequestHandler)
 
 
 class WorkbenchServer:
@@ -133,13 +133,13 @@ class WorkbenchServer:
         with self._state_lock:
             prev_iso = self._last_activity_iso
             self._last_activity_mono = time.monotonic()
-            new_iso = _now_iso()
+            new_iso = now_iso()
             self._last_activity_iso = new_iso
             if new_iso != prev_iso and self._httpd is not None and not self._closed and self._owns_lease:
                 existing = load_workbench_lease(self.service.paths)
                 if existing is None or (existing.pid == os.getpid() and existing.port == self._bound_port):
                     try:
-                        _write_lease_file(workbench_lease_path(self.service.paths), self.lease_snapshot())
+                        write_lease_file(workbench_lease_path(self.service.paths), self.lease_snapshot())
                     except OSError:
                         pass
 
@@ -151,14 +151,14 @@ class WorkbenchServer:
             self._owns_lease = False
             self._bound_port = None
             self._stop_event.clear()
-            now_mono, now_iso = time.monotonic(), _now_iso()
+            now_mono, cur_iso = time.monotonic(), now_iso()
             self._started_mono = self._last_activity_mono = now_mono
-            self._started_iso = self._last_activity_iso = now_iso
+            self._started_iso = self._last_activity_iso = cur_iso
             httpd = _BoundThreadingHTTPServer(("127.0.0.1", self.requested_port), self)
             try:
                 self._httpd = httpd
                 self._bound_port = int(httpd.server_address[1])
-                _write_lease_file(workbench_lease_path(self.service.paths), self.lease_snapshot())
+                write_lease_file(workbench_lease_path(self.service.paths), self.lease_snapshot())
                 self._owns_lease = True
             except Exception:
                 self._httpd = None
@@ -186,6 +186,9 @@ class WorkbenchServer:
             httpd = None if self._closed else self._httpd
         if httpd is not None:
             httpd.shutdown()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
 
     def wait(self, timeout: float | None = None) -> bool:
         return self._stop_event.wait(timeout)
@@ -232,7 +235,7 @@ def run_serve_server(
     installed: dict[int, Any] = {}
     if threading.current_thread() is threading.main_thread():
         def _handle_signal(_signum: int, _frame: Any) -> None:
-            server._stop_event.set()
+            server.request_stop()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             installed[sig] = signal.getsignal(sig)

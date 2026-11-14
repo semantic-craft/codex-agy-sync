@@ -7,12 +7,16 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
-from ..bridge.handoff import handoff_session
-from ..bridge.handoff_resolve import resolve_handoff_request
+from ..bridge.handoff_resolve import execute_handoff, validate_handoff_selector_flags
 from ..bridge.paths_and_locks import HostEnvironmentPaths
-from ..bridge.state_machine import HostKind, SyncDirection
-from ..ledger import parse_workspace_identity
-from ._discovery import _candidate_home_dirs, _is_excluded_for_homes, _raw_spec_to_candidate_path
+from ..bridge.state_machine import SyncDirection
+from ..workspace import (
+    HostKind,
+    candidate_home_dirs,
+    is_excluded_for_homes,
+    parse_workspace_identity,
+    raw_spec_to_candidate_path,
+)
 from .indexer import WorkbenchIndexer
 from .models import CitationRef, DraftRenderResult, SearchHit, WorkCard, WorkbenchSnapshot
 
@@ -265,14 +269,14 @@ class WorkbenchService:
             if ws.workspace_id == raw:
                 target_spec = ws.workspace_path
                 break
-        raw_path = _raw_spec_to_candidate_path(target_spec)
+        raw_path = raw_spec_to_candidate_path(target_spec)
         if raw_path is None:
             raise ValueError(f"Invalid workspace path or URI: {workspace!r}")
-        homes = _candidate_home_dirs(self._paths)
-        if _is_excluded_for_homes(raw_path, homes):
+        homes = candidate_home_dirs(self._paths)
+        if is_excluded_for_homes(raw_path, homes):
             raise ValueError(f"Workspace path is inside an excluded directory: {workspace!r}")
         ws_path, _ = parse_workspace_identity(target_spec)
-        if _is_excluded_for_homes(ws_path, homes):
+        if is_excluded_for_homes(ws_path, homes):
             raise ValueError(f"Workspace path is inside an excluded directory: {workspace!r}")
         if not ws_path.is_dir():
             raise ValueError(f"Workspace directory does not exist: {workspace!r}")
@@ -294,13 +298,14 @@ class WorkbenchService:
                 raise ValueError(f"{field_name} must be a string.")
         clean_source = (source_id or "").strip() or None
         clean_dir = (direction or "").strip() or None
-        if chain and latest:
-            raise ValueError("chain cannot be combined with latest.")
-        if clean_source is not None and latest:
-            raise ValueError("source_id cannot be combined with latest.")
-        if clean_source is None and not latest and not chain:
-            raise ValueError("Specify source_id, latest=True, or chain=True for workbench handoff.")
-        resolved = resolve_handoff_request(
+        validate_handoff_selector_flags(
+            source_id=clean_source,
+            latest=bool(latest),
+            chain=bool(chain),
+            pick=False,
+            require_selector=True,
+        )
+        receipt, mutated = execute_handoff(
             self._paths,
             self._resolve_workspace_arg(workspace),
             direction=SyncDirection(clean_dir) if clean_dir else None,
@@ -311,19 +316,6 @@ class WorkbenchService:
             pick=False,
             pair_if_offline=bool(pair_if_offline),
         )
-        if resolved.already_ready_receipt is not None:
-            if resolved.paired_now:
-                self._indexer.invalidate()
-            return dataclasses.asdict(resolved.already_ready_receipt)
-        receipt = handoff_session(
-            self._paths,
-            resolved.binding.workspace_path,
-            direction=resolved.direction,
-            source_id=resolved.source_id,
-            title=resolved.title,
-            chain_id=resolved.chain_id,
-            chained_from_source_id=resolved.chained_from_source_id,
-            chain_depth=resolved.chain_depth,
-        )
-        self._indexer.invalidate()
+        if mutated:
+            self._indexer.invalidate()
         return dataclasses.asdict(receipt)

@@ -51,12 +51,12 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
         cid_blocker = CascadeId("44440002-1111-4111-8111-111111111111")
         evs_a = self._turn_events(HostKind.ANTIGRAVITY, "turn-1", "2026-11-12T06:00:", "Alloc check A", "Done A")
         evs_b = self._turn_events(HostKind.ANTIGRAVITY, "turn-1", "2026-11-12T06:01:", "Blocker", "Done B")
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid_a, evs_a,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, evs_a, recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE,
         )
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid_blocker, evs_b,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, evs_b, recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE,
@@ -79,14 +79,14 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
     def test_4b_mid_write_failure_restores_backups_and_deletes_new_files(self) -> None:
         cid_base = CascadeId("44440010-2222-4222-8222-222222222222")
         t1_agy = self._turn_events(HostKind.ANTIGRAVITY, "turn-1", "2026-11-12T07:00:", "Base turn 1", "Base reply 1")
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid_base, t1_agy,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, t1_agy, recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE,
         )
         r_base = self.bridge.sync_session(self.workspace_dir, cascade_id=cid_base, direction=SyncDirection.AGY_TO_CODEX)
         tid_base = r_base.codex_thread_id
-        cursor_file = self.bridge._cursor_path(cid_base, tid_base)
+        cursor_file = self.bridge.cursor_path(cid_base, tid_base)
         base_rollouts = list((self.paths.codex_home_dir / "sessions").rglob(f"*{tid_base}.jsonl"))
         self.assertEqual(len(base_rollouts), 1)
 
@@ -103,15 +103,15 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
         agy_before = self._sha256_map(agy_tracked)
 
         t2_codex = self._turn_events(HostKind.CODEX, "turn-2", "2026-11-12T07:05:", "Turn 2 from Codex", "Reply 2")
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             self.binding, tid_base, t2_codex,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, [*t1_agy, *t2_codex]),
             self.locks, TransportMode.OFFLINE_STORAGE, incremental=True,
         )
 
         class _CrashAgyTransport(DefaultHostTransport):
-            def _write_agy_companion_stores(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-                super()._write_agy_companion_stores(*args, **kwargs)
+            def write_agy_companion_stores(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                super().write_agy_companion_stores(*args, **kwargs)
                 conv_db_path: Path = args[4]
                 conv_db_path.with_name(f"{conv_db_path.name}-wal").write_bytes(b"dangling-wal")
                 conv_db_path.with_name(f"{conv_db_path.name}-shm").write_bytes(b"dangling-shm")
@@ -128,7 +128,7 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
 
         tid_unpaired = CodexThreadId("44440011-2222-4222-8222-222222222222")
         t1_new_codex = self._turn_events(HostKind.CODEX, "turn-1", "2026-11-12T07:10:", "New codex session", "Reply")
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             self.binding, tid_unpaired, t1_new_codex,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, t1_new_codex),
             self.locks, TransportMode.OFFLINE_STORAGE,
@@ -150,7 +150,7 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
         self.assertFalse(
             (self.paths.agy_cli_data_dir / "brain" / str(expected_new_cid) / ".system_generated" / "logs" / "transcript.jsonl").exists()
         )
-        self.assertIsNone(self.bridge._load_cursor(self.ws_uri, None, tid_unpaired))
+        self.assertIsNone(self.bridge.load_cursor(self.ws_uri, None, tid_unpaired))
 
         r_catchup = self.bridge.sync_session(
             self.workspace_dir, cascade_id=cid_base, codex_thread_id=tid_base, direction=SyncDirection.CODEX_TO_AGY,
@@ -158,7 +158,7 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
         self.assertEqual(r_catchup.transition_kind, "incremental_append")
 
         t3_agy = self._turn_events(HostKind.ANTIGRAVITY, "turn-3", "2026-11-12T07:15:", "Turn 3 from AGY", "Reply 3")
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid_base, t3_agy,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, [*t1_agy, *t2_codex, *t3_agy], recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE, incremental=True,
@@ -173,9 +173,9 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
         codex_before = self._sha256_map(codex_tracked)
 
         class _CrashCodexTransport(DefaultHostTransport):
-            def _write_codex_index_and_global_state(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-                super()._write_codex_index_and_global_state(*args, **kwargs)
-                state_db = self._paths.codex_home_dir / "state_5.sqlite"
+            def write_codex_index_and_global_state(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                super().write_codex_index_and_global_state(*args, **kwargs)
+                state_db = self.paths.codex_home_dir / "state_5.sqlite"
                 state_db.with_name("state_5.sqlite-wal").write_bytes(b"codex-dangling-wal")
                 state_db.with_name("state_5.sqlite-shm").write_bytes(b"codex-dangling-shm")
                 raise RuntimeError("simulated mid-write codex failure")
@@ -191,7 +191,7 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
 
         cid_unpaired = CascadeId("44440012-2222-4222-8222-222222222222")
         t1_new_agy = self._turn_events(HostKind.ANTIGRAVITY, "turn-1", "2026-11-12T07:20:", "New AGY session", "Reply")
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid_unpaired, t1_new_agy,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, t1_new_agy, recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE,
@@ -205,12 +205,12 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
             )
         self.assertEqual(self._sha256_map(codex_tracked), codex_before)
         self.assertEqual(list((self.paths.codex_home_dir / "sessions").rglob(f"*{expected_new_tid}.jsonl")), [])
-        self.assertIsNone(self.bridge._load_cursor(self.ws_uri, cid_unpaired, None))
+        self.assertIsNone(self.bridge.load_cursor(self.ws_uri, cid_unpaired, None))
 
     def test_4c_held_flock_on_sync_lock_defers_concurrent_writer(self) -> None:
         cid = CascadeId("44440020-3333-4333-8333-333333333333")
         evs = self._turn_events(HostKind.ANTIGRAVITY, "turn-1", "2026-11-12T08:00:", "Flock test", "Reply")
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid, evs,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, evs, recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE,
@@ -240,7 +240,7 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
         assert self.paths.agy_cli_data_dir is not None
         cid = CascadeId("44440030-4444-4444-8444-444444444444")
         evs = self._turn_events(HostKind.ANTIGRAVITY, "turn-1", "2026-11-12T08:30:", "Self-heal check", "All good")
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid, evs,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, evs, recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE,
@@ -278,7 +278,7 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
     def test_4e_single_sync_session_symmetric_fork_new_session(self) -> None:
         cid = CascadeId("44440040-5555-4555-8555-555555555555")
         t1 = self._turn_events(HostKind.ANTIGRAVITY, "turn-1", "2026-11-12T09:00:", "Shared turn 1", "Shared reply 1")
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid, t1,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, t1, recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE,
@@ -288,12 +288,12 @@ class TestUnit4LocksRollbackSelfHealAndFork(BridgeSandboxBase):
 
         t2_agy = self._turn_events(HostKind.ANTIGRAVITY, "turn-2-agy", "2026-11-12T09:05:", "AGY branch", "AGY reply")
         t2_codex = self._turn_events(HostKind.CODEX, "turn-2-codex", "2026-11-12T09:06:", "Codex branch", "Codex reply")
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding, cid, t2_agy,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, [*t1, *t2_agy], recompute_agy_step_indices=True),
             self.locks, TransportMode.OFFLINE_STORAGE, incremental=True,
         )
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             self.binding, tid, t2_codex,
             TrajectoryLedger.from_events(self.ws_path, self.ws_uri, [*t1, *t2_codex]),
             self.locks, TransportMode.OFFLINE_STORAGE, incremental=True,
@@ -414,7 +414,7 @@ class TestReadonlyStatusAndOnlineDefer(BridgeSandboxBase):
         ]
         codex_binding = self.bridge.registry.ensure_codex_binding(self.workspace_dir)
         clean_locks = self.bridge.guard.probe_locks(None, src_tid)
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             codex_binding,
             src_tid,
             t1_events,
@@ -452,7 +452,7 @@ class TestReadonlyStatusAndOnlineDefer(BridgeSandboxBase):
                 codex_binding.workspace_path, codex_binding.workspace_uri, t1_events
             )
             with self.assertRaises(RuntimeError):
-                self.bridge._transport.apply_to_agy(
+                self.bridge.transport.apply_to_agy(
                     codex_binding,
                     target_cid,
                     t1_events,
@@ -461,7 +461,7 @@ class TestReadonlyStatusAndOnlineDefer(BridgeSandboxBase):
                     TransportMode.ONLINE_RPC,
                 )
             with self.assertRaises(RuntimeError):
-                self.bridge._transport.apply_to_agy(
+                self.bridge.transport.apply_to_agy(
                     codex_binding,
                     target_cid,
                     t1_events,
@@ -470,7 +470,7 @@ class TestReadonlyStatusAndOnlineDefer(BridgeSandboxBase):
                     TransportMode.OFFLINE_STORAGE,
                 )
             with self.assertRaises(RuntimeError):
-                self.bridge._transport.apply_to_codex(
+                self.bridge.transport.apply_to_codex(
                     codex_binding,
                     src_tid,
                     t1_events,

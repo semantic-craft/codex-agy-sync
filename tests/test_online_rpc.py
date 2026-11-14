@@ -180,7 +180,7 @@ class TestUnit5OnlineRpcAndDocs(unittest.TestCase):
             ),
         ]
         offline_locks = self.bridge.guard.probe_locks(cid_disk, None)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding,
             cid_disk,
             disk_events,
@@ -535,7 +535,7 @@ class TestUnit5OnlineRpcAndDocs(unittest.TestCase):
             accept_thread = threading.Thread(target=_accept_loop, daemon=True)
             accept_thread.start()
             try:
-                ep = self.bridge.guard._discover_codex_daemon()
+                ep = self.bridge.guard.discover_codex_daemon()
                 self.assertIsNotNone(ep)
                 assert ep is not None
                 self.assertEqual(ep.socket_path, symlink_sock)
@@ -596,7 +596,7 @@ class TestUnit5OnlineRpcAndDocs(unittest.TestCase):
             ),
         ]
         off_locks = self.bridge.guard.probe_locks(cid_offline, None)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             self.binding,
             cid_offline,
             off_events,

@@ -842,15 +842,16 @@ def main():
             "required_threads_predicate": {
                 "archived": 0,
                 "preview_non_empty": True,
-                "project_id_not_null": True,
+                "cwd_non_empty": True,
                 "sql_index_evidence": [
+                    "idx_threads_archived_cwd_recency_at_ms: ON threads(archived, cwd, recency_at_ms DESC, id DESC)",
                     "idx_threads_visible_recency_at_ms: ON threads(archived, recency_at_ms DESC, id DESC) WHERE preview <> ''",
                     "idx_threads_project_recency: ON threads(project_id, recency_at_ms DESC) WHERE archived = 0 AND project_id IS NOT NULL",
                 ],
             },
             "project_binding_sources": [
                 "~/.codex/state_5.sqlite (projects.id + project_roots.path)",
-                "~/.codex/.codex-global-state.json (local-projects, project-order, thread-project-assignments, app-server-project-id-by-legacy-project-id-by-host)",
+                "~/.codex/.codex-global-state.json (local-projects, electron-saved-workspace-roots, project-order, thread-project-assignments, app-server-project-id-by-legacy-project-id-by-host)",
             ],
         },
     }

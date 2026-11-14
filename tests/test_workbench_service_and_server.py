@@ -36,12 +36,12 @@ from codex_agy_sync import (
     stop_workbench_server,
 )
 from codex_agy_sync.bridge.handoff import HandoffPendingError
-from codex_agy_sync.bridge.registry import _ensure_agy_summaries_db_schema
+from codex_agy_sync.bridge.registry import ensure_agy_summaries_db_schema
 from codex_agy_sync.bridge.rpc import AgyRpcReadResult
 from codex_agy_sync.bridge.state_machine import generate_uuid7
 from codex_agy_sync.bridge.transport import DefaultHostTransport
 from codex_agy_sync.cli import main as cli_main
-from codex_agy_sync.codecs import TrajectoryWireCodec, iter_codex_rollout_lines
+from codex_agy_sync.codecs import decode_codex_rollout, iter_codex_rollout_lines
 from codex_agy_sync.ledger import (
     AssistantTextEvent,
     EventOriginAnchor,
@@ -53,7 +53,8 @@ from codex_agy_sync.ledger import (
     TurnId,
     UserInputEvent,
 )
-from codex_agy_sync.workbench.indexer import _is_sensitive_excluded_path, discover_workspaces
+from codex_agy_sync.workbench import discover_workspaces
+from codex_agy_sync.workspace import is_sensitive_excluded_path
 
 
 def _host_fingerprints() -> dict[str, tuple[bool, int | None, int | None, int | None]]:
@@ -123,7 +124,6 @@ class WorkbenchServiceAndServerTest(unittest.TestCase):
         self.ws_beta.mkdir(parents=True, exist_ok=True)
         self.bridge = SyncBridge(self.paths)
         self.transport = DefaultHostTransport(self.paths)
-        self.codec = TrajectoryWireCodec()
         self.cli_bin = Path(__file__).resolve().parents[1] / "bin" / "codex-agy-sync"
         self.ui_file = self.root / "workbench.html"
         self.ui_file.write_text(
@@ -170,11 +170,11 @@ class WorkbenchServiceAndServerTest(unittest.TestCase):
     def _activate_agy_rpc(self, endpoint: object, cid: CascadeId, **kwargs: object) -> AgyRpcReadResult:
         _ = endpoint, kwargs
         db = self.paths.agy_data_dir / "conversations" / f"{cid}.db"
-        return AgyRpcReadResult(tuple(self.transport._read_persisted_agy_steps(db)), 1)
+        return AgyRpcReadResult(tuple(self.transport.read_persisted_agy_steps(db)), 1)
 
     def _fetch_codex_rpc(self, endpoint: object, tid: CodexThreadId, **kwargs: object) -> CodexRpcReadResult:
         _ = endpoint, kwargs
-        rp, title = self.transport._find_codex_rollout_and_title(tid)
+        rp, title = self.transport.find_codex_rollout_and_title(tid)
         return CodexRpcReadResult(thread={"id": str(tid), "name": title or "", "path": str(rp), "turns": []}, is_active=False)
 
     def _materialize_codex_rpc(
@@ -183,7 +183,7 @@ class WorkbenchServiceAndServerTest(unittest.TestCase):
         _ = endpoint, ws_path, codex_project_id, timeout_s
         binding = self.bridge.registry.resolve_readonly_binding(self.ws_alpha)
         lines = tuple(iter_codex_rollout_lines(rollout_path))
-        ledger = self.codec.decode_codex_rollout_to_ledger(binding.workspace_path, binding.workspace_uri, lines, explicit_title_override=title)
+        ledger = decode_codex_rollout(binding.workspace_path, binding.workspace_uri, lines, explicit_title_override=title)
         new_tid = CodexThreadId(generate_uuid7())
         clean_locks = dataclasses.replace(self.bridge.guard.probe_locks(None, None), codex_daemon=None)
         self.transport.apply_to_codex(binding, new_tid, ledger.events, ledger, clean_locks, TransportMode.OFFLINE_STORAGE)
@@ -193,11 +193,11 @@ class WorkbenchServiceAndServerTest(unittest.TestCase):
     def _mock_live_daemons(self):
         fake_ep = CodexDaemonEndpoint(socket_path=self.root / "codex.sock", pid=os.getpid())
         with (
-            mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_agy_daemon", return_value=object()),
-            mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard._discover_codex_daemon", return_value=fake_ep),
+            mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()),
+            mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_codex_daemon", return_value=fake_ep),
             mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self._activate_agy_rpc),
             mock.patch("codex_agy_sync.bridge.rpc.fetch_codex_thread_via_rpc", side_effect=self._fetch_codex_rpc),
-            mock.patch("codex_agy_sync.bridge.handoff.rpc.import_codex_rollout_via_rpc", create=True, side_effect=self._materialize_codex_rpc),
+            mock.patch("codex_agy_sync.bridge.handoff.import_codex_rollout_via_rpc", side_effect=self._materialize_codex_rpc),
         ):
             yield
 
@@ -245,11 +245,11 @@ class WorkbenchServiceAndServerTest(unittest.TestCase):
             d.mkdir(parents=True, exist_ok=True)
         symlink_trap.symlink_to(archive_nested)
 
-        self.assertTrue(_is_sensitive_excluded_path(archive_direct, self.fake_home))
-        self.assertTrue(_is_sensitive_excluded_path(archive_nested, self.fake_home))
-        self.assertTrue(_is_sensitive_excluded_path(priv_nested, self.fake_home))
-        self.assertTrue(_is_sensitive_excluded_path(symlink_trap, self.fake_home))
-        self.assertFalse(_is_sensitive_excluded_path(self.ws_alpha, self.fake_home))
+        self.assertTrue(is_sensitive_excluded_path(archive_direct, self.fake_home))
+        self.assertTrue(is_sensitive_excluded_path(archive_nested, self.fake_home))
+        self.assertTrue(is_sensitive_excluded_path(priv_nested, self.fake_home))
+        self.assertTrue(is_sensitive_excluded_path(symlink_trap, self.fake_home))
+        self.assertFalse(is_sensitive_excluded_path(self.ws_alpha, self.fake_home))
 
         self.bridge.pair_workspace(self.ws_alpha)
         c_only = self.bridge.registry.ensure_codex_binding(self.ws_beta)
@@ -260,7 +260,7 @@ class WorkbenchServiceAndServerTest(unittest.TestCase):
         sum_db = self.paths.agy_data_dir / "conversation_summaries.db"
         sum_db.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.closing(sqlite3.connect(str(sum_db))) as conn:
-            _ensure_agy_summaries_db_schema(conn)
+            ensure_agy_summaries_db_schema(conn)
             conn.execute(
                 "INSERT INTO conversation_summaries (conversation_id, title, last_modified_time, last_user_input_time, workspace_uris, project_id) VALUES (?, ?, ?, ?, ?, ?)",
                 ("aaaaaaaa-0000-7000-8000-000000000001", "Gamma Sum", 1794200000000, 1794200000000, json.dumps([ws_gamma.as_uri()]), "gamma-proj"),
@@ -532,7 +532,7 @@ class WorkbenchServiceAndServerTest(unittest.TestCase):
                 title="Pending", status="pending", staging_path=str(self.root / "pending.json"),
             )
             pending_err = HandoffPendingError(pending_rec, self.root / "pending.json")
-            with mock.patch("codex_agy_sync.workbench.service.handoff_session", side_effect=busy_err):
+            with mock.patch("codex_agy_sync.bridge.handoff_resolve.handoff_session", side_effect=busy_err):
                 with self._mock_live_daemons():
                     st_busy, _, raw_busy = _http_raw(
                         server.port, "POST", "/api/handoff", headers=tok_hdr,
@@ -540,7 +540,7 @@ class WorkbenchServiceAndServerTest(unittest.TestCase):
                     )
                     self.assertEqual(st_busy, 409)
                     self.assertEqual(json.loads(raw_busy)["error"], "sync_busy_lock")
-            with mock.patch("codex_agy_sync.workbench.service.resolve_handoff_request", side_effect=pending_err):
+            with mock.patch("codex_agy_sync.bridge.handoff_resolve.resolve_handoff_request", side_effect=pending_err):
                 st_pend, _, raw_pend = _http_raw(
                     server.port, "POST", "/api/handoff", headers=tok_hdr,
                     body=json.dumps({"workspace": str(self.ws_alpha), "latest": True}).encode("utf-8"),

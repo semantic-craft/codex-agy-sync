@@ -9,34 +9,58 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import sqlite3
 from typing import Literal, Sequence, Tuple
 import uuid
 
-from ..ledger import (
-    AgyGuiSafeSource, CanonicalEvent, CascadeId, CodexThreadId, CompletedTurnWatermark,
-    ContentDigest, HostKind, RolloutLineNo, StepIndex, SubagentLineage,
-    TrajectoryLedger, TurnId, WorkspaceRootUri, validate_session_id,
+from ..events import (
+    AgyGuiSafeSource,
+    CanonicalEvent,
+    CascadeId,
+    CodexThreadId,
+    CompletedTurnWatermark,
+    ContentDigest,
+    HostKind,
+    RolloutLineNo,
+    StepIndex,
+    SubagentLineage,
+    TurnId,
+    WorkspaceRootUri,
 )
+from ..ledger import TrajectoryLedger
+from ..workspace import validate_session_id
 from .paths_and_locks import (
-    BackupManifest, HostEnvironmentPaths, HostLockSnapshot, PresenceWalGuard, TransportMode,
-    _atomic_write_text, _deterministic_uuid, _now_iso, _open_readonly_sqlite, _validated_child_path,
+    BackupManifest,
+    HostEnvironmentPaths,
+    HostLockSnapshot,
+    PresenceWalGuard,
+    TransportMode,
+    atomic_write_text,
+    deterministic_uuid,
+    expand_existing_with_sidecars,
+    now_iso,
+    validated_child_path,
 )
-from .registry import (
-    ProjectRegistry, WorkspaceProjectBinding,
-    _parse_agy_trajectory_metadata_lineage, _parse_codex_thread_source_lineage, _safe_valid_session_id,
-)
-from .rescue_and_fork import (
-    compute_codex_nesting_depth, expand_existing_with_sidecars,
-    guarded_pair_workspace, is_source_actively_running, reconcile_and_rescue_ledgers,
-)
+from .registry import ProjectRegistry, WorkspaceProjectBinding
+from .rescue_and_fork import reconcile_and_rescue_ledgers
 from .rpc import ProbedSyncLedgers, probe_sync_ledgers
 from .state_machine import (
-    CursorForkStateMachine, DeferredBusyTransition, DivergedConflictTransition, EmptySessionError,
-    ForkResolutionPolicy, IncrementalAppendTransition, InitialImportTransition, NoOpTransition,
-    SessionSyncCursor, SyncDirection, _NULL_CID, _NULL_TID, generate_uuid7,
+    NULL_CASCADE_ID,
+    NULL_CODEX_THREAD_ID,
+    CursorForkStateMachine,
+    DeferredBusyTransition,
+    DivergedConflictTransition,
+    EmptySessionError,
+    ForkResolutionPolicy,
+    HostTransportPort,
+    IncrementalAppendTransition,
+    InitialImportTransition,
+    NoOpTransition,
+    SessionSyncCursor,
+    SyncDirection,
+    generate_uuid7,
 )
-from .transport import DefaultHostTransport, HostTransportPort
+from .store_catalog import read_agy_session_lineage, read_codex_session_lineage, safe_valid_session_id
+from .transport import DefaultHostTransport
 
 _TransitionReceiptKind = Literal[
     "no_op", "initial_import", "incremental_append",
@@ -84,17 +108,6 @@ class _WritePlan:
     codex_turn_inflight: bool = False
 
 
-def _readonly_fetchone(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> tuple[object, ...] | None:
-    if not db_path.is_file():
-        return None
-    try:
-        with contextlib.closing(_open_readonly_sqlite(db_path)) as conn:
-            row = conn.execute(sql, params).fetchone()
-        return tuple(row) if row is not None else None
-    except sqlite3.OperationalError:
-        return None
-
-
 def _make_write_plan(
     binding: WorkspaceProjectBinding, target_host: HostKind, target_cid: CascadeId, target_tid: CodexThreadId,
     events: Sequence[CanonicalEvent], full_events: Sequence[CanonicalEvent], source_ledger: TrajectoryLedger,
@@ -139,14 +152,18 @@ class SyncBridge:
     def guard(self) -> PresenceWalGuard:
         return self._guard
 
-    def _cursor_path(self, cascade_id: CascadeId, codex_thread_id: CodexThreadId) -> Path:
+    @property
+    def transport(self) -> HostTransportPort:
+        return self._transport
+
+    def cursor_path(self, cascade_id: CascadeId, codex_thread_id: CodexThreadId) -> Path:
         validate_session_id(str(cascade_id), label="cascade_id")
         validate_session_id(str(codex_thread_id), label="codex_thread_id")
-        return _validated_child_path(
+        return validated_child_path(
             self._paths.sync_state_dir, "cursors", f"{cascade_id}__{codex_thread_id}.json", label="cursor_path"
         )
 
-    def _load_cursor(
+    def load_cursor(
         self, workspace_uri: WorkspaceRootUri, cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
     ) -> SessionSyncCursor | None:
         if cascade_id is not None:
@@ -164,8 +181,8 @@ class SyncBridge:
                 continue
             if not isinstance(raw, dict) or raw.get("workspace_uri") != str(workspace_uri):
                 continue
-            raw_cid = _safe_valid_session_id(raw.get("cascade_id"), "cascade_id")
-            raw_tid = _safe_valid_session_id(raw.get("codex_thread_id"), "codex_thread_id")
+            raw_cid = safe_valid_session_id(raw.get("cascade_id"), "cascade_id")
+            raw_tid = safe_valid_session_id(raw.get("codex_thread_id"), "codex_thread_id")
             if not (raw_cid and raw_tid):
                 continue
             if (cascade_id is not None and raw_cid != str(cascade_id)) or (codex_thread_id is not None and raw_tid != str(codex_thread_id)):
@@ -185,8 +202,8 @@ class SyncBridge:
         return matches[0][1] if matches else None
 
     def _save_cursor(self, cursor: SessionSyncCursor) -> None:
-        cpath = self._cursor_path(cursor.cascade_id, cursor.codex_thread_id)
-        _atomic_write_text(cpath, json.dumps(dataclasses.asdict(cursor), ensure_ascii=False, indent=2) + "\n")
+        cpath = self.cursor_path(cursor.cascade_id, cursor.codex_thread_id)
+        atomic_write_text(cpath, json.dumps(dataclasses.asdict(cursor), ensure_ascii=False, indent=2) + "\n")
         cursors_dir = self._paths.sync_state_dir / "cursors"
         ts_compact = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         for cf in list(cursors_dir.glob("*.json")) if cursors_dir.is_dir() else ():
@@ -204,62 +221,22 @@ class SyncBridge:
                 with contextlib.suppress(OSError):
                     os.replace(cf, superseded_dir / f"{ts_compact}_{cf.name}")
 
-    def _candidate_target_paths(
+    def candidate_target_paths(
         self, target_host: HostKind, cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
         *, binding: WorkspaceProjectBinding | None = None, lineage: SubagentLineage | None = None,
     ) -> tuple[list[Path], list[tuple[Path, str]]]:
-        if cascade_id is not None:
-            validate_session_id(str(cascade_id), label="cascade_id")
-        if codex_thread_id is not None:
-            validate_session_id(str(codex_thread_id), label="codex_thread_id")
-        if target_host == HostKind.ANTIGRAVITY:
-            files = [self._paths.agy_data_dir / "conversation_summaries.db", self._paths.agy_data_dir / "agyhub_summaries_proto.pb"]
-            if binding is not None:
-                files.append(self._paths.gemini_config_dir / "projects" / f"{binding.agy_project_id}.json")
-            if cascade_id is not None:
-                files.extend(
-                    _validated_child_path(rdir, "brain", str(cascade_id), ".system_generated", "logs", "transcript.jsonl", label="cascade_id")
-                    for rdir in (self._paths.agy_data_dir, self._paths.agy_cli_data_dir) if rdir is not None
-                )
-                files.extend([
-                    _validated_child_path(self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id"),
-                    _validated_child_path(self._paths.agy_data_dir, "annotations", f"{cascade_id}.pbtxt", label="cascade_id"),
-                ])
-                if lineage is not None and lineage.is_subagent and lineage.parent_cascade_id is not None:
-                    files.append(_validated_child_path(
-                        self._paths.agy_data_dir, "brain", str(lineage.parent_cascade_id), ".system_generated", "subagents", f"{cascade_id}.json", label="cascade_id"
-                    ))
-            return files, []
-        files = [
-            self._paths.codex_home_dir / "state_5.sqlite",
-            self._paths.codex_home_dir / ".codex-global-state.json",
-            self._paths.codex_home_dir / "session_index.jsonl",
-        ]
-        if codex_thread_id is None:
-            return files, []
-        for sub in ("sessions", "archived_sessions"):
-            sroot = self._paths.codex_home_dir / sub
-            if sroot.is_dir():
-                resolved_sroot = sroot.resolve(strict=False)
-                for pat in (f"*{codex_thread_id}.jsonl", f"*{codex_thread_id}.jsonl.zst"):
-                    files.extend(m for m in sroot.rglob(pat) if m.resolve(strict=False).is_relative_to(resolved_sroot))
-        return files, [
-            (self._paths.codex_home_dir / "sessions", f"*{codex_thread_id}.jsonl"),
-            (self._paths.codex_home_dir / "sessions", f"*{codex_thread_id}.jsonl.zst"),
-        ]
+        return self._transport.candidate_target_paths(
+            target_host, cascade_id, codex_thread_id, binding=binding, lineage=lineage,
+        )
 
-    @staticmethod
-    def _expand_existing_with_sidecars(candidates: Sequence[Path]) -> list[Path]:
-        return expand_existing_with_sidecars(candidates)
-
-    def _target_files_for_backup(
+    def target_files_for_backup(
         self, target_host: HostKind, cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
     ) -> list[Path]:
-        return expand_existing_with_sidecars(self._candidate_target_paths(target_host, cascade_id, codex_thread_id)[0])
+        return expand_existing_with_sidecars(self.candidate_target_paths(target_host, cascade_id, codex_thread_id)[0])
 
     def pair_workspace(self, workspace: str | Path, *, prefer_online_rpc: bool = True) -> WorkspaceProjectBinding:
         """Ensure both Antigravity and Codex have paired, sidebar-visible project entries for `workspace`."""
-        return guarded_pair_workspace(self._paths, self._guard, self._registry, workspace, prefer_online_rpc=prefer_online_rpc)
+        return self._registry.pair_workspace(workspace, guard=self._guard, prefer_online_rpc=prefer_online_rpc)
 
     def inspect_session_ledger(
         self, workspace: str | Path, *, cascade_id: CascadeId | None = None,
@@ -278,84 +255,41 @@ class SyncBridge:
             return self._transport.read_codex_ledger(binding, codex_thread_id, locks, mode)
         raise ValueError("Must provide either cascade_id or codex_thread_id to inspect_session_ledger.")
 
-    def _read_agy_lineage_fields(self, cid_key: str) -> tuple[str, str, int, str, str, StepIndex | None, bool]:
-        sc_info = self._registry._discover_agy_subagent_sidecars().get(cid_key, {})
-        parent_cid, root_cid, depth = str(sc_info.get("parent_cascade_id") or "").strip(), "", 0
-        type_name, role = str(sc_info.get("agent_type_name") or "").strip(), str(sc_info.get("agent_role") or "").strip()
-        spawn_idx: StepIndex | None = sc_info.get("spawn_step_index")
-        sum_row = _readonly_fetchone(
-            self._paths.agy_data_dir / "conversation_summaries.db",
-            "SELECT agent_name, parent_conversation_id, nesting_depth FROM conversation_summaries WHERE conversation_id = ?",
-            (cid_key,),
-        )
-        if sum_row:
-            role, parent_cid = (role or str(sum_row[0] or "").strip()), (parent_cid or str(sum_row[1] or "").strip())
-            depth = max(depth, int(sum_row[2] or 0))  # type: ignore[arg-type]
-        tblob = _readonly_fetchone(
-            _validated_child_path(self._paths.agy_data_dir, "conversations", f"{cid_key}.db", label="cascade_id"),
-            "SELECT data FROM trajectory_metadata_blob WHERE id = 'main'",
-        )
-        if tblob and tblob[0]:
-            meta = _parse_agy_trajectory_metadata_lineage(bytes(tblob[0]))  # type: ignore[arg-type]
-            parent_cid = parent_cid or str(meta["parent_conversation_id"] or "")
-            root_cid = root_cid or str(meta["root_conversation_id"] or "")
-            type_name, role = (type_name or str(meta["agent_type_name"] or "")), (role or str(meta["agent_role"] or ""))
-            depth = max(depth, int(meta["nesting_depth"] or 0))
-        return parent_cid, root_cid, depth, type_name, role, spawn_idx, bool(sc_info)
-
-    def _read_codex_lineage_fields(self, tid_key: str) -> tuple[str, int, str, str]:
-        row = _readonly_fetchone(
-            self._paths.codex_home_dir / "state_5.sqlite",
-            "SELECT attached_thread_parent_id, agent_role, agent_nickname, source FROM threads WHERE id = ?",
-            (tid_key,),
-        )
-        if not row:
-            return "", 0, "", ""
-        raw_src = str(row[3]) if row[3] is not None else None
-        src_is_sub, src_parent_tid, src_depth, src_type, src_nick = _parse_codex_thread_source_lineage(raw_src)
-        c_parent, c_type, c_nick = (str(row[0] or "").strip() or src_parent_tid), (str(row[1] or "").strip() or src_type), (str(row[2] or "").strip() or src_nick)
-        c_depth = compute_codex_nesting_depth(raw_src, src_is_sub, src_depth, c_parent, c_type, c_nick)
-        return (c_parent if c_depth > 0 else ""), c_depth, c_type, c_nick
-
-    def _resolve_session_lineage(
+    def resolve_session_lineage(
         self, binding: WorkspaceProjectBinding, cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None,
     ) -> SubagentLineage:
         p_cid, r_cid, agy_depth, t_name, role, spawn_idx, has_sc = (
-            self._read_agy_lineage_fields(validate_session_id(str(cascade_id), label="cascade_id"))
+            read_agy_session_lineage(self._paths, validate_session_id(str(cascade_id), label="cascade_id"))
             if cascade_id is not None else ("", "", 0, "", "", None, False)
         )
         p_tid, codex_depth, c_type, c_role = (
-            self._read_codex_lineage_fields(validate_session_id(str(codex_thread_id), label="codex_thread_id"))
+            read_codex_session_lineage(self._paths, validate_session_id(str(codex_thread_id), label="codex_thread_id"))
             if codex_thread_id is not None else ("", 0, "", "")
         )
-        p_cid, r_cid, p_tid = _safe_valid_session_id(p_cid, "p_cid"), _safe_valid_session_id(r_cid, "r_cid"), _safe_valid_session_id(p_tid, "p_tid")
+        p_cid = safe_valid_session_id(p_cid, "p_cid")
+        r_cid = safe_valid_session_id(r_cid, "r_cid")
+        p_tid = safe_valid_session_id(p_tid, "p_tid")
         depth = max(agy_depth, codex_depth, 1 if (has_sc or spawn_idx is not None) else 0)
         if depth > 0 or spawn_idx is not None:
             if p_cid and not p_tid:
-                cur = self._load_cursor(binding.workspace_uri, CascadeId(p_cid), None)
-                p_tid = str(cur.codex_thread_id) if cur else _deterministic_uuid("paired-codex-thread", p_cid)
+                cur = self.load_cursor(binding.workspace_uri, CascadeId(p_cid), None)
+                p_tid = str(cur.codex_thread_id) if cur else deterministic_uuid("paired-codex-thread", p_cid)
             elif p_tid and not p_cid:
-                cur = self._load_cursor(binding.workspace_uri, None, CodexThreadId(p_tid))
-                p_cid = str(cur.cascade_id) if cur else _deterministic_uuid("paired-cascade", p_tid)
+                cur = self.load_cursor(binding.workspace_uri, None, CodexThreadId(p_tid))
+                p_cid = str(cur.cascade_id) if cur else deterministic_uuid("paired-cascade", p_tid)
             r_cid = r_cid or p_cid
         return SubagentLineage(
             CascadeId(p_cid) if p_cid else None, CascadeId(r_cid) if r_cid else None,
             CodexThreadId(p_tid) if p_tid else None, depth, t_name or c_type, role or c_role, spawn_idx,
         )
 
-    @staticmethod
-    def _is_source_actively_running(
-        host: HostKind, ledger: TrajectoryLedger | None, locks: HostLockSnapshot, *, rpc_active: bool = False,
-    ) -> bool:
-        return is_source_actively_running(host, ledger, locks, rpc_active=rpc_active)
-
     def _unpaired_det_cid(self, ws_uri: WorkspaceRootUri, tid: CodexThreadId) -> CascadeId | None:
-        det = CascadeId(_deterministic_uuid("paired-cascade", str(tid)))
-        return det if self._load_cursor(ws_uri, det, None) is None else None
+        det = CascadeId(deterministic_uuid("paired-cascade", str(tid)))
+        return det if self.load_cursor(ws_uri, det, None) is None else None
 
     def _unpaired_det_tid(self, ws_uri: WorkspaceRootUri, cid: CascadeId) -> CodexThreadId | None:
-        det = CodexThreadId(_deterministic_uuid("paired-codex-thread", str(cid)))
-        return det if self._load_cursor(ws_uri, None, det) is None else None
+        det = CodexThreadId(deterministic_uuid("paired-codex-thread", str(cid)))
+        return det if self.load_cursor(ws_uri, None, det) is None else None
 
     def _probe_and_read_ledgers(
         self, binding: WorkspaceProjectBinding, cursor: SessionSyncCursor | None,
@@ -417,11 +351,11 @@ class SyncBridge:
                 except BlockingIOError:
                     return SyncReceipt(binding, plan.target_cid, plan.target_tid, "deferred_busy", plan.receipt_transport, 0, cursor)
                 target_sid = str(plan.target_cid) if plan.target_host == HostKind.ANTIGRAVITY else str(plan.target_tid)
-                candidates, cleanup_globs = self._candidate_target_paths(
+                candidates, cleanup_globs = self.candidate_target_paths(
                     plan.target_host, plan.target_cid, plan.target_tid, binding=binding, lineage=plan.lineage
                 )
                 backup = self._guard.create_offline_backup(
-                    plan.target_host, target_sid, self._expand_existing_with_sidecars(candidates),
+                    plan.target_host, target_sid, expand_existing_with_sidecars(candidates),
                     expected_new_files=candidates, cleanup_globs=cleanup_globs,
                 )
             try:
@@ -431,7 +365,7 @@ class SyncBridge:
                 new_cursor = SessionSyncCursor(
                     binding.workspace_uri, written_cid, written_tid, synced_turn,
                     agy_wm.last_agy_step_index or StepIndex(0), codex_wm.last_codex_line_no or RolloutLineNo(1),
-                    agy_wm.boundary_digest, codex_wm.boundary_digest, _now_iso(),
+                    agy_wm.boundary_digest, codex_wm.boundary_digest, now_iso(),
                     plan.was_source_rescued, src_host.value if plan.was_source_rescued else "",
                 )
                 self._save_cursor(new_cursor)
@@ -497,8 +431,8 @@ class SyncBridge:
             transition.selected_transport, "diverged_forked" if is_fork else "diverged_overwritten",
             eff_lineage, source_tag, receipt_transport=receipt_transport,
             was_source_rescued=(was_codex_rescued if is_agy else was_agy_rescued),
-            forked_from_cascade_id=(orig_cid if (is_fork and is_agy and orig_cid != _NULL_CID) else None),
-            forked_from_codex_thread_id=(orig_tid if (not is_agy and is_fork and orig_tid != _NULL_TID) else None),
+            forked_from_cascade_id=(orig_cid if (is_fork and is_agy and orig_cid != NULL_CASCADE_ID) else None),
+            forked_from_codex_thread_id=(orig_tid if (not is_agy and is_fork and orig_tid != NULL_CODEX_THREAD_ID) else None),
             agy_turn_inflight=(False if (is_fork and is_agy) else bool(agy_ledger and agy_ledger.has_inflight_turn)),
             codex_turn_inflight=(False if (is_fork and not is_agy) else bool(codex_ledger and codex_ledger.has_inflight_turn)),
         )
@@ -514,8 +448,8 @@ class SyncBridge:
         src_ledger = codex_ledger if to_agy else agy_ledger
         can_write = locks.can_write_agy_offline() if to_agy else locks.can_write_codex_offline()
         orphan_free = (
-            self._load_cursor(binding.workspace_uri, None, orig_tid) is None
-            if to_agy else self._load_cursor(binding.workspace_uri, orig_cid, None) is None
+            self.load_cursor(binding.workspace_uri, None, orig_tid) is None
+            if to_agy else self.load_cursor(binding.workspace_uri, orig_cid, None) is None
         )
         if not (
             (to_agy or primary_receipt.forked_from_cascade_id is not None)
@@ -531,8 +465,8 @@ class SyncBridge:
             TransportMode.OFFLINE_STORAGE, "diverged_forked",
             lineage if lineage.is_subagent else SubagentLineage(), source_tag,
             was_source_rescued=(was_codex_rescued if to_agy else was_agy_rescued),
-            forked_from_cascade_id=(orig_cid if (to_agy and orig_cid != _NULL_CID) else None),
-            forked_from_codex_thread_id=(orig_tid if (not to_agy and orig_tid != _NULL_TID) else None),
+            forked_from_cascade_id=(orig_cid if (to_agy and orig_cid != NULL_CASCADE_ID) else None),
+            forked_from_codex_thread_id=(orig_tid if (not to_agy and orig_tid != NULL_CODEX_THREAD_ID) else None),
         ))
         return (peer_rec.cascade_id, peer_rec.codex_thread_id) if peer_rec.transition_kind == "diverged_forked" else (None, None)
 
@@ -544,8 +478,8 @@ class SyncBridge:
         source_tag: AgyGuiSafeSource, lineage: SubagentLineage,
     ) -> SyncReceipt:
         final_cid, final_tid = (cascade_id or transition.cursor.cascade_id), (codex_thread_id or transition.cursor.codex_thread_id)
-        if agy_ledger is not None and codex_ledger is not None and hasattr(self._transport, "ensure_companion_stores_complete"):
-            binding = self._transport.ensure_companion_stores_complete(  # type: ignore[attr-defined]
+        if agy_ledger is not None and codex_ledger is not None:
+            binding = self._transport.ensure_companion_stores_complete(
                 binding, final_cid, final_tid, agy_ledger, codex_ledger,
                 locks, mode, source_tag, lineage, self._guard, self._registry,
             )
@@ -598,21 +532,21 @@ class SyncBridge:
         if codex_thread_id is not None:
             validate_session_id(str(codex_thread_id), label="codex_thread_id")
         binding = self._registry.resolve_readonly_binding(workspace)
-        cursor = self._load_cursor(binding.workspace_uri, cascade_id, codex_thread_id)
+        cursor = self.load_cursor(binding.workspace_uri, cascade_id, codex_thread_id)
         if cursor is not None:
             cascade_id, codex_thread_id = (cascade_id or cursor.cascade_id), (codex_thread_id or cursor.codex_thread_id)
 
-        lineage = self._resolve_session_lineage(binding, cascade_id, codex_thread_id)
+        lineage = self.resolve_session_lineage(binding, cascade_id, codex_thread_id)
         probed = self._probe_and_read_ledgers(binding, cursor, cascade_id, codex_thread_id, direction, mode)
         cascade_id, codex_thread_id = probed.cascade_id, probed.codex_thread_id
         if probed.rpc_required_unavailable:
-            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
+            return SyncReceipt(binding, cascade_id or NULL_CASCADE_ID, codex_thread_id or NULL_CODEX_THREAD_ID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
 
         agy_ledger, codex_ledger, cursor, agy_rec, codex_rec, was_agy_rescued, was_codex_rescued, busy_src = (
             reconcile_and_rescue_ledgers(cursor, probed, direction, include_interrupted)
         )
         if busy_src:
-            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", probed.resolve_receipt_transport(mode, is_deferred=True), 0, cursor)
+            return SyncReceipt(binding, cascade_id or NULL_CASCADE_ID, codex_thread_id or NULL_CODEX_THREAD_ID, "deferred_busy", probed.resolve_receipt_transport(mode, is_deferred=True), 0, cursor)
 
         locks = self._guard.probe_locks(
             probed.probe_cid, probed.probe_tid,
@@ -621,20 +555,20 @@ class SyncBridge:
         )
         transition = CursorForkStateMachine.evaluate(
             agy_ledger, codex_ledger, cursor, direction, locks, mode, fork_policy,
-            online_rpc_write_supported=bool(getattr(self._transport, "supports_online_rpc_write", False)),
+            online_rpc_write_supported=self._transport.supports_online_rpc_write,
         )
         if isinstance(transition, NoOpTransition):
             if not probed.satisfies_online_rpc_mode(mode, None):
-                return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
+                return SyncReceipt(binding, cascade_id or NULL_CASCADE_ID, codex_thread_id or NULL_CODEX_THREAD_ID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
             return self._finalize_noop(
                 binding, cursor, transition, cascade_id, codex_thread_id, agy_ledger, codex_ledger,
                 locks, mode, probed.resolve_receipt_transport(mode), source_tag, lineage,
             )
         if isinstance(transition, DeferredBusyTransition):
-            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", probed.resolve_receipt_transport(mode, is_deferred=True), 0, cursor)
+            return SyncReceipt(binding, cascade_id or NULL_CASCADE_ID, codex_thread_id or NULL_CODEX_THREAD_ID, "deferred_busy", probed.resolve_receipt_transport(mode, is_deferred=True), 0, cursor)
 
         if not probed.satisfies_online_rpc_mode(mode, transition.source_host):
-            return SyncReceipt(binding, cascade_id or _NULL_CID, codex_thread_id or _NULL_TID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
+            return SyncReceipt(binding, cascade_id or NULL_CASCADE_ID, codex_thread_id or NULL_CODEX_THREAD_ID, "deferred_busy", TransportMode.ONLINE_RPC, 0, cursor)
         receipt_tr = probed.resolve_receipt_transport(mode, source_host=transition.source_host)
         if isinstance(transition, (InitialImportTransition, IncrementalAppendTransition)):
             plan = self._build_import_or_append_plan(

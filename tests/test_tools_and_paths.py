@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 
 from codex_agy_sync.bridge import TransportMode
-from codex_agy_sync.codecs import AgyRawStepRow, CodexRawRolloutLine, TrajectoryWireCodec
+from codex_agy_sync.codecs import (
+    AgyRawStepRow, CodexRawRolloutLine, decode_agy_trajectory, decode_codex_rollout,
+    encode_agy_trajectory, encode_codex_rollout,
+)
 from codex_agy_sync._wire import (
     encode_bytes_field, encode_string_field, encode_varint_field, iter_wire_fields,
 )
@@ -152,8 +155,8 @@ class TestToolsAndPaths(BridgeSandboxBase):
         ]
         ws_path, ws_uri = parse_workspace_identity(self.workspace_dir)
         ledger = TrajectoryLedger.from_events(ws_path, ws_uri, events)
-        agy_steps = TrajectoryWireCodec.encode_ledger_to_agy_steps(ledger)
-        decoded_agy = TrajectoryWireCodec.decode_agy_steps_to_ledger(ws_path, ws_uri, agy_steps)
+        agy_steps = encode_agy_trajectory(ledger)
+        decoded_agy = decode_agy_trajectory(ws_path, ws_uri, agy_steps)
         read_calls = [
             ev for ev in decoded_agy.events
             if isinstance(ev, ToolCallEvent) and isinstance(ev.payload, ReadFilePayload)
@@ -165,8 +168,8 @@ class TestToolsAndPaths(BridgeSandboxBase):
         self.assertEqual(read_calls[0].payload.path, "/workspace/My Dir/100%_test.py")
         self.assertEqual(edit_calls[0].payload.path, "/workspace/My Dir/100%_test.py")
 
-        codex_lines = TrajectoryWireCodec.encode_ledger_to_codex_rollout(decoded_agy)
-        decoded_codex = TrajectoryWireCodec.decode_codex_rollout_to_ledger(ws_path, ws_uri, codex_lines)
+        codex_lines = encode_codex_rollout(decoded_agy)
+        decoded_codex = decode_codex_rollout(ws_path, ws_uri, codex_lines)
         codex_edit_calls = [
             ev for ev in decoded_codex.events
             if isinstance(ev, ToolCallEvent) and isinstance(ev.payload, FileEditPayload)
@@ -266,7 +269,7 @@ class TestToolsAndPaths(BridgeSandboxBase):
             ],
         )
 
-        agy_steps = TrajectoryWireCodec.encode_ledger_to_agy_steps(ledger)
+        agy_steps = encode_agy_trajectory(ledger)
         chat_arg_dicts: list[dict[str, object]] = []
         for row in agy_steps:
             for fn, wt, _, raw in iter_wire_fields(row.step_payload_blob):
@@ -286,12 +289,12 @@ class TestToolsAndPaths(BridgeSandboxBase):
         self.assertEqual(read_chat_args["StartLine"], 5)
         self.assertEqual(read_chat_args["EndLine"], 15)
 
-        agy_decoded = TrajectoryWireCodec.decode_agy_steps_to_ledger(ws_path, ws_uri, agy_steps)
+        agy_decoded = decode_agy_trajectory(ws_path, ws_uri, agy_steps)
         agy_calls = [ev for ev in agy_decoded.events if isinstance(ev, ToolCallEvent)]
         self.assertEqual(agy_calls[0].payload, del_payload)
         self.assertEqual(agy_calls[1].payload, cmd_payload)
 
-        codex_lines = TrajectoryWireCodec.encode_ledger_to_codex_rollout(
+        codex_lines = encode_codex_rollout(
             ledger,
             session_id="01970000-0000-7000-8000-000000000088",
             cwd=str(ws_path),
@@ -325,7 +328,7 @@ class TestToolsAndPaths(BridgeSandboxBase):
         self.assertEqual(exec_args["cmd"], "pytest -q")
         self.assertEqual(exec_args["workdir"], "/workspace/sub")
 
-        codex_decoded = TrajectoryWireCodec.decode_codex_rollout_to_ledger(ws_path, ws_uri, codex_lines)
+        codex_decoded = decode_codex_rollout(ws_path, ws_uri, codex_lines)
         codex_calls = [ev for ev in codex_decoded.events if isinstance(ev, ToolCallEvent)]
         self.assertEqual(codex_calls[0].payload, del_payload)
         self.assertEqual(codex_calls[1].payload, cmd_payload)
@@ -343,7 +346,7 @@ class TestToolsAndPaths(BridgeSandboxBase):
         conv_wal = self.paths.agy_data_dir / "conversations" / "wal-c1.db-wal"
         conv_db.write_text("db", encoding="utf-8")
         conv_wal.write_text("wal", encoding="utf-8")
-        bfiles = self.bridge._target_files_for_backup(
+        bfiles = self.bridge.target_files_for_backup(
             HostKind.ANTIGRAVITY, CascadeId("wal-c1"), CodexThreadId("wal-t1")
         )
         self.assertIn(conv_wal, bfiles)
@@ -354,7 +357,7 @@ class TestToolsAndPaths(BridgeSandboxBase):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             lf.chmod(0o400)
-            self.assertTrue(self.bridge.guard._probe_flock_locked(lf))
+            self.assertTrue(self.bridge.guard.probe_flock_locked(lf))
         finally:
             lf.chmod(0o600)
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -372,14 +375,14 @@ class TestToolsAndPaths(BridgeSandboxBase):
                 },
             }
         )
-        err_ledger = TrajectoryWireCodec.decode_codex_rollout_to_ledger(
+        err_ledger = decode_codex_rollout(
             self.workspace_dir,
             "file:///tmp",
             [CodexRawRolloutLine(RolloutLineNo(1), failed_line)],
         )
         err_res = [e for e in err_ledger.events if isinstance(e, ToolResultEvent)][0]
         self.assertTrue(err_res.is_error)
-        err_steps = TrajectoryWireCodec.encode_ledger_to_agy_steps(err_ledger)
+        err_steps = encode_agy_trajectory(err_ledger)
         self.assertEqual([s for s in err_steps if s.step_type == 132][0].status, 7)
 
         ui_sub = encode_string_field(1, "Hello") + encode_string_field(20, "inner_unknown")
@@ -388,12 +391,12 @@ class TestToolsAndPaths(BridgeSandboxBase):
             + encode_varint_field(4, 3)
             + encode_bytes_field(19, ui_sub)
         )
-        unk_ledger = TrajectoryWireCodec.decode_agy_steps_to_ledger(
+        unk_ledger = decode_agy_trajectory(
             self.workspace_dir,
             "file:///tmp",
             [AgyRawStepRow(StepIndex(0), 14, 3, False, b"", outer_step)],
         )
-        reencoded = TrajectoryWireCodec.encode_ledger_to_agy_steps(unk_ledger)
+        reencoded = encode_agy_trajectory(unk_ledger)
         outer_tags = [fn for fn, _, _, _ in iter_wire_fields(reencoded[0].step_payload_blob)]
         self.assertIn(19, outer_tags)
         self.assertNotIn(20, outer_tags)
@@ -421,7 +424,7 @@ class TestToolsAndPaths(BridgeSandboxBase):
             ),
         ]
         s_ledger = TrajectoryLedger.from_events(binding.workspace_path, binding.workspace_uri, evs)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             CascadeId("11111111-2222-3333-4444-555555555551"),
             evs,
@@ -429,7 +432,7 @@ class TestToolsAndPaths(BridgeSandboxBase):
             locks,
             TransportMode.OFFLINE_STORAGE,
         )
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             CascadeId("11111111-2222-3333-4444-555555555552"),
             evs,

@@ -13,7 +13,7 @@ import unittest
 
 from codex_agy_sync.bridge import FORBIDDEN_AGY_PROJECT_IDS, HostEnvironmentPaths, SyncBridge
 from codex_agy_sync.cli import main as cli_main
-from codex_agy_sync.codecs import decode_summaries_state_proto
+from codex_agy_sync.codecs import decode_summaries_state_proto, encode_cascade_summary_proto
 from codex_agy_sync.ledger import (
     AssistantTextEvent, CascadeId, CodexThreadId, EventOriginAnchor, HostKind, TurnId,
     UserInputEvent, parse_workspace_identity,
@@ -71,9 +71,9 @@ class BridgeSandboxBase(unittest.TestCase):
                 dst_sum = self.paths.agy_data_dir / "conversation_summaries.db"
                 dconn = sqlite3.connect(str(dst_sum))
                 try:
-                    from codex_agy_sync.bridge import _ensure_agy_summaries_db_schema
+                    from codex_agy_sync.bridge import ensure_agy_summaries_db_schema
 
-                    _ensure_agy_summaries_db_schema(dconn)
+                    ensure_agy_summaries_db_schema(dconn)
                     dconn.execute(
                         """
                         INSERT OR REPLACE INTO conversation_summaries (
@@ -120,9 +120,9 @@ class BridgeSandboxBase(unittest.TestCase):
         dst_state = self.paths.codex_home_dir / "state_5.sqlite"
         dconn = sqlite3.connect(str(dst_state))
         try:
-            from codex_agy_sync.bridge import _ensure_codex_state_db_schema
+            from codex_agy_sync.bridge import ensure_codex_state_db_schema
 
-            _ensure_codex_state_db_schema(dconn)
+            ensure_codex_state_db_schema(dconn)
             dconn.execute(
                 """
                 INSERT OR REPLACE INTO threads (
@@ -164,7 +164,7 @@ class BridgeSandboxBase(unittest.TestCase):
         self.assertEqual(proj_doc["id"], str(binding.agy_project_id))
         self.assertIn(
             str(binding.workspace_uri),
-            self.bridge.registry._extract_agy_project_folder_uris(proj_doc),
+            self.bridge.registry.extract_agy_project_folder_uris(proj_doc),
         )
 
         annot_pbtxt = self.paths.agy_data_dir / "annotations" / f"{cid}.pbtxt"
@@ -236,7 +236,7 @@ class BridgeSandboxBase(unittest.TestCase):
         self.assertIn(cid, hub_state.summaries)
         hub_unk: list[dict[str, object]] = []
         decoded_hub_sum = decode_protobuf(
-            hub_state.summaries[cid].summary_proto_bytes,
+            encode_cascade_summary_proto(hub_state.summaries[cid]),
             "exa.jetski_cortex_pb.CascadeTrajectorySummary",
             self.schema,
             hub_unk,

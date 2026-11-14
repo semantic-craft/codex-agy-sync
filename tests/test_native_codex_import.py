@@ -7,9 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from codex_agy_sync.bridge.native_codex import NativeCodexImportPending
+from codex_agy_sync.bridge.native_codex import NativeCodexImportPending, import_codex_rollout_via_rpc
 from codex_agy_sync.bridge.paths_and_locks import CodexDaemonEndpoint
-from codex_agy_sync.bridge.rpc import import_codex_rollout_via_rpc
 
 
 class TestNativeCodexImport(unittest.TestCase):
@@ -25,7 +24,7 @@ class TestNativeCodexImport(unittest.TestCase):
         self.sock = mock.Mock(spec=socket.socket)
         self.ws = mock.Mock()
         self.addCleanup(self.temp.cleanup)
-        for name, replacement in [("socket.socket", self.sock), ("_UnixWebSocketClient", self.ws)]:
+        for name, replacement in [("socket.socket", self.sock), ("UnixWebSocketClient", self.ws)]:
             patcher = mock.patch(f"codex_agy_sync.bridge.native_codex.{name}", return_value=replacement)
             patcher.start()
             self.addCleanup(patcher.stop)

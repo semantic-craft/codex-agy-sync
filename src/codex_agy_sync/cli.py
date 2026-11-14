@@ -8,9 +8,10 @@ from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
 
-from . import __version__
 from .bridge import (
     ForkResolutionPolicy,
+    HandoffCancelledError,
+    HandoffPendingError,
     HostEnvironmentPaths,
     SyncBridge,
     SyncBusyLockError,
@@ -19,22 +20,19 @@ from .bridge import (
     TransportMode,
     UnpairedWorkspaceError,
     WorkspaceProjectBinding,
+    execute_handoff,
+    validate_handoff_selector_flags,
 )
-from .bridge.handoff import HandoffPendingError, handoff_session
-from .bridge.handoff_resolve import HandoffCancelledError, resolve_handoff_request
-from .ledger import (
-    AgyGuiSafeSource,
+from .events import (
     AssistantTextEvent,
-    CascadeId,
     CheckpointEvent,
-    CodexThreadId,
     ThinkingEvent,
     ToolCallEvent,
     ToolResultEvent,
     UserInputEvent,
 )
 from .workbench import query_workbench_status, run_serve_server, stop_workbench_server
-from .workbench._discovery import normalize_workspace_spec
+from .workspace import AgyGuiSafeSource, CascadeId, CodexThreadId, PACKAGE_VERSION, normalize_workspace_spec
 
 
 def _binding_to_dict(binding: WorkspaceProjectBinding) -> dict[str, Any]:
@@ -118,7 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--version",
         "-V",
         action="version",
-        version=f"%(prog)s {__version__}",
+        version=f"%(prog)s {PACKAGE_VERSION}",
     )
     parser.add_argument("--agy-data-dir", type=Path, default=None, help="Override Antigravity data directory (defaults to $ANTIGRAVITY_DATA_DIR or ~/.gemini/antigravity).")
     parser.add_argument("--agy-cli-data-dir", type=Path, default=None, help="Override Antigravity CLI data directory (defaults to $ANTIGRAVITY_CLI_DATA_DIR or ~/.gemini/antigravity-cli if present).")
@@ -269,12 +267,15 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         return
     if args.subcommand != "handoff":
         return
-    if args.chain and (args.latest or args.pick):
-        parser.error("--chain cannot be combined with --latest or --pick.")
-    if args.source_id is not None and (args.latest or args.pick):
-        parser.error("--source-id cannot be combined with --latest or --pick.")
-    if args.latest and args.pick:
-        parser.error("--latest cannot be combined with --pick.")
+    try:
+        validate_handoff_selector_flags(
+            source_id=args.source_id,
+            latest=bool(args.latest),
+            chain=bool(args.chain),
+            pick=bool(args.pick),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
@@ -298,7 +299,7 @@ def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int
 
 def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
     try:
-        resolved = resolve_handoff_request(
+        receipt, _ = execute_handoff(
             bridge.paths,
             workspace_arg,
             direction=SyncDirection(args.direction) if args.direction else None,
@@ -309,19 +310,6 @@ def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
             pick=bool(args.pick),
             pair_if_offline=bool(args.pair_if_offline),
         )
-        if resolved.already_ready_receipt is not None:
-            receipt = resolved.already_ready_receipt
-        else:
-            receipt = handoff_session(
-                bridge.paths,
-                resolved.binding.workspace_path,
-                direction=resolved.direction,
-                source_id=resolved.source_id,
-                title=resolved.title,
-                chain_id=resolved.chain_id,
-                chained_from_source_id=resolved.chained_from_source_id,
-                chain_depth=resolved.chain_depth,
-            )
     except (UnpairedWorkspaceError, SyncBusyLockError) as exc:
         print(json.dumps(exc.to_error_payload(), ensure_ascii=False, indent=2), file=sys.stderr)
         return 2
