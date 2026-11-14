@@ -13,12 +13,15 @@ from .bridge import (
     ForkResolutionPolicy,
     HostEnvironmentPaths,
     SyncBridge,
+    SyncBusyLockError,
     SyncDirection,
     SyncReceipt,
     TransportMode,
+    UnpairedWorkspaceError,
     WorkspaceProjectBinding,
 )
 from .bridge.handoff import HandoffPendingError, handoff_session
+from .bridge.handoff_resolve import HandoffCancelledError, resolve_handoff_request
 from .ledger import (
     AgyGuiSafeSource,
     AssistantTextEvent,
@@ -144,9 +147,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     handoff = subparsers.add_parser("handoff", help="Hand completed history to a new Desktop session; does not append to an existing target.")
     handoff.add_argument("--workspace", "-w", default=None, help="Workspace path or file:// URI, already registered on both hosts.")
-    handoff.add_argument("--direction", choices=["codex_to_agy", "agy_to_codex"], required=True)
-    handoff.add_argument("--source-id", required=True, help="Source Codex thread or Antigravity cascade UUID.")
+    handoff.add_argument("--direction", "-d", choices=["codex_to_agy", "agy_to_codex"], default=None, help="Optional explicit handoff direction; inferred automatically when omitted.")
+    handoff.add_argument("--source-id", default=None, help="Source Codex thread or Antigravity cascade UUID.")
     handoff.add_argument("--title", default=None, help="Title for the new Desktop session, defaulting to the source title.")
+    handoff.add_argument("--latest", action="store_true", help="Select the newest completed non-untouched-target session in the workspace.")
+    handoff.add_argument("--chain", action="store_true", help="Advance or re-handoff along the workspace's active handoff chain.")
+    handoff.add_argument("--pick", action="store_true", help="Interactively choose a candidate session via stderr menu (requires TTY).")
+    handoff.add_argument("--pair-if-offline", action="store_true", help="Automatically pair missing offline host registrations before handoff.")
 
     sync_w = subparsers.add_parser("sync-workspace", help="Synchronize all sessions in a workspace.")
     _add_sync_common_args(sync_w)
@@ -234,12 +241,67 @@ def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
     }
 
 
+def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.subcommand != "handoff":
+        return
+    if args.chain and (args.latest or args.pick):
+        parser.error("--chain cannot be combined with --latest or --pick.")
+    if args.source_id is not None and (args.latest or args.pick):
+        parser.error("--source-id cannot be combined with --latest or --pick.")
+    if args.latest and args.pick:
+        parser.error("--latest cannot be combined with --pick.")
+
+
+def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
+    try:
+        resolved = resolve_handoff_request(
+            bridge.paths,
+            workspace_arg,
+            direction=SyncDirection(args.direction) if args.direction else None,
+            source_id=args.source_id,
+            title=args.title,
+            latest=bool(args.latest),
+            chain=bool(args.chain),
+            pick=bool(args.pick),
+            pair_if_offline=bool(args.pair_if_offline),
+        )
+        if resolved.already_ready_receipt is not None:
+            receipt = resolved.already_ready_receipt
+        else:
+            receipt = handoff_session(
+                bridge.paths,
+                resolved.binding.workspace_path,
+                direction=resolved.direction,
+                source_id=resolved.source_id,
+                title=resolved.title,
+                chain_id=resolved.chain_id,
+                chained_from_source_id=resolved.chained_from_source_id,
+                chain_depth=resolved.chain_depth,
+            )
+    except (UnpairedWorkspaceError, SyncBusyLockError) as exc:
+        print(json.dumps(exc.to_error_payload(), ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
+    except HandoffPendingError as exc:
+        print(json.dumps(dataclasses.asdict(exc.receipt), ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
+    except HandoffCancelledError as exc:
+        print(json.dumps({"error": "handoff_cancelled", "message": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(json.dumps({"error": "invalid_handoff_request", "message": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
+    print(json.dumps(dataclasses.asdict(receipt), ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     env: Mapping[str, str] | None = None,
 ) -> int:
-    args = _build_parser().parse_args(list(argv) if argv is not None else None)
+    parser = _build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    _validate_cli_args(parser, args)
     bridge = SyncBridge(paths=_resolve_paths(args, env=env))
     if args.workspace is not None:
         raw_ws = str(args.workspace).strip()
@@ -252,7 +314,12 @@ def main(
         workspace_arg = os.getcwd()
 
     if args.subcommand == "pair":
-        print(json.dumps(_binding_to_dict(bridge.pair_workspace(workspace_arg)), ensure_ascii=False, indent=2))
+        try:
+            binding = bridge.pair_workspace(workspace_arg)
+        except SyncBusyLockError as exc:
+            print(json.dumps(exc.to_error_payload(), ensure_ascii=False, indent=2), file=sys.stderr)
+            return 2
+        print(json.dumps(_binding_to_dict(binding), ensure_ascii=False, indent=2))
         return 0
     if args.subcommand == "status":
         print(json.dumps(_run_status_cmd(bridge, workspace_arg, bool(args.include_subagents)), ensure_ascii=False, indent=2))
@@ -261,13 +328,7 @@ def main(
         print(json.dumps(_run_inspect_cmd(bridge, workspace_arg, args), ensure_ascii=False, indent=2))
         return 0
     if args.subcommand == "handoff":
-        try:
-            receipt = handoff_session(bridge.paths, workspace_arg, direction=SyncDirection(args.direction), source_id=args.source_id, title=args.title)
-        except HandoffPendingError as exc:
-            print(json.dumps(dataclasses.asdict(exc.receipt), ensure_ascii=False, indent=2), file=sys.stderr)
-            return 2
-        print(json.dumps(dataclasses.asdict(receipt), ensure_ascii=False, indent=2))
-        return 0
+        return _run_handoff_cmd(bridge, workspace_arg, args)
     if args.subcommand == "sync-session":
         receipt = bridge.sync_session(
             workspace_arg,

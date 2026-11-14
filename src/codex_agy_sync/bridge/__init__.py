@@ -2,6 +2,23 @@
 
 from __future__ import annotations
 
+from .handoff import (
+    HandoffPendingError,
+    HandoffReceipt,
+    handoff_session,
+    ledger_seed_fingerprint,
+    load_handoff_receipt,
+)
+from .handoff_resolve import (
+    HandoffCancelledError,
+    HandoffCandidate,
+    ResolvedHandoffRequest,
+    UnpairedWorkspaceError,
+    WorkspaceBindingDiagnosis,
+    diagnose_workspace_binding,
+    list_handoff_candidates,
+    resolve_handoff_request,
+)
 from .paths_and_locks import (
     AgyDaemonEndpoint,
     BackupManifest,
@@ -69,6 +86,10 @@ __all__ = [
     "EmptySessionError",
     "FORBIDDEN_AGY_PROJECT_IDS",
     "ForkResolutionPolicy",
+    "HandoffCancelledError",
+    "HandoffCandidate",
+    "HandoffPendingError",
+    "HandoffReceipt",
     "HostEnvironmentPaths",
     "HostLockSnapshot",
     "HostTransportPort",
@@ -79,12 +100,15 @@ __all__ = [
     "PairedSessionDescriptor",
     "PresenceWalGuard",
     "ProjectRegistry",
+    "ResolvedHandoffRequest",
     "SessionSyncCursor",
     "SyncBridge",
     "SyncBusyLockError",
     "SyncDirection",
     "SyncReceipt",
     "TransportMode",
+    "UnpairedWorkspaceError",
+    "WorkspaceBindingDiagnosis",
     "WorkspaceProjectBinding",
     "_atomic_write_bytes",
     "_atomic_write_rollout",
@@ -97,8 +121,14 @@ __all__ = [
     "_now_iso",
     "_open_readonly_sqlite",
     "_validated_child_path",
+    "diagnose_workspace_binding",
     "fetch_agy_trajectory_via_rpc",
     "fetch_codex_thread_via_rpc",
     "generate_uuid7",
+    "handoff_session",
     "has_live_unix_socket",
+    "ledger_seed_fingerprint",
+    "list_handoff_candidates",
+    "load_handoff_receipt",
+    "resolve_handoff_request",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 from dataclasses import dataclass
 import fcntl
@@ -13,9 +14,10 @@ from typing import Literal
 
 from ..codecs import TrajectoryWireCodec, serialize_tool_payload_arguments_json
 from ..codecs.tools import safe_json_dict
-from ..ledger import AgyGuiSafeSource, AssistantTextEvent, CascadeId, CheckpointEvent, CodexThreadId, HostKind, SubagentLineage, TrajectoryLedger, UserInputEvent, ThinkingEvent, ToolCallEvent, ToolResultEvent, SystemEvent, validate_session_id
+from ..ledger import AgyGuiSafeSource, AssistantTextEvent, CascadeId, CheckpointEvent, CodexThreadId, HostKind, SubagentLineage, TrajectoryLedger, UserInputEvent, ThinkingEvent, ToolCallEvent, ToolResultEvent, SystemEvent, parse_workspace_identity, validate_session_id
 from .paths_and_locks import HostEnvironmentPaths, PresenceWalGuard, TransportMode, _atomic_write_text, _now_iso
 from .registry import ProjectRegistry, WorkspaceProjectBinding
+from .rescue_and_fork import SyncBusyLockError
 from . import rpc
 from .state_machine import SyncDirection, generate_uuid7
 from .transport import DefaultHostTransport
@@ -39,6 +41,38 @@ class HandoffReceipt:
     staging_path: str
     runtime_state_not_transferred: bool = True
     error: str | None = None
+    created_at_iso: str = ""
+    chain_id: str | None = None
+    chained_from_source_id: str | None = None
+    chain_depth: int = 0
+    target_seed_turn_count: int | None = None
+    target_seed_text_digest: str | None = None
+
+
+_RECEIPT_FIELDS = frozenset(field.name for field in dataclasses.fields(HandoffReceipt))
+
+
+def load_handoff_receipt(path: Path) -> HandoffReceipt:
+    """Parse a persisted handoff receipt JSON file while preserving legacy schema compatibility."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Invalid handoff receipt payload in {path}: expected JSON object.")
+    return HandoffReceipt(**{key: value for key, value in raw.items() if key in _RECEIPT_FIELDS})
+
+
+def ledger_seed_fingerprint(ledger: TrajectoryLedger) -> tuple[int, str]:
+    """Compute `(completed_turn_count, sha256_digest)` for completed user/assistant texts without extra RPCs."""
+    pairs: list[list[str]] = []
+    for event in ledger.slice_after_watermark(None):
+        if isinstance(event, UserInputEvent):
+            if not _host_injected_user(event):
+                pairs.append(["user_input", event.query_text.strip()])
+        elif isinstance(event, AssistantTextEvent):
+            pairs.append(["assistant_text", event.text.strip()])
+    digest = hashlib.sha256(
+        json.dumps(pairs, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return len(ledger.completed_turn_watermarks), digest
 
 
 class HandoffPendingError(RuntimeError):
@@ -51,15 +85,27 @@ def _save_receipt(path: Path, receipt: HandoffReceipt) -> None:
     _atomic_write_text(path, json.dumps(dataclasses.asdict(receipt), ensure_ascii=False, indent=2) + "\n")
 
 
-def _require_binding(registry: ProjectRegistry, workspace: str | Path) -> WorkspaceProjectBinding:
-    binding = registry.resolve_readonly_binding(workspace)
-    if (registry._find_readonly_agy_project_id(binding.workspace_uri) is None
-            or registry._find_readonly_codex_project_id(binding.workspace_path) is None):
-        raise ValueError("Workspace projects are not registered on both hosts. Register them in Desktop or run pair while both hosts are offline first.")
-    return binding
+def _receipt_matches_workspace(receipt_ws: str, ws_path: Path) -> bool:
+    if receipt_ws == str(ws_path):
+        return True
+    with contextlib.suppress(ValueError):
+        return parse_workspace_identity(receipt_ws)[0] == ws_path
+    return False
+
+
+def _require_binding(paths: HostEnvironmentPaths, workspace: str | Path) -> WorkspaceProjectBinding:
+    from .handoff_resolve import UnpairedWorkspaceError, diagnose_workspace_binding
+
+    diagnosis = diagnose_workspace_binding(paths, workspace)
+    if not diagnosis.is_paired():
+        raise UnpairedWorkspaceError(diagnosis)
+    return ProjectRegistry(paths).resolve_readonly_binding(workspace)
 
 
 def _read_source(paths: HostEnvironmentPaths, binding: WorkspaceProjectBinding, direction: SyncDirection, source_id: str) -> TrajectoryLedger:
+    from ._handoff_scan import assert_source_belongs_to_binding
+
+    assert_source_belongs_to_binding(paths, binding, direction, source_id)
     transport = DefaultHostTransport(paths)
     to_agy = direction == SyncDirection.CODEX_TO_AGY
     locks = PresenceWalGuard(paths).probe_locks(None if to_agy else CascadeId(source_id), CodexThreadId(source_id) if to_agy else None)
@@ -218,7 +264,66 @@ def _import_codex(paths: HostEnvironmentPaths, binding: WorkspaceProjectBinding,
     ))
 
 
-def _handoff_locked(paths: HostEnvironmentPaths, binding: WorkspaceProjectBinding, direction: SyncDirection, source_id: str, title: str | None, state: Path) -> HandoffReceipt:
+def _find_prior_chain_receipt(
+    state: Path,
+    ws_path: Path,
+    source_host: HostKind,
+    source_id: str,
+) -> tuple[str, str, int] | None:
+    matches: list[HandoffReceipt] = []
+    for existing in sorted(state.glob("*.json")):
+        try:
+            previous = load_handoff_receipt(existing)
+        except (json.JSONDecodeError, ValueError, TypeError, OSError):
+            continue
+        if (
+            previous.status == "ready"
+            and _receipt_matches_workspace(previous.workspace, ws_path)
+            and previous.target_host == source_host.value
+            and previous.target_id == source_id
+        ):
+            matches.append(previous)
+    if not matches:
+        return None
+    prev = max(matches, key=lambda item: (item.chain_depth, item.created_at_iso))
+    return (prev.chain_id or generate_uuid7(), prev.source_id, prev.chain_depth + 1)
+
+
+def _ensure_no_pending_sibling(
+    state: Path,
+    receipt_path: Path,
+    ws_path: Path,
+    source_host: HostKind,
+    source_id: str,
+) -> None:
+    for existing in sorted(state.glob("*.json")):
+        if existing == receipt_path:
+            continue
+        try:
+            previous = load_handoff_receipt(existing)
+        except (json.JSONDecodeError, ValueError, TypeError, OSError):
+            continue
+        if (
+            previous.status == "pending"
+            and _receipt_matches_workspace(previous.workspace, ws_path)
+            and previous.source_host == source_host.value
+            and previous.source_id == source_id
+        ):
+            raise HandoffPendingError(previous, existing)
+
+
+def _handoff_locked(
+    paths: HostEnvironmentPaths,
+    binding: WorkspaceProjectBinding,
+    direction: SyncDirection,
+    source_id: str,
+    title: str | None,
+    state: Path,
+    *,
+    chain_id: str | None = None,
+    chained_from_source_id: str | None = None,
+    chain_depth: int = 0,
+) -> HandoffReceipt:
     ledger = _read_source(paths, binding, direction, source_id)
     watermark = ledger.latest_watermark()
     assert watermark is not None
@@ -229,23 +334,41 @@ def _handoff_locked(paths: HostEnvironmentPaths, binding: WorkspaceProjectBindin
     key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
     receipt_path = state / f"{key}.json"
     if receipt_path.exists():
-        previous = HandoffReceipt(**json.loads(receipt_path.read_text(encoding="utf-8")))
+        previous = load_handoff_receipt(receipt_path)
         if previous.status == "ready":
             return dataclasses.replace(previous, status="no_op")
         raise HandoffPendingError(previous, receipt_path)
-    for existing in state.glob("*.json"):
-        previous = HandoffReceipt(**json.loads(existing.read_text(encoding="utf-8")))
-        if (previous.status == "pending" and previous.workspace == str(binding.workspace_path)
-                and previous.source_host == source_host.value and previous.source_id == source_id):
-            raise HandoffPendingError(previous, existing)
+    _ensure_no_pending_sibling(state, receipt_path, binding.workspace_path, source_host, source_id)
     guard = PresenceWalGuard(paths)
     if (guard._discover_agy_daemon() if to_agy else guard._discover_codex_daemon()) is None:
         raise RuntimeError("Open the target Desktop app before handoff.")
-    ledger = _handoff_ledger(ledger, title)
-    receipt = HandoffReceipt(str(binding.workspace_path), source_host.value, source_id, str(watermark.boundary_digest), target_host.value, generate_uuid7() if to_agy else None, ledger.title, "pending", str(state / "staging" / key))
+    handed = _handoff_ledger(ledger, title)
+    seed_turns, seed_digest = ledger_seed_fingerprint(handed)
+    eff_chain_id, eff_from_source, eff_depth = chain_id, chained_from_source_id, chain_depth
+    if eff_chain_id is None:
+        inherited = _find_prior_chain_receipt(state, binding.workspace_path, source_host, source_id)
+        if inherited is not None:
+            eff_chain_id, eff_from_source, eff_depth = inherited
+    receipt = HandoffReceipt(
+        str(binding.workspace_path),
+        source_host.value,
+        source_id,
+        str(watermark.boundary_digest),
+        target_host.value,
+        generate_uuid7() if to_agy else None,
+        handed.title,
+        "pending",
+        str(state / "staging" / key),
+        created_at_iso=_now_iso(),
+        chain_id=eff_chain_id,
+        chained_from_source_id=eff_from_source,
+        chain_depth=eff_depth,
+        target_seed_turn_count=seed_turns,
+        target_seed_text_digest=seed_digest,
+    )
     _save_receipt(receipt_path, receipt)
     try:
-        target_id = _import_agy(paths, binding, ledger, receipt) if to_agy else _import_codex(paths, binding, ledger, receipt)
+        target_id = _import_agy(paths, binding, handed, receipt) if to_agy else _import_codex(paths, binding, handed, receipt)
     except Exception as exc:
         receipt = dataclasses.replace(receipt, error=f"{type(exc).__name__}: {exc}")
         if getattr(exc, "thread_id", None):
@@ -257,14 +380,41 @@ def _handoff_locked(paths: HostEnvironmentPaths, binding: WorkspaceProjectBindin
     return receipt
 
 
-def handoff_session(paths: HostEnvironmentPaths, workspace: str | Path, *, direction: SyncDirection, source_id: str, title: str | None = None) -> HandoffReceipt:
+def handoff_session(
+    paths: HostEnvironmentPaths,
+    workspace: str | Path,
+    *,
+    direction: SyncDirection,
+    source_id: str,
+    title: str | None = None,
+    chain_id: str | None = None,
+    chained_from_source_id: str | None = None,
+    chain_depth: int = 0,
+) -> HandoffReceipt:
     """Create a new Desktop session once per completed source history."""
     if direction not in (SyncDirection.CODEX_TO_AGY, SyncDirection.AGY_TO_CODEX):
         raise ValueError("Handoff requires an explicit direction.")
     validate_session_id(source_id, label="source_id")
-    binding = _require_binding(ProjectRegistry(paths), workspace)
+    binding = _require_binding(paths, workspace)
     state = paths.sync_state_dir / "handoffs"
     state.mkdir(parents=True, exist_ok=True)
     with (state / "handoff.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return _handoff_locked(paths, binding, direction, source_id, title, state)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise SyncBusyLockError(
+                "Another handoff operation is currently running; wait and retry.",
+                host="handoff",
+                remediation=(f'Wait for the active handoff to finish, then retry: codex-agy-sync handoff -w "{binding.workspace_path}"',),
+            ) from exc
+        return _handoff_locked(
+            paths,
+            binding,
+            direction,
+            source_id,
+            title,
+            state,
+            chain_id=chain_id,
+            chained_from_source_id=chained_from_source_id,
+            chain_depth=chain_depth,
+        )

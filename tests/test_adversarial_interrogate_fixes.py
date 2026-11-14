@@ -482,8 +482,10 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
             active_snap = self.bridge.guard.probe_locks(cid, tid)
             self.assertTrue(active_snap.codex_wal_active and active_snap.agy_wal_active)
 
+            unpaired_ws = self.workspace_dir.parent / "wal-blocked-pair-ws"
+            unpaired_ws.mkdir(exist_ok=True)
             with self.assertRaises(SyncBusyLockError):
-                self.bridge.pair_workspace(self.workspace_dir)
+                self.bridge.pair_workspace(unpaired_ws)
             deferred = self.bridge.sync_session(self.workspace_dir, cascade_id=cid_blocked, direction=SyncDirection.AGY_TO_CODEX)
             self.assertEqual(deferred.transition_kind, "deferred_busy")
         finally:

@@ -12,14 +12,18 @@
 
 ## Desktop 按需交接
 
-两端先在 Desktop 中注册同一个项目目录，完成当前回合后执行：
+两端在 Desktop 中注册同一个项目目录（或仅缺离线宿主注册时加 `--pair-if-offline` 自动补齐），完成当前回合后执行：
 
 ```bash
-./bin/codex-agy-sync handoff --workspace "$PWD" \
-  --direction codex_to_agy --source-id <codex-thread-id>
-./bin/codex-agy-sync handoff --workspace "$PWD" \
-  --direction agy_to_codex --source-id <agy-cascade-id>
+./bin/codex-agy-sync handoff --workspace "$PWD" --chain
+./bin/codex-agy-sync handoff --workspace "$PWD" --latest
+./bin/codex-agy-sync handoff --workspace "$PWD" --source-id <codex-or-agy-uuid>
+./bin/codex-agy-sync handoff --workspace "$PWD" --pick
 ```
+
+- **默认与零参数/精简参数体验**：传入 `--source-id` 且省略 `--direction` 时自动扫描两侧宿主存储推断方向（仅在两侧同时存在相同 UUID 或均未找到时报错）；`--latest` 跳过未继续对话的刚接力目标（`is_untouched_baton_target`），选取最新非子代理已完成会话；`--chain` 沿着工作区活动交接链（`source_id -> target_id -> ...`）自动推进或重交接已更新的源端，未继续对话时直接返回 `no_op`；`--pick`（以及 TTY 下省略所有选择参数时）仅向 `stderr` 输出候选菜单并从 `stdin` 读选择，保持 `stdout` 为纯 JSON（非 TTY 快速报错并提示 `--latest` / `--chain` / `--source-id` / `--pick`）。
+- **未配对诊断与离线安全配对**：任一端未注册时在创建 `handoffs/` 目录前即拒绝并给出精确宿主诊断及修复命令（CLI `handoff` 与 `pair` 在未配对或被活跃锁阻塞时均以退出码 `2` 向 `stderr` 输出结构化 JSON 负载）；加 `--pair-if-offline` 时 `guarded_pair_workspace` 仅在缺失宿主离线且无 WAL 锁时持排他锁并备份后补齐配对，若两端已配对则零锁零写入直接返回。
+- **兼容性**：仍支持显式 `--direction codex_to_agy|agy_to_codex --source-id <id> --title <title>`。旧版 `handoffs/*.json` 收据无新字段（`created_at_iso`、`chain_id`、`chained_from_source_id`、`chain_depth`、`target_seed_turn_count`、`target_seed_text_digest`）也可直接读取。
 
 收据返回目标 `target_id` 和 `status`。在目标 Desktop 打开对应标题的会话继续工作；下次换端时，将正在使用的会话 ID 作为 `--source-id`。可用 `--title` 指定新标题。
 
@@ -60,7 +64,7 @@
 - `payloads.py` 定义 16 类结构化工具载荷（`CanonicalToolPayload`）与未知工具透传信封（`OpaqueToolPayload`）。
 - `ledger.py` 定义强类型标识、`SubagentLineage`、索引化事件账本 `TrajectoryLedger`、5 类伴生存储纯投影以及 `B2` 半途回合闭合纯函数。
 - `codecs/`（核心子模块 `schema_tags.py`、`tool_payloads.py`、`tools.py`、`steps.py`、`rollout.py`、`projections.py`、`__init__.py`）实现表驱动的 `gemini_coder.Step` Protobuf 与 Codex `.jsonl` / `.jsonl.zst` / RPC 线程编解码。
-- `bridge/`（核心子模块 `paths_and_locks.py`、`registry.py`、`state_machine.py`、`rpc.py`、`native_codex.py`、`handoff.py`、`transport.py`、`sync.py`、`__init__.py`）实现双端项目配对、锁守卫与备份回滚、纯状态机、`A2` 在线回环 RPC 读取客户端、多存储落盘自愈与对称分叉门面 `SyncBridge`。
+- `bridge/`（核心子模块 `paths_and_locks.py`、`registry.py`、`state_machine.py`、`rpc.py`、`native_codex.py`、`handoff.py`、`handoff_resolve.py`、`_handoff_scan.py`、`rescue_and_fork.py`、`transport.py`、`sync.py`、`__init__.py`）实现双端项目配对、锁守卫与备份回滚、纯状态机、`A2` 在线回环 RPC 读取客户端、按需 `handoff` 解析/接力链诊断、多存储落盘自愈与对称分叉门面 `SyncBridge`。
 - `cli.py` 与 `bin/codex-agy-sync` 暴露命令行入口。
 
 ## 契约提取与验证入口
