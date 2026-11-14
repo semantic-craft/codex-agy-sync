@@ -41,7 +41,7 @@ print("  Codex session {}: {} user msgs, {} reasoning items, {} paired tool call
 echo "[3/5] Verifying src/codex_agy_sync domain architecture against Phase 1 schema..."
 find src/codex_agy_sync tests skills/verify-codex-agy-sync/scripts -name '*.py' -print0 | sort -z | xargs -0 python3 -m py_compile bin/codex-agy-sync
 PYTHONPATH=src python3 -c '
-import ast, json, pathlib, subprocess, sys
+import ast, json, pathlib, re, subprocess, sys
 import codex_agy_sync as pkg
 
 wire_path = pathlib.Path("src/codex_agy_sync/_wire.py")
@@ -97,7 +97,10 @@ rpc_loc = len((bridge_dir / "rpc.py").read_text(encoding="utf-8").splitlines())
 assert rpc_loc < 450, f"bridge/rpc.py must remain < 450 LOC, got {rpc_loc}"
 for sym in ("__version__", "OnlineRpcUnavailableError", "AgyRpcReadResult", "CodexRpcReadResult", "fetch_agy_trajectory_via_rpc", "fetch_codex_thread_via_rpc"):
     assert hasattr(pkg, sym), f"Missing public export on codex_agy_sync: {sym}"
-assert pkg.__version__ == "0.2.0", f"Unexpected __version__: {pkg.__version__}"
+pyproject_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("pyproject.toml").read_text(encoding="utf-8"), re.M)
+assert pyproject_match is not None, "Missing version in pyproject.toml"
+pyproject_ver = pyproject_match.group(1)
+assert pkg.__version__ == pyproject_ver == "0.3.0", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
 for mod_path in sorted(pathlib.Path("src/codex_agy_sync").rglob("*.py")):
     mod_src = mod_path.read_text(encoding="utf-8")
     mod_loc = len(mod_src.splitlines())

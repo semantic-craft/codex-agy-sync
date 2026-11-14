@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-agy-sync"
-version = "0.2.0"
+version = "0.3.0"
 description = "Bidirectional conversation and tool trajectory synchronizer between OpenAI Codex and Google Antigravity"
 readme = "README.md"
 requires-python = ">=3.10"

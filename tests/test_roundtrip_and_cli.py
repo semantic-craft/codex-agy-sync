@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import socket
 import sqlite3
@@ -269,7 +270,13 @@ class TestRoundtripAndCli(BridgeSandboxBase):
     def test_cli_entrypoints_end_to_end(self) -> None:
         import codex_agy_sync
 
-        self.assertEqual(codex_agy_sync.__version__, "0.2.0")
+        pyproject_text = (self.repo_root / "pyproject.toml").read_text(encoding="utf-8")
+        version_match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject_text, re.M)
+        self.assertIsNotNone(version_match)
+        assert version_match is not None
+        expected_ver = version_match.group(1)
+        self.assertRegex(expected_ver, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(codex_agy_sync.__version__, expected_ver)
 
         src_tid = self._copy_real_codex_session_into_temp("01a1ae7d-d56f-7650-8336-aa848b9f2a5a")
         cli_bin = self.repo_root / "bin" / "codex-agy-sync"
@@ -280,7 +287,7 @@ class TestRoundtripAndCli(BridgeSandboxBase):
             text=True,
             check=True,
         )
-        self.assertEqual(ver_res.stdout.strip(), "codex-agy-sync 0.2.0")
+        self.assertEqual(ver_res.stdout.strip(), f"codex-agy-sync {expected_ver}")
 
         short_v_res = subprocess.run(
             [sys.executable, str(cli_bin), "-V"],
@@ -288,7 +295,7 @@ class TestRoundtripAndCli(BridgeSandboxBase):
             text=True,
             check=True,
         )
-        self.assertEqual(short_v_res.stdout.strip(), "codex-agy-sync 0.2.0")
+        self.assertEqual(short_v_res.stdout.strip(), f"codex-agy-sync {expected_ver}")
 
         base_args = [
             sys.executable,
