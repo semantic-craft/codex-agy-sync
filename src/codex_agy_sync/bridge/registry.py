@@ -227,7 +227,10 @@ class ProjectRegistry:
 
     def _extract_agy_project_folder_uris(self, data: Mapping[str, Any]) -> list[str]:
         uris: list[str] = []
-        resources = data.get("projectResources", {}).get("resources", [])
+        if not isinstance(data, Mapping):
+            return uris
+        project_resources = data.get("projectResources")
+        resources = project_resources.get("resources", []) if isinstance(project_resources, dict) else []
         if isinstance(resources, list):
             for res in resources:
                 if not isinstance(res, dict):
@@ -247,6 +250,8 @@ class ProjectRegistry:
             try:
                 data = json.loads(pfile.read_text(encoding="utf-8"))
             except Exception:
+                continue
+            if not isinstance(data, dict):
                 continue
             cand_id = str(data.get("id") or pfile.stem).strip()
             if not cand_id or cand_id in FORBIDDEN_AGY_PROJECT_IDS:
