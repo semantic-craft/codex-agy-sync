@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import sqlite3
@@ -12,36 +11,34 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..bridge._handoff_scan import (
+from ..bridge.handoff_store import (
+    HandoffReceipt,
     discover_agy_entries,
     discover_codex_entries,
     load_workspace_receipts,
     parse_ts_epoch_iso,
 )
-from ..bridge.handoff import HandoffReceipt, _host_injected_user
-from ..bridge.handoff_resolve import diagnose_workspace_binding
-from ..bridge.paths_and_locks import HostEnvironmentPaths, _now_iso, _open_readonly_sqlite
-from ..bridge.registry import ProjectRegistry, WorkspaceProjectBinding
+from ..bridge.paths_and_locks import HostEnvironmentPaths, now_iso
+from ..bridge.registry import ProjectRegistry, WorkspaceProjectBinding, diagnose_workspace_binding
 from ..bridge.transport import DefaultHostTransport
-from ..codecs import AgyRawStepRow, TrajectoryWireCodec, read_codex_rollout_lines
-from ..ledger import (
+from ..codecs import decode_agy_trajectory, decode_codex_rollout, read_codex_rollout_lines
+from ..events import (
     AssistantTextEvent,
-    CodexThreadId,
+    ThinkingEvent,
+    ToolCallEvent,
+    UserInputEvent,
+    is_host_injected_user_event,
+)
+from ..ledger import TrajectoryLedger
+from ..payloads import (
     FileEditPayload,
-    HostKind,
     ReadFilePayload,
     ReadResourcePayload,
     RunCommandPayload,
     SearchWebPayload,
-    StepIndex,
-    ThinkingEvent,
-    ToolCallEvent,
-    TrajectoryLedger,
-    UserInputEvent,
-    WorkspacePath,
-    WorkspaceRootUri,
 )
-from ._discovery import _UnionFind, _is_sensitive_excluded_path, discover_workspaces
+from ..workspace import CodexThreadId, HostKind, WorkspacePath, WorkspaceRootUri
+from .discovery import UnionFind, discover_workspaces
 from .models import (
     HandoffHopSummary,
     TimelineTurn,
@@ -82,7 +79,7 @@ def _ledger_to_turns(
         user_parts = [
             ev.query_text.strip()
             for ev in events
-            if isinstance(ev, UserInputEvent) and not _host_injected_user(ev) and ev.query_text.strip()
+            if isinstance(ev, UserInputEvent) and not is_host_injected_user_event(ev) and ev.query_text.strip()
         ]
         asst_parts = [ev.text.strip() for ev in events if isinstance(ev, AssistantTextEvent) and ev.text.strip()]
         tool_parts = [_summarize_tool_call(ev) for ev in events if isinstance(ev, ToolCallEvent)]
@@ -112,7 +109,6 @@ def _ledger_to_turns(
 def _read_session_turns(
     paths: HostEnvironmentPaths,
     transport: DefaultHostTransport,
-    codec: TrajectoryWireCodec,
     binding: WorkspaceProjectBinding,
     entry: Mapping[str, Any],
 ) -> list[TimelineTurn]:
@@ -123,25 +119,18 @@ def _read_session_turns(
             conv_db = paths.agy_data_dir / "conversations" / f"{sid}.db"
             if not conv_db.is_file():
                 return []
-            with contextlib.closing(_open_readonly_sqlite(conv_db)) as conn:
-                rows = conn.execute(
-                    "SELECT idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format FROM steps ORDER BY idx ASC"
-                ).fetchall()
-            raw_steps = [
-                AgyRawStepRow(StepIndex(int(r[0])), int(r[1]), int(r[2]), bool(r[3]), bytes(r[4] or b""), bytes(r[5] or b""), int(r[6] or 1))
-                for r in rows
-            ]
-            ledger = codec.decode_agy_steps_to_ledger(
+            raw_steps = transport.read_persisted_agy_steps(conv_db)
+            ledger = decode_agy_trajectory(
                 binding.workspace_path, binding.workspace_uri, raw_steps, explicit_title_override=title,
             )
             return _ledger_to_turns(ledger, host.value, sid, title, fallback_iso)
 
         tid = CodexThreadId(sid)
-        rollout_path, probed_title = transport._probe_codex_rollout_and_title(tid)
+        rollout_path, probed_title = transport.probe_codex_rollout_and_title(tid)
         if rollout_path is None:
-            rollout_path, probed_title = transport._find_codex_rollout_and_title(tid)
+            rollout_path, probed_title = transport.find_codex_rollout_and_title(tid)
         eff_title = probed_title or title
-        ledger = codec.decode_codex_rollout_to_ledger(
+        ledger = decode_codex_rollout(
             binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(rollout_path), explicit_title_override=eff_title,
         )
         return _ledger_to_turns(ledger, host.value, sid, eff_title, fallback_iso)
@@ -241,7 +230,7 @@ def _collapse_cluster_timeline(
     return tuple(merged)
 
 
-def _classify_session_links(
+def classify_session_links(
     comp_keys: Sequence[tuple[str, str]],
     sessions_by_key: Mapping[tuple[str, str], dict[str, Any]],
     sorted_hops: Sequence[tuple[str, HandoffReceipt, float]],
@@ -275,7 +264,7 @@ def _classify_session_links(
     return links, untouched
 
 
-def _build_work_card(
+def build_work_card(
     ws_id: str,
     binding: WorkspaceProjectBinding,
     is_paired: bool,
@@ -286,7 +275,7 @@ def _build_work_card(
 ) -> WorkCard:
     ordered_keys = _order_cluster_sessions(comp_keys, sessions_by_key, receipts)
     sorted_hops = sorted(receipts, key=lambda it: (it[1].created_at_iso, it[1].chain_depth, it[2], it[0]))
-    links, untouched_keys = _classify_session_links(comp_keys, sessions_by_key, sorted_hops)
+    links, untouched_keys = classify_session_links(comp_keys, sessions_by_key, sorted_hops)
     hops = tuple(
         HandoffHopSummary(
             receipt_key=k, source_host=r.source_host, source_id=r.source_id, target_host=r.target_host,
@@ -340,7 +329,7 @@ def _cluster_workspace_works(
         all_nodes.add((rec.source_host, rec.source_id))
         if rec.target_id:
             all_nodes.add((rec.target_host, rec.target_id))
-    uf = _UnionFind(all_nodes)
+    uf = UnionFind(all_nodes)
     for cid_str, tid_str in cursor_pairs:
         uf.union((HostKind.ANTIGRAVITY.value, cid_str), (HostKind.CODEX.value, tid_str))
     for _, rec, _ in receipts:
@@ -353,7 +342,7 @@ def _cluster_workspace_works(
     for item in receipts:
         comp_receipts.setdefault(uf.find((item[1].source_host, item[1].source_id)), []).append(item)
     works = [
-        _build_work_card(ws_id, binding, is_paired, keys, sessions_by_key, comp_receipts.get(root, ()), cursor_peers)
+        build_work_card(ws_id, binding, is_paired, keys, sessions_by_key, comp_receipts.get(root, ()), cursor_peers)
         for root, keys in comp_sessions.items()
     ]
     works.sort(key=lambda w: (w.updated_at_iso, w.work_id), reverse=True)
@@ -386,13 +375,13 @@ class WorkbenchIndexer:
         return discover_workspaces(self._paths, self._seed_workspaces)
 
     def _index_workspace(
-        self, ws_path: WorkspacePath, ws_uri: WorkspaceRootUri, registry: ProjectRegistry, transport: DefaultHostTransport, codec: TrajectoryWireCodec,
+        self, ws_path: WorkspacePath, ws_uri: WorkspaceRootUri, registry: ProjectRegistry, transport: DefaultHostTransport,
     ) -> tuple[WorkspaceCard, list[WorkCard]]:
         ws_id = "ws-" + hashlib.sha256(str(ws_uri).encode("utf-8")).hexdigest()[:16]
         diagnosis = diagnose_workspace_binding(self._paths, ws_path)
         binding = registry.resolve_readonly_binding(ws_path)
         try:
-            agy_entries = discover_agy_entries(self._paths, registry, transport, binding)
+            agy_entries = discover_agy_entries(self._paths, transport, binding)
         except (sqlite3.DatabaseError, OSError, ValueError):
             agy_entries = []
         try:
@@ -403,13 +392,13 @@ class WorkbenchIndexer:
         for entry in [*agy_entries, *codex_entries]:
             key = (entry["host"].value, str(entry["session_id"]))
             enriched = dict(entry)
-            enriched["turns"] = _read_session_turns(self._paths, transport, codec, binding, entry)
+            enriched["turns"] = _read_session_turns(self._paths, transport, binding, entry)
             if not enriched["iso"] and enriched["turns"]:
                 last_ts = enriched["turns"][-1].timestamp_iso
                 enriched["iso"] = last_ts
                 enriched["epoch"] = parse_ts_epoch_iso(last_ts)[0]
             sessions_by_key[key] = enriched
-        cursor_pairs = registry._load_sorted_workspace_cursor_pairs(binding.workspace_uri)
+        cursor_pairs = registry.load_sorted_workspace_cursor_pairs(binding.workspace_uri)
         receipts = [(p.stem, r, mtime) for p, r, mtime in load_workspace_receipts(self._paths, ws_path)]
         works = _cluster_workspace_works(ws_id, binding, diagnosis.is_paired(), sessions_by_key, cursor_pairs, receipts)
         last_iso = max((w.updated_at_iso for w in works), default="")
@@ -423,16 +412,16 @@ class WorkbenchIndexer:
         return ws_card, works
 
     def _build_full_snapshot(self) -> WorkbenchSnapshot:
-        registry, transport, codec = ProjectRegistry(self._paths), DefaultHostTransport(self._paths), TrajectoryWireCodec()
+        registry, transport = ProjectRegistry(self._paths), DefaultHostTransport(self._paths)
         ws_cards: list[WorkspaceCard] = []
         all_works: list[WorkCard] = []
         for ws_path, ws_uri in self.discover_workspaces():
-            ws_card, works = self._index_workspace(ws_path, ws_uri, registry, transport, codec)
+            ws_card, works = self._index_workspace(ws_path, ws_uri, registry, transport)
             ws_cards.append(ws_card)
             all_works.extend(works)
         ws_cards.sort(key=lambda c: (c.last_updated_iso, c.name.lower(), c.workspace_path), reverse=True)
         all_works.sort(key=lambda w: (w.updated_at_iso, w.work_id), reverse=True)
-        return WorkbenchSnapshot(generated_at_iso=_now_iso(), workspaces=tuple(ws_cards), works=tuple(all_works))
+        return WorkbenchSnapshot(generated_at_iso=now_iso(), workspaces=tuple(ws_cards), works=tuple(all_works))
 
     def get_snapshot(self, workspace_id: str | None = None, refresh: bool = False) -> WorkbenchSnapshot:
         with self._lock:

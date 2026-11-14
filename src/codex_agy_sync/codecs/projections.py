@@ -21,32 +21,18 @@ from .._wire import (
     signed_int32,
     signed_int64,
 )
-from ..ledger import (
+from ..events import (
+    AnnotationPbtxtProjection,
+    CascadeSummaryProjection,
+    SummariesStateProjection,
+    TranscriptRowProjection,
+)
+from ..workspace import (
     AgyGuiSafeSource,
     AgyProjectId,
-    AnnotationPbtxtProjection,
-    AssistantTextEvent,
-    CanonicalEvent,
     CascadeId,
-    CascadeSummaryProjection,
-    CheckpointEvent,
-    CodexProjectId,
-    CodexThreadId,
-    CodexThreadSummaryProjection,
-    StepIndex,
-    SubagentLineage,
-    SummariesStateProjection,
-    SystemEvent,
-    TaskBoundaryEvent,
-    ThinkingEvent,
-    ToolCallEvent,
-    ToolResultEvent,
     TrajectoryId,
-    TrajectoryLedger,
-    TranscriptRowProjection,
-    UserInputEvent,
     WorkspaceRootUri,
-    _normalize_single_line_query,
 )
 from .schema_tags import (
     AnnotationsFieldTag,
@@ -57,7 +43,6 @@ from .schema_tags import (
     TrajectoryMetaFieldTag,
     WorkspaceInfoFieldTag,
 )
-from .tools import serialize_tool_payload_arguments_json
 
 _GUI_SOURCE_BY_ENUM: Mapping[int, AgyGuiSafeSource] = {
     src.proto_enum_value: src for src in AgyGuiSafeSource
@@ -364,7 +349,7 @@ def decode_cascade_summary_proto(
     try:
         return CascadeSummaryProjection(**fields_dict)
     except ValueError:
-        return CascadeSummaryProjection._from_wire_fields(**fields_dict)
+        return CascadeSummaryProjection.from_wire_fields(**fields_dict)
 
 
 def encode_summaries_state_proto(state: SummariesStateProjection) -> bytes:
@@ -374,7 +359,7 @@ def encode_summaries_state_proto(state: SummariesStateProjection) -> bytes:
         summary_proj = state.summaries[cid]
         entry = (
             encode_string_field(MapEntryTag.KEY, str(cid))
-            + encode_bytes_field(MapEntryTag.VALUE, summary_proj.summary_proto_bytes)
+            + encode_bytes_field(MapEntryTag.VALUE, encode_cascade_summary_proto(summary_proj))
         )
         buf.extend(encode_bytes_field(SummariesStateFieldTag.SUMMARIES, entry))
     for path_key in sorted(state.file_mod_times.keys()):
@@ -423,114 +408,4 @@ def decode_summaries_state_proto(raw_bytes: bytes) -> SummariesStateProjection:
         summaries=summaries,
         file_mod_times=file_mod_times,
         unknown_wire_fields=tuple(unknowns),
-    )
-
-
-def derive_ledger_preview_text(ledger: TrajectoryLedger) -> str:
-    """Derive single-line session preview text from user inputs, assistant messages, or title."""
-    for ev in ledger.events:
-        if isinstance(ev, UserInputEvent) and ev.query_text.strip():
-            if normalized := _normalize_single_line_query(ev.query_text, limit=160):
-                return normalized
-    for ev in ledger.events:
-        if isinstance(ev, AssistantTextEvent) and ev.text.strip():
-            if normalized := _normalize_single_line_query(ev.text, limit=160):
-                return normalized
-    return ledger.title if ledger.title.strip() else "Synchronized Session"
-
-
-def _project_planner_transcript_row(
-    step_idx: StepIndex,
-    created_at: str,
-    step_events: Sequence[CanonicalEvent],
-) -> TranscriptRowProjection:
-    thinking_parts: list[str] = []
-    text_parts: list[str] = []
-    tool_calls: list[Mapping[str, object]] = []
-    in_tok = out_tok = cache_tok = 0
-    for ev in step_events:
-        if isinstance(ev, (ThinkingEvent, AssistantTextEvent)):
-            if isinstance(ev, ThinkingEvent) and (ev.summary_text or ev.raw_thinking):
-                thinking_parts.append(ev.summary_text or ev.raw_thinking or "")
-            elif isinstance(ev, AssistantTextEvent) and ev.text:
-                text_parts.append(ev.text)
-            u = ev.token_usage
-            in_tok, out_tok, cache_tok = max(in_tok, u.input_tokens), max(out_tok, u.output_tokens), max(cache_tok, u.cache_read_tokens)
-        elif isinstance(ev, ToolCallEvent):
-            args = serialize_tool_payload_arguments_json(ev.payload)
-            tool_calls.append({"id": str(ev.call_id), "name": ev.tool_name, "arguments_json": args})
-    return TranscriptRowProjection(
-        step_index=step_idx, source="MODEL", step_type_name="PLANNER_RESPONSE", status_name="DONE",
-        created_at=created_at, content="\n".join(text_parts),
-        thinking="\n".join(thinking_parts) if thinking_parts else None,
-        tool_calls_json=tuple(tool_calls), input_tokens=in_tok, output_tokens=out_tok, cache_read_tokens=cache_tok,
-    )
-
-
-def project_ledger_transcript_rows(ledger: TrajectoryLedger) -> Tuple[TranscriptRowProjection, ...]:
-    """Project `TrajectoryLedger` steps into Antigravity `transcript.jsonl` view rows."""
-    rows: list[TranscriptRowProjection] = []
-    for step_idx in sorted(ledger.by_step_index.keys(), key=int):
-        step_events = ledger.events_for_step(step_idx)
-        if not step_events:
-            continue
-        first = step_events[0]
-        created_at = first.anchor.timestamp_iso or "2026-01-01T00:00:00Z"
-        if isinstance(first, (ThinkingEvent, AssistantTextEvent, ToolCallEvent)):
-            rows.append(_project_planner_transcript_row(step_idx, created_at, step_events))
-        elif isinstance(first, UserInputEvent):
-            media = tuple({"mime_type": m.mime_type, "uri": m.uri} for m in first.media)
-            rows.append(TranscriptRowProjection(step_idx, "USER_EXPLICIT", "USER_INPUT", "DONE", created_at, first.query_text, media_uris=media))
-        elif isinstance(first, ToolResultEvent):
-            rows.append(TranscriptRowProjection(step_idx, "MODEL", "GENERIC", "ERROR" if first.is_error else "DONE", created_at, first.output_text))
-        elif isinstance(first, CheckpointEvent):
-            rows.append(TranscriptRowProjection(step_idx, "SYSTEM", "CHECKPOINT", "DONE", created_at, first.session_summary or first.user_intent))
-        elif isinstance(first, TaskBoundaryEvent):
-            label = "NOTIFY_USER" if first.boundary_kind == "notify_user" else "TASK_BOUNDARY"
-            rows.append(TranscriptRowProjection(step_idx, "MODEL", label, "DONE", created_at, first.task_summary or first.task_name))
-        elif isinstance(first, SystemEvent):
-            rows.append(TranscriptRowProjection(step_idx, "SYSTEM", "SYSTEM_MESSAGE", "DONE", created_at, first.message_text))
-    return tuple(rows)
-
-
-def project_ledger_cascade_summary(
-    ledger: TrajectoryLedger,
-    cascade_id: CascadeId,
-    project_id: AgyProjectId,
-    viewed_at_iso: str | None = None,
-    source: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
-    lineage: SubagentLineage | None = None,
-) -> CascadeSummaryProjection:
-    """Project `TrajectoryLedger` into `CascadeSummaryProjection`."""
-    created_iso = ledger.events[0].anchor.timestamp_iso if ledger.events else "2026-01-01T00:00:00Z"
-    updated_iso = viewed_at_iso or (ledger.events[-1].anchor.timestamp_iso if ledger.events else created_iso)
-    annot = ledger.project_annotation_pbtxt(cascade_id=cascade_id, viewed_at_iso=updated_iso)
-    parent_cid = lineage.parent_cascade_id if lineage is not None else None
-    root_cid = (lineage.root_cascade_id or parent_cid) if lineage is not None else None
-    type_name, role = (lineage.agent_type_name, lineage.agent_role) if lineage is not None else ("", "")
-    return CascadeSummaryProjection(
-        cascade_id=cascade_id, project_id=project_id, workspace_uris=(ledger.workspace_uri,),
-        source=source, title=ledger.title, preview=derive_ledger_preview_text(ledger),
-        step_count=len(ledger.by_step_index), created_at_iso=created_iso, updated_at_iso=updated_iso,
-        annotations=annot, nesting_depth=lineage.nesting_depth if lineage is not None else 0,
-        parent_cascade_id=parent_cid, root_cascade_id=root_cid,
-        agent_name=role or type_name, agent_type_name=type_name, agent_role=role,
-    )
-
-
-def project_ledger_codex_thread_summary(
-    ledger: TrajectoryLedger,
-    thread_id: CodexThreadId,
-    project_id: CodexProjectId,
-) -> CodexThreadSummaryProjection:
-    """Project `TrajectoryLedger` into `CodexThreadSummaryProjection`."""
-    created_iso = ledger.events[0].anchor.timestamp_iso if ledger.events else "2026-01-01T00:00:00Z"
-    updated_iso = ledger.events[-1].anchor.timestamp_iso if ledger.events else created_iso
-    c_sec, c_nanos = parse_iso_to_seconds_nanos(created_iso)
-    u_sec, u_nanos = parse_iso_to_seconds_nanos(updated_iso)
-    created_ms = c_sec * 1000 + (c_nanos // 1_000_000)
-    updated_ms = max(created_ms, u_sec * 1000 + (u_nanos // 1_000_000))
-    return CodexThreadSummaryProjection(
-        thread_id=thread_id, project_id=project_id, cwd=ledger.workspace_path, title=ledger.title,
-        preview=derive_ledger_preview_text(ledger), created_at_ms=created_ms, updated_at_ms=updated_ms, archived=0,
     )

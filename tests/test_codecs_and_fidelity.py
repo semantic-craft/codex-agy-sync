@@ -9,7 +9,7 @@ import unittest
 
 from codex_agy_sync.codecs import (
     AgyRawStepRow, CodexRawRolloutLine, CortexStepTypeCode, GeminiStepWireTag,
-    STEP_TAG_TO_SPEC, STEP_WIRE_TABLE, TOOL_CODEC_TABLE, TrajectoryWireCodec,
+    STEP_TAG_TO_SPEC, STEP_WIRE_TABLE, TOOL_CODEC_TABLE,
     decode_agy_trajectory, decode_codex_rollout, decode_codex_rpc_thread_to_ledger,
     encode_agy_trajectory, encode_codex_rollout, read_codex_rollout_lines,
     serialize_agy_chat_tool_arguments, serialize_tool_payload_arguments_json,
@@ -37,7 +37,6 @@ class TestCodecBehavior(unittest.TestCase):
         self.workspace_dir = Path(self.temp_dir.name) / "codec-workspace"
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.ws_path, self.ws_uri = parse_workspace_identity(self.workspace_dir)
-        self.codec = TrajectoryWireCodec()
         repo_root = Path(__file__).resolve().parent.parent
         self.schema = json.loads((repo_root / "schema" / "antigravity_2_30_schema.json").read_text())
 
@@ -182,8 +181,8 @@ class TestCodecBehavior(unittest.TestCase):
                 )
             )
 
-        agy_steps = self.codec.encode_events_to_agy_steps(events)
-        decoded_from_agy = self.codec.decode_agy_steps_to_ledger(
+        agy_steps = encode_agy_trajectory(events)
+        decoded_from_agy = decode_agy_trajectory(
             self.ws_path,
             self.ws_uri,
             agy_steps,
@@ -217,8 +216,8 @@ class TestCodecBehavior(unittest.TestCase):
         self.assertEqual(len(ask_q_results), 1)
         self.assertEqual(len(ask_q_results[0].questions), 1)
 
-        codex_lines = self.codec.encode_ledger_to_codex_rollout(decoded_from_agy)
-        decoded_from_codex = self.codec.decode_codex_rollout_to_ledger(
+        codex_lines = encode_codex_rollout(decoded_from_agy)
+        decoded_from_codex = decode_codex_rollout(
             self.ws_path,
             self.ws_uri,
             codex_lines,
@@ -241,7 +240,7 @@ class TestCodecBehavior(unittest.TestCase):
             + encode_bytes_field(19, user_body)
             + unknown_tag_9999
         )
-        ledger = self.codec.decode_agy_steps_to_ledger(
+        ledger = decode_agy_trajectory(
             self.ws_path,
             self.ws_uri,
             [
@@ -261,7 +260,7 @@ class TestCodecBehavior(unittest.TestCase):
             ledger.events[0].anchor.unknown_wire_fields,
             (UnknownWireField(field_tag=9999, wire_type=2, raw_bytes=b"hello"),),
         )
-        reencoded = self.codec.encode_ledger_to_agy_steps(ledger)
+        reencoded = encode_agy_trajectory(ledger)
         self.assertEqual(len(reencoded), 1)
         self.assertIn(unknown_tag_9999, reencoded[0].step_payload_blob)
 
@@ -299,7 +298,7 @@ class TestCodecBehavior(unittest.TestCase):
             )
             for r in rows
         ]
-        ledger = self.codec.decode_agy_steps_to_ledger(
+        ledger = decode_agy_trajectory(
             self.ws_path,
             self.ws_uri,
             raw_rows,
@@ -321,8 +320,8 @@ class TestCodecBehavior(unittest.TestCase):
             self.assertEqual(c_ev.call_id, call_ev.call_id)
             self.assertIsNotNone(r_ev)
 
-        codex_lines = self.codec.encode_ledger_to_codex_rollout(ledger)
-        ledger_from_codex = self.codec.decode_codex_rollout_to_ledger(
+        codex_lines = encode_codex_rollout(ledger)
+        ledger_from_codex = decode_codex_rollout(
             self.ws_path,
             self.ws_uri,
             codex_lines,
@@ -340,7 +339,7 @@ class TestCodecBehavior(unittest.TestCase):
             97,
         )
 
-        reencoded_agy = self.codec.encode_ledger_to_agy_steps(ledger_from_codex)
+        reencoded_agy = encode_agy_trajectory(ledger_from_codex)
         unknown_fields: list[str] = []
         for step_row in reencoded_agy:
             decode_protobuf(
@@ -351,7 +350,7 @@ class TestCodecBehavior(unittest.TestCase):
             )
         self.assertEqual(unknown_fields, [])
 
-        ledger_roundtrip = self.codec.decode_agy_steps_to_ledger(
+        ledger_roundtrip = decode_agy_trajectory(
             self.ws_path,
             self.ws_uri,
             reencoded_agy,
@@ -376,7 +375,7 @@ class TestCodecBehavior(unittest.TestCase):
             for idx, line in enumerate(matches[0].read_text(encoding="utf-8").splitlines())
             if line.strip()
         ]
-        ledger = self.codec.decode_codex_rollout_to_ledger(
+        ledger = decode_codex_rollout(
             self.ws_path,
             self.ws_uri,
             raw_lines,
@@ -403,7 +402,7 @@ class TestCodecBehavior(unittest.TestCase):
             )
         )
 
-        agy_steps = self.codec.encode_ledger_to_agy_steps(ledger)
+        agy_steps = encode_agy_trajectory(ledger)
         unknown_fields: list[str] = []
         for step_row in agy_steps:
             decode_protobuf(
@@ -414,7 +413,7 @@ class TestCodecBehavior(unittest.TestCase):
             )
         self.assertEqual(unknown_fields, [])
 
-        ledger_from_agy = self.codec.decode_agy_steps_to_ledger(
+        ledger_from_agy = decode_agy_trajectory(
             self.ws_path,
             self.ws_uri,
             agy_steps,
@@ -440,8 +439,8 @@ class TestCodecBehavior(unittest.TestCase):
             19,
         )
 
-        reencoded_codex = self.codec.encode_ledger_to_codex_rollout(ledger)
-        ledger_codex_rt = self.codec.decode_codex_rollout_to_ledger(
+        reencoded_codex = encode_codex_rollout(ledger)
+        ledger_codex_rt = decode_codex_rollout(
             self.ws_path,
             self.ws_uri,
             reencoded_codex,

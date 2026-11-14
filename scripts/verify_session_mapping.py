@@ -146,12 +146,12 @@ def evaluate_codex_sidebar_visibility(project_binding: dict, sidebar_rules: dict
     req = sidebar_rules["codex_desktop_0_166"]["required_threads_predicate"]
     archived_ok = project_binding.get("archived") == req["archived"]
     preview_ok = bool(project_binding.get("preview_non_empty")) is req["preview_non_empty"]
-    pid_ok = (project_binding.get("project_id") is not None and str(project_binding.get("project_id")).strip() != "") is req["project_id_not_null"]
+    cwd_non_empty_ok = bool(str(project_binding.get("cwd") or "").strip()) is req["cwd_non_empty"]
     return {
         "archived_ok": archived_ok,
         "preview_non_empty_ok": preview_ok,
-        "project_id_not_null_ok": pid_ok,
-        "sidebar_visible_predicate_met": archived_ok and preview_ok and pid_ok,
+        "cwd_non_empty_ok": cwd_non_empty_ok,
+        "sidebar_visible_predicate_met": archived_ok and preview_ok and cwd_non_empty_ok,
     }
 
 
@@ -200,10 +200,10 @@ def select_default_codex_thread(codex_root: pathlib.Path, preferred_cwd: str = "
         FROM threads
         WHERE archived = 0
           AND preview <> ''
-          AND project_id IS NOT NULL
+          AND cwd <> ''
         ORDER BY CASE WHEN cwd = ? THEN 0 ELSE 1 END,
                  recency_at_ms DESC
-        LIMIT 80
+        LIMIT 120
         """,
         (preferred_cwd,),
     ).fetchall()
@@ -212,7 +212,7 @@ def select_default_codex_thread(codex_root: pathlib.Path, preferred_cwd: str = "
     best_score = -1
     for tid, rpath, cwd, _ in rows:
         p = pathlib.Path(rpath)
-        if not p.is_file():
+        if not p.is_file() or p.suffix == ".zst":
             continue
         has_user = False
         has_reasoning = False
@@ -710,25 +710,32 @@ def validate_negative_controls(schema: dict, sidebar_rules: dict, agy_report: di
         and res_source["sidebar_visible_predicate_met"] is False
     )
 
-    # Control 3: Mutate the real decoded Codex session's project_binding (empty preview or archived=1) and verify evaluate_codex_sidebar_visibility rejects both
+    # Control 3: Mutate the real decoded Codex session's project_binding (empty preview, archived=1, or empty cwd)
     mutated_codex_preview = {**codex_report["project_binding"], "preview_non_empty": False}
     mutated_codex_archived = {**codex_report["project_binding"], "archived": 1}
+    mutated_codex_cwd = {**codex_report["project_binding"], "cwd": ""}
     res_c_prev = evaluate_codex_sidebar_visibility(mutated_codex_preview, sidebar_rules)
     res_c_arch = evaluate_codex_sidebar_visibility(mutated_codex_archived, sidebar_rules)
+    res_c_cwd = evaluate_codex_sidebar_visibility(mutated_codex_cwd, sidebar_rules)
     caught_empty_preview = (
         res_c_prev["preview_non_empty_ok"] is False
         and res_c_prev["sidebar_visible_predicate_met"] is False
         and res_c_arch["archived_ok"] is False
         and res_c_arch["sidebar_visible_predicate_met"] is False
     )
+    caught_empty_cwd = (
+        res_c_cwd["cwd_non_empty_ok"] is False
+        and res_c_cwd["sidebar_visible_predicate_met"] is False
+    )
 
-    if not (caught_unknown_wire and caught_forbidden_bucket and caught_empty_preview):
+    if not (caught_unknown_wire and caught_forbidden_bucket and caught_empty_preview and caught_empty_cwd):
         raise RuntimeError("Negative control validation failed!")
 
     return {
         "unknown_wire_field_9999_caught": caught_unknown_wire,
         "forbidden_project_bucket_caught": caught_forbidden_bucket,
         "codex_empty_preview_caught": caught_empty_preview,
+        "codex_empty_cwd_caught": caught_empty_cwd,
     }
 
 

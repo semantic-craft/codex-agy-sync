@@ -144,6 +144,7 @@ object.__setattr__(sec, "_token", "super-secret-csrf-token-value")
 assert "super-secret" not in repr(sec) and "super-secret" not in str(sec) and "super-secret" not in f"{sec}"
 print("  Domain architecture verified: 7 step specs, 16 tool codecs, sidebar invariants, and CsrfSecret redaction.")
 '
+PYTHONPATH=src python3 scripts/check_architecture.py
 
 echo "[4/5] Scanning tracked and untracked repo files (excluding out/) for hardcoded home paths or CSRF token leaks..."
 python3 -c '

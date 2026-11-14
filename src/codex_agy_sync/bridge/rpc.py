@@ -17,16 +17,19 @@ import urllib.request
 
 from .._wire import encode_string_field, iter_wire_fields
 from ..codecs import (
-    AgyRawStepRow, TrajectoryWireCodec, decode_codex_rpc_thread_to_ledger,
-    read_codex_rollout_lines, splice_rollout_completed_prefix,
+    AgyRawStepRow, decode_agy_trajectory, decode_codex_rollout,
+    decode_codex_rpc_thread_to_ledger, read_codex_rollout_lines,
+    splice_rollout_completed_prefix,
 )
-from ..ledger import CascadeId, CodexThreadId, HostKind, StepIndex, TrajectoryLedger, validate_session_id
+from ..events import CascadeId, CodexThreadId, HostKind, StepIndex
+from ..ledger import TrajectoryLedger
+from ..workspace import PACKAGE_VERSION, validate_session_id
 from .paths_and_locks import (
     AgyDaemonEndpoint, CodexDaemonEndpoint, HostLockSnapshot, PresenceWalGuard,
     TransportMode, has_live_unix_socket, unix_socket_connect_path,
 )
 from .registry import WorkspaceProjectBinding
-from .state_machine import SessionSyncCursor, SyncDirection
+from .state_machine import HostTransportPort, SessionSyncCursor, SyncDirection
 
 _ACTIVE_TURN_STATUSES = frozenset({"active", "running", "inprogress", "in_progress"})
 _NOT_FOUND_MARKERS = ("not found", "no rollout", "unknown thread", "does not exist")
@@ -137,7 +140,7 @@ def _xor_websocket_mask(payload: bytes, mask_key: bytes) -> bytes:
     return (int.from_bytes(payload, "big") ^ int.from_bytes(repeated, "big")).to_bytes(plen, "big")
 
 
-class _UnixWebSocketClient:
+class UnixWebSocketClient:
     """Minimal stdlib RFC 6455 client over an `AF_UNIX` stream socket."""
 
     def __init__(self, sock: socket.socket) -> None:
@@ -221,7 +224,7 @@ class _UnixWebSocketClient:
         raise OnlineRpcUnavailableError(f"Timed out awaiting Codex RPC response id={target_id}.")
 
 
-def _extract_codex_rpc_thread(resp_msg: Mapping[str, Any], thread_id: CodexThreadId) -> CodexRpcReadResult:
+def extract_codex_rpc_thread(resp_msg: Mapping[str, Any], thread_id: CodexThreadId) -> CodexRpcReadResult:
     if "error" in resp_msg:
         err_obj = resp_msg["error"]
         err_msg = str(err_obj.get("message") if isinstance(err_obj, Mapping) else err_obj)
@@ -255,18 +258,18 @@ def fetch_codex_thread_via_rpc(
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout_s)
-    ws = _UnixWebSocketClient(sock)
+    ws = UnixWebSocketClient(sock)
     try:
         sock.connect(unix_socket_connect_path(endpoint.socket_path))
         ws.handshake()
         ws.send_json({"id": 1, "method": "initialize", "params": {
-            "clientInfo": {"name": "codex-agy-sync", "version": "0.2.0"}, "capabilities": {"experimentalApi": True},
+            "clientInfo": {"name": "codex-agy-sync", "version": PACKAGE_VERSION}, "capabilities": {"experimentalApi": True},
         }})
         if "error" in ws.wait_for_id(1):
             raise OnlineRpcUnavailableError("Codex app-server initialize RPC failed.")
         ws.send_json({"method": "initialized", "params": {}})
         ws.send_json({"id": 2, "method": "thread/read", "params": {"threadId": str(thread_id), "includeTurns": True}})
-        return _extract_codex_rpc_thread(ws.wait_for_id(2), thread_id)
+        return extract_codex_rpc_thread(ws.wait_for_id(2), thread_id)
     except (TimeoutError, OSError):
         raise OnlineRpcUnavailableError("Codex app-server Unix socket connection failed.") from None
     finally:
@@ -275,17 +278,8 @@ def fetch_codex_thread_via_rpc(
         sock.close()
 
 
-def import_codex_rollout_via_rpc(
-    endpoint: CodexDaemonEndpoint, rollout_path: Path, workspace_path: Path, project_id: str, title: str,
-    *, timeout_s: float = 90.0,
-) -> CodexThreadId:
-    from .native_codex import import_codex_rollout_via_rpc as native_import
-
-    return native_import(endpoint, rollout_path, workspace_path, project_id, title, timeout_s=timeout_s)
-
-
 def read_agy_ledger_dual_mode(
-    codec: TrajectoryWireCodec, binding: WorkspaceProjectBinding, cascade_id: CascadeId,
+    binding: WorkspaceProjectBinding, cascade_id: CascadeId,
     lock_snapshot: HostLockSnapshot, mode: TransportMode, *,
     read_disk_fn: Callable[[], TrajectoryLedger], read_title_fn: Callable[[CascadeId], str | None],
 ) -> tuple[TrajectoryLedger, TransportMode, bool]:
@@ -295,7 +289,7 @@ def read_agy_ledger_dual_mode(
 
     def _from_rpc() -> tuple[TrajectoryLedger, TransportMode, bool]:
         rpc_res = fetch_agy_trajectory_via_rpc(lock_snapshot.agy_daemon, cascade_id)
-        ledger = codec.decode_agy_steps_to_ledger(
+        ledger = decode_agy_trajectory(
             binding.workspace_path, binding.workspace_uri, rpc_res.raw_steps,
             explicit_title_override=read_title_fn(cascade_id),
         )
@@ -316,7 +310,7 @@ def read_agy_ledger_dual_mode(
 
 
 def read_codex_ledger_dual_mode(
-    codec: TrajectoryWireCodec, codex_home_dir: Path, binding: WorkspaceProjectBinding,
+    codex_home_dir: Path, binding: WorkspaceProjectBinding,
     thread_id: CodexThreadId, lock_snapshot: HostLockSnapshot, mode: TransportMode, *,
     read_disk_fn: Callable[[], TrajectoryLedger], read_optional_title_fn: Callable[[CodexThreadId], str | None],
     resolve_rollout_fn: Callable[[str, Path], Path | None],
@@ -335,7 +329,7 @@ def read_codex_ledger_dual_mode(
         disk_ledger: TrajectoryLedger | None = None
         if raw_path:
             if (cand := resolve_rollout_fn(raw_path, codex_home_dir.resolve(strict=False))) is not None:
-                disk_ledger = codec.decode_codex_rollout_to_ledger(
+                disk_ledger = decode_codex_rollout(
                     binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(cand), explicit_title_override=rpc_title,
                 )
         else:
@@ -403,7 +397,7 @@ class ProbedSyncLedgers:
 
 
 def probe_sync_ledgers(
-    transport: Any, guard: PresenceWalGuard, binding: WorkspaceProjectBinding, cursor: SessionSyncCursor | None,
+    transport: HostTransportPort, guard: PresenceWalGuard, binding: WorkspaceProjectBinding, cursor: SessionSyncCursor | None,
     cascade_id: CascadeId | None, codex_thread_id: CodexThreadId | None, direction: SyncDirection,
     mode: TransportMode, *, probe_cid: CascadeId | None, probe_tid: CodexThreadId | None,
 ) -> ProbedSyncLedgers:
@@ -418,11 +412,7 @@ def probe_sync_ledgers(
 
     if (read_cid := cascade_id or (probe_cid if cursor is None else None)) is not None:
         try:
-            if hasattr(transport, "read_agy_ledger_with_meta"):
-                agy_ledger, agy_tr, agy_active = transport.read_agy_ledger_with_meta(binding, read_cid, initial_locks, agy_mode)
-            else:
-                agy_ledger = transport.read_agy_ledger(binding, read_cid, initial_locks, agy_mode)
-                agy_tr = TransportMode.ONLINE_RPC if agy_mode == TransportMode.ONLINE_RPC else TransportMode.OFFLINE_STORAGE
+            agy_ledger, agy_tr, agy_active = transport.read_agy_ledger_with_meta(binding, read_cid, initial_locks, agy_mode)
             cascade_id = read_cid
         except FileNotFoundError:
             pass
@@ -431,11 +421,7 @@ def probe_sync_ledgers(
 
     if (read_tid := codex_thread_id or (probe_tid if cursor is None else None)) is not None:
         try:
-            if hasattr(transport, "read_codex_ledger_with_meta"):
-                codex_ledger, codex_tr, codex_active = transport.read_codex_ledger_with_meta(binding, read_tid, initial_locks, codex_mode)
-            else:
-                codex_ledger = transport.read_codex_ledger(binding, read_tid, initial_locks, codex_mode)
-                codex_tr = TransportMode.ONLINE_RPC if codex_mode == TransportMode.ONLINE_RPC else TransportMode.OFFLINE_STORAGE
+            codex_ledger, codex_tr, codex_active = transport.read_codex_ledger_with_meta(binding, read_tid, initial_locks, codex_mode)
             codex_thread_id = read_tid
         except FileNotFoundError:
             pass

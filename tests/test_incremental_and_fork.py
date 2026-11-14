@@ -32,7 +32,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             explicit_title_override="Incremental & Fork Test Session",
         )
         locks = self.bridge.guard.probe_locks(cid, tid)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=binding,
             cascade_id=cid,
             events=t1_events,
@@ -59,7 +59,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             t2_events,
             explicit_title_override="Incremental & Fork Test Session",
         )
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=binding,
             cascade_id=cid,
             events=t2_events,
@@ -85,7 +85,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             UserInputEvent(kind="user_input", anchor=EventOriginAnchor(origin_host=HostKind.CODEX, turn_id=TurnId("turn-3-codex"), timestamp_iso="2026-11-10T04:11:00Z"), query_text="Codex independent turn 3"),
             AssistantTextEvent(kind="assistant_text", anchor=EventOriginAnchor(origin_host=HostKind.CODEX, turn_id=TurnId("turn-3-codex"), timestamp_iso="2026-11-10T04:11:01Z"), text="Codex independent response 3"),
         ]
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=binding,
             cascade_id=cid,
             events=agy_t3_events,
@@ -93,7 +93,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             lock_snapshot=locks,
             mode=TransportMode.OFFLINE_STORAGE,
         )
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             binding=binding,
             thread_id=tid,
             events=codex_t3_events,
@@ -146,7 +146,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
                 UserInputEvent(kind="user_input", anchor=EventOriginAnchor(origin_host=HostKind.CODEX, turn_id=TurnId("turn-4-codex"), timestamp_iso="2026-11-10T04:15:00Z"), query_text="Turn 4 while AGY is flock locked"),
                 AssistantTextEvent(kind="assistant_text", anchor=EventOriginAnchor(origin_host=HostKind.CODEX, turn_id=TurnId("turn-4-codex"), timestamp_iso="2026-11-10T04:15:01Z"), text="Response 4"),
             ]
-            self.bridge._transport.apply_to_codex(
+            self.bridge.transport.apply_to_codex(
                 binding=binding,
                 thread_id=tid,
                 events=codex_t4_events,
@@ -176,7 +176,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             AssistantTextEvent(kind="assistant_text", anchor=EventOriginAnchor(origin_host=HostKind.ANTIGRAVITY, turn_id=TurnId("turn-1"), timestamp_iso="2026-11-10T06:00:01Z"), text="Shared ancestor reply"),
         ]
         locks = self.bridge.guard.probe_locks(cid, tid)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             cid,
             t1_events,
@@ -202,7 +202,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             UserInputEvent(kind="user_input", anchor=EventOriginAnchor(origin_host=HostKind.CODEX, turn_id=TurnId("turn-2-codex"), timestamp_iso="2026-11-10T06:01:05Z"), query_text="Codex branch turn"),
             AssistantTextEvent(kind="assistant_text", anchor=EventOriginAnchor(origin_host=HostKind.CODEX, turn_id=TurnId("turn-2-codex"), timestamp_iso="2026-11-10T06:01:06Z"), text="Codex branch reply"),
         ]
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             cid,
             agy_t2,
@@ -216,7 +216,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             TransportMode.OFFLINE_STORAGE,
             incremental=True,
         )
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             binding,
             tid,
             codex_t2,
@@ -269,7 +269,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
         cid2 = CascadeId("2222bbbb-2222-3333-4444-555555555555")
         tid2 = CodexThreadId("01a1ae7d-4444-7000-8000-000000000002")
         locks2 = self.bridge.guard.probe_locks(cid2, tid2)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             b2,
             cid2,
             t1_events,
@@ -285,7 +285,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             codex_thread_id=tid2,
             direction=SyncDirection.AGY_TO_CODEX,
         )
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             b2,
             cid2,
             agy_t2,
@@ -296,7 +296,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             TransportMode.OFFLINE_STORAGE,
             incremental=True,
         )
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             b2,
             tid2,
             codex_t2,
@@ -361,7 +361,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             UserInputEvent(kind="user_input", anchor=EventOriginAnchor(origin_host=HostKind.ANTIGRAVITY, turn_id=TurnId("turn-1"), timestamp_iso="2026-11-10T07:00:00Z"), query_text="Initial question"),
             AssistantTextEvent(kind="assistant_text", anchor=EventOriginAnchor(origin_host=HostKind.ANTIGRAVITY, turn_id=TurnId("turn-1"), timestamp_iso="2026-11-10T07:00:01Z"), text="Initial answer"),
         ]
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             cid,
             t1_events,
@@ -401,7 +401,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             ),
             AssistantTextEvent(kind="assistant_text", anchor=EventOriginAnchor(origin_host=HostKind.CODEX, turn_id=TurnId("turn-2"), timestamp_iso="2026-11-10T07:01:04Z"), text="Checked README."),
         ]
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             binding,
             tid,
             t2_events,
@@ -481,7 +481,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             ),
             AssistantTextEvent(kind="assistant_text", anchor=EventOriginAnchor(origin_host=HostKind.ANTIGRAVITY, turn_id=TurnId("turn-1"), timestamp_iso="2026-11-10T08:00:03Z"), text="Read complete."),
         ]
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             cid,
             t1_events,
@@ -498,7 +498,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             direction=SyncDirection.AGY_TO_CODEX,
         )
         tid = r_init.codex_thread_id
-        cpath = self.bridge._cursor_path(cid, tid)
+        cpath = self.bridge.cursor_path(cid, tid)
         self.assertTrue(cpath.is_file())
         saved_t1_cursor = cpath.read_text(encoding="utf-8")
 
@@ -527,7 +527,7 @@ class TestIncrementalAndFork(BridgeSandboxBase):
             UserInputEvent(kind="user_input", anchor=EventOriginAnchor(origin_host=HostKind.ANTIGRAVITY, turn_id=TurnId("turn-2"), timestamp_iso="2026-11-10T08:01:00Z"), query_text="Second turn before cursor crash"),
             AssistantTextEvent(kind="assistant_text", anchor=EventOriginAnchor(origin_host=HostKind.ANTIGRAVITY, turn_id=TurnId("turn-2"), timestamp_iso="2026-11-10T08:01:01Z"), text="Second turn done."),
         ]
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding,
             cid,
             t2_events,

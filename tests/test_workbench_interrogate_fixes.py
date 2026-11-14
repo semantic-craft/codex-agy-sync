@@ -40,18 +40,15 @@ from codex_agy_sync.workbench import (
     run_serve_server,
     stop_workbench_server,
 )
-from codex_agy_sync.workbench._lease import _write_lease_file
-from codex_agy_sync.workbench._discovery import (
-    _is_sensitive_excluded_path,
+from codex_agy_sync.workbench.lease import write_lease_file
+from codex_agy_sync.workbench import (
     discover_workspaces,
-    normalize_workspace_spec,
+    inject_html_metas,
+    validate_host_header,
+    validate_origin_header,
 )
-from codex_agy_sync.workbench._handler import (
-    _inject_html_metas,
-    _validate_host_header,
-    _validate_origin_header,
-)
-from codex_agy_sync.workbench.indexer import _build_work_card, _classify_session_links
+from codex_agy_sync.workbench.indexer import build_work_card, classify_session_links
+from codex_agy_sync.workspace import is_sensitive_excluded_path, normalize_workspace_spec
 from codex_agy_sync.workbench.models import TimelineTurn
 
 
@@ -180,12 +177,12 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
         symlink_escape.symlink_to(archive_upper)
 
         with mock.patch.object(sys, "platform", "darwin"):
-            self.assertTrue(_is_sensitive_excluded_path(archive_lower, sb))
-            self.assertTrue(_is_sensitive_excluded_path(sb / "ARCHIVE" / "deep", sb))
-            self.assertTrue(_is_sensitive_excluded_path(sb / ".PRIVATE_KEYS" / "pem", sb))
-            self.assertTrue(_is_sensitive_excluded_path(symlink_escape, sb))
-            self.assertFalse(_is_sensitive_excluded_path(archive2, sb))
-            self.assertFalse(_is_sensitive_excluded_path(priv2, sb))
+            self.assertTrue(is_sensitive_excluded_path(archive_lower, sb))
+            self.assertTrue(is_sensitive_excluded_path(sb / "ARCHIVE" / "deep", sb))
+            self.assertTrue(is_sensitive_excluded_path(sb / ".PRIVATE_KEYS" / "pem", sb))
+            self.assertTrue(is_sensitive_excluded_path(symlink_escape, sb))
+            self.assertFalse(is_sensitive_excluded_path(archive2, sb))
+            self.assertFalse(is_sensitive_excluded_path(priv2, sb))
 
             _seed_codex_thread_row(paths, "01960000-0000-7000-8000-00000000d001", str(archive_upper), "upper")
             _seed_codex_thread_row(paths, "01960000-0000-7000-8000-00000000d002", str(sb / "archive" / "lower-secret"), "lower")
@@ -286,11 +283,11 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
             },
             a0_key: {"title": "AGY target", "iso": "2026-11-14T00:02:00Z", "epoch": 200.0, "count": 0, "turns": []},
         }
-        links_empty, untouched_empty = _classify_session_links([t1_key, a0_key], sessions, [("r1", r_c2a, 100.0)])
+        links_empty, untouched_empty = classify_session_links([t1_key, a0_key], sessions, [("r1", r_c2a, 100.0)])
         self.assertIn(a0_key, untouched_empty)
         self.assertTrue(any(link.session_id == a0_key[1] and link.is_baton_target for link in links_empty))
 
-        card_initial = _build_work_card(
+        card_initial = build_work_card(
             ws_id,
             binding,
             True,
@@ -317,7 +314,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
                 has_thinking=False,
             )
         ]
-        _, untouched_after_turn = _classify_session_links([t1_key, a0_key], sessions, [("r1", r_c2a, 100.0)])
+        _, untouched_after_turn = classify_session_links([t1_key, a0_key], sessions, [("r1", r_c2a, 100.0)])
         self.assertNotIn(a0_key, untouched_after_turn)
 
         r_next = HandoffReceipt(
@@ -334,7 +331,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
             target_seed_turn_count=None,
         )
         sessions[t2_key] = {"title": "Codex hop 2", "iso": "2026-11-14T00:06:00Z", "epoch": 300.0, "count": 1, "turns": []}
-        card_roundtrip = _build_work_card(
+        card_roundtrip = build_work_card(
             ws_id,
             binding,
             True,
@@ -345,7 +342,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
         )
         self.assertEqual(card_roundtrip.work_id, card_initial.work_id)
 
-        card_cursor_base = _build_work_card(
+        card_cursor_base = build_work_card(
             ws_id,
             binding,
             True,
@@ -368,7 +365,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
             target_seed_turn_count=1,
         )
         sessions[a1_key] = {"title": "AGY hop", "iso": "2026-11-14T00:07:00Z", "epoch": 400.0, "count": 1, "turns": []}
-        card_cursor_after = _build_work_card(
+        card_cursor_after = build_work_card(
             ws_id,
             binding,
             True,
@@ -407,12 +404,12 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
             self.assertEqual(status, expected_status)
 
     def test_f8_host_and_origin_validation_ipv6_and_delimiters(self) -> None:
-        self.assertTrue(_validate_host_header("[::1]:8765", 8765))
-        self.assertTrue(_validate_origin_header("http://[::1]:8765", 8765))
+        self.assertTrue(validate_host_header("[::1]:8765", 8765))
+        self.assertTrue(validate_origin_header("http://[::1]:8765", 8765))
         for bad_host in ("127.0.0.1:8765?evil", "127.0.0.1:8765/foo", "user@127.0.0.1:8765", "127.0.0.1:8765#frag", "127.0.0.1:"):
-            self.assertFalse(_validate_host_header(bad_host, 8765), bad_host)
+            self.assertFalse(validate_host_header(bad_host, 8765), bad_host)
         for bad_origin in ("http://127.0.0.1:8765?evil=1", "http://user@127.0.0.1:8765", "http://127.0.0.1:8765/path"):
-            self.assertFalse(_validate_origin_header(bad_origin, 8765), bad_origin)
+            self.assertFalse(validate_origin_header(bad_origin, 8765), bad_origin)
 
         _, _, paths = self._new_sandbox()
         server = WorkbenchServer(WorkbenchService(paths), port=0)
@@ -462,7 +459,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
         self.addCleanup(proc.stdout.close)
         self.addCleanup(proc.stderr.close)
         unused_port = int(proc.stdout.readline().strip())
-        _write_lease_file(
+        write_lease_file(
             lease_file,
             WorkbenchLease(
                 pid=int(proc.pid),
@@ -499,7 +496,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
         self.addCleanup(proc_clean.stdout.close)
         self.addCleanup(proc_clean.stderr.close)
         clean_port = int(proc_clean.stdout.readline().strip())
-        _write_lease_file(
+        write_lease_file(
             lease_file,
             WorkbenchLease(
                 pid=int(proc_clean.pid),
@@ -714,7 +711,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
         def _fake_now_iso() -> str:
             return now_box[0].strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        with mock.patch("codex_agy_sync.workbench.server._now_iso", side_effect=_fake_now_iso):
+        with mock.patch("codex_agy_sync.workbench.server.now_iso", side_effect=_fake_now_iso):
             server_a = WorkbenchServer(svc, port=0)
             server_a.start()
             self.addCleanup(server_a.stop)
@@ -764,7 +761,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
             "<style>body::after { content: '</head>'; }</style>"
             "<title>T</title></HEAD><body></body></html>"
         )
-        out = _inject_html_metas(html, "tok-123")
+        out = inject_html_metas(html, "tok-123")
         self.assertEqual(out.count('name="workbench-token"'), 1)
         idx_meta = out.index('name="workbench-token"')
         idx_real_head = out.index("</HEAD>")
@@ -772,7 +769,7 @@ class WorkbenchInterrogateFixesTest(unittest.TestCase):
         self.assertLess(idx_meta, idx_real_head)
 
         no_head = "<!-- </head> --><script>'</head>'</script><body>hi</body>"
-        out_no_head = _inject_html_metas(no_head, "tok-456")
+        out_no_head = inject_html_metas(no_head, "tok-456")
         self.assertTrue(out_no_head.startswith("<meta "))
         self.assertEqual(out_no_head.count('name="workbench-token"'), 1)
 

@@ -7,11 +7,10 @@ import socket
 import time
 from typing import Any, Mapping
 
-from .. import __version__
 from ..codecs import read_codex_rollout_lines
-from ..ledger import CodexThreadId, validate_session_id
+from ..workspace import PACKAGE_VERSION, CodexThreadId, validate_session_id
 from .paths_and_locks import CodexDaemonEndpoint, has_live_unix_socket, unix_socket_connect_path
-from .rpc import OnlineRpcUnavailableError, _UnixWebSocketClient, _extract_codex_rpc_thread
+from .rpc import OnlineRpcUnavailableError, UnixWebSocketClient, extract_codex_rpc_thread
 
 
 class NativeCodexImportPending(OnlineRpcUnavailableError):
@@ -23,7 +22,7 @@ class NativeCodexImportPending(OnlineRpcUnavailableError):
 
 
 class _NativeCodexRpc:
-    def __init__(self, sock: socket.socket, ws: _UnixWebSocketClient, deadline: float) -> None:
+    def __init__(self, sock: socket.socket, ws: UnixWebSocketClient, deadline: float) -> None:
         self.sock, self.ws, self.deadline = sock, ws, deadline
         self.request_id = 0
         self.closed_threads: set[str] = set()
@@ -70,7 +69,7 @@ def _configure_imported_thread(
     rpc.call("thread/metadata/update", {"threadId": str(thread_id), "projectId": project_id})
     rpc.call("thread/name/set", {"threadId": str(thread_id), "name": title})
     response = rpc.call("thread/read", {"threadId": str(thread_id), "includeTurns": True})
-    thread = _extract_codex_rpc_thread({"result": response}, thread_id).thread
+    thread = extract_codex_rpc_thread({"result": response}, thread_id).thread
     if thread.get("id") != str(thread_id) or thread.get("projectId") != project_id:
         raise OnlineRpcUnavailableError("Codex imported thread identity or project did not match.")
     if expect_items and not any(turn.get("items") for turn in thread.get("turns", ())):
@@ -90,14 +89,14 @@ def import_codex_rollout_via_rpc(
         raise OnlineRpcUnavailableError("No live Codex app-server Unix socket available.")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout_s)
-    ws = _UnixWebSocketClient(sock)
+    ws = UnixWebSocketClient(sock)
     rpc = _NativeCodexRpc(sock, ws, time.monotonic() + timeout_s)
     thread_id: CodexThreadId | None = None
     fork_sent = False
     try:
         sock.connect(unix_socket_connect_path(endpoint.socket_path))
         ws.handshake()
-        rpc.call("initialize", {"clientInfo": {"name": "codex-agy-sync", "version": __version__}, "capabilities": {"experimentalApi": True}})
+        rpc.call("initialize", {"clientInfo": {"name": "codex-agy-sync", "version": PACKAGE_VERSION}, "capabilities": {"experimentalApi": True}})
         ws.send_json({"method": "initialized", "params": {}})
         fork_sent = True
         fork = rpc.call("thread/fork", {"threadId": source_id, "path": str(rollout_path.resolve()), "cwd": str(workspace_path.resolve()), "ephemeral": False})

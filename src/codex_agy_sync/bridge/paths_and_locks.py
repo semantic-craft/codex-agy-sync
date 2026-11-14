@@ -17,10 +17,35 @@ import socket
 import sqlite3
 import stat
 import struct
+import subprocess
 import sys
-from typing import Iterator, Mapping, Sequence, Tuple
+from typing import Any, Iterator, Mapping, Sequence, Tuple
+import uuid
 
-from ..ledger import CascadeId, CodexThreadId, HostKind, validate_session_id
+from ..workspace import CascadeId, CodexThreadId, HostKind, validate_session_id
+
+
+class SyncBusyLockError(RuntimeError):
+    """Raised when an explicit workspace-pairing or offline operation cannot acquire write locks."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        host: str | None = None,
+        remediation: Sequence[str] = (),
+    ) -> None:
+        self.host = host
+        self.remediation = tuple(remediation)
+        super().__init__(message)
+
+    def to_error_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"error": "sync_busy_lock", "message": str(self)}
+        if self.host is not None:
+            payload["host"] = self.host
+        if self.remediation:
+            payload["remediation"] = list(self.remediation)
+        return payload
 
 
 class CsrfSecret:
@@ -101,14 +126,14 @@ class HostEnvironmentPaths:
         )
 
 
-def _atomic_write_text(target_path: Path, content: str) -> None:
+def atomic_write_text(target_path: Path, content: str) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target_path.with_name(f".{target_path.name}.{os.getpid()}.tmp")
     tmp_path.write_text(content, encoding="utf-8")
     os.replace(tmp_path, target_path)
 
 
-def _atomic_write_bytes(target_path: Path, content: bytes) -> None:
+def atomic_write_bytes(target_path: Path, content: bytes) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target_path.with_name(f".{target_path.name}.{os.getpid()}.tmp")
     tmp_path.write_bytes(content)
@@ -122,17 +147,15 @@ def _atomic_copy_file(src_path: Path, dst_path: Path) -> None:
     os.replace(tmp_path, dst_path)
 
 
-def _deterministic_uuid(namespace_label: str, key: str) -> str:
-    import uuid
-
+def deterministic_uuid(namespace_label: str, key: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"codex-agy-sync:{namespace_label}:{key}"))
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _validated_child_path(base_dir: Path, *parts: str, label: str = "path") -> Path:
+def validated_child_path(base_dir: Path, *parts: str, label: str = "path") -> Path:
     resolved_base = base_dir.resolve(strict=False)
     raw_candidate = base_dir.joinpath(*parts)
     resolved_candidate = raw_candidate.resolve(strict=False)
@@ -141,11 +164,47 @@ def _validated_child_path(base_dir: Path, *parts: str, label: str = "path") -> P
     return raw_candidate
 
 
-def _open_readonly_sqlite(db_path: Path) -> sqlite3.Connection:
+def open_readonly_sqlite(db_path: Path) -> sqlite3.Connection:
     uri = f"{db_path.resolve(strict=False).as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
     conn.execute("PRAGMA query_only = ON;")
     return conn
+
+
+def expand_existing_with_sidecars(candidates: Sequence[Path]) -> list[Path]:
+    expanded: list[Path] = []
+    for p in candidates:
+        if p.is_file():
+            expanded.append(p)
+            if p.suffix in (".db", ".sqlite"):
+                expanded.extend(sc for sfx in ("-wal", "-shm") if (sc := p.with_name(f"{p.name}{sfx}")).is_file())
+    return expanded
+
+
+def is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+        if proc.stdout.strip().startswith("Z"):
+            return False
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return True
 
 
 class TransportMode(str, Enum):
@@ -260,7 +319,7 @@ class BackupManifest:
                     _unlink_with_sqlite_sidecars(match, backed_up_originals)
 
 
-def _open_nonblocking_ex_flock(lock_path: Path, *, create: bool) -> int:
+def open_nonblocking_ex_flock(lock_path: Path, *, create: bool) -> int:
     flags = (os.O_CREAT | os.O_RDWR) if create else os.O_RDWR
     try:
         fd = os.open(str(lock_path), flags, 0o600)
@@ -314,7 +373,7 @@ def _has_nonempty_wal(db_path: Path) -> bool:
         return False
 
 
-def _is_sqlite_shm_wal_locked(db_path: Path) -> bool:
+def is_sqlite_shm_wal_locked(db_path: Path) -> bool:
     shm_path = Path(f"{db_path}-shm")
     if not shm_path.is_file():
         return False
@@ -344,20 +403,11 @@ class PresenceWalGuard:
     def __init__(self, paths: HostEnvironmentPaths) -> None:
         self._paths = paths
 
-    def _is_pid_alive(self, pid: int) -> bool:
-        if pid <= 0:
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except OSError:
-            return False
+    @property
+    def paths(self) -> HostEnvironmentPaths:
+        return self._paths
 
-    def _discover_agy_daemon(self) -> AgyDaemonEndpoint | None:
+    def discover_agy_daemon(self) -> AgyDaemonEndpoint | None:
         daemon_dir = self._paths.agy_data_dir / "daemon"
         if not daemon_dir.is_dir():
             return None
@@ -367,7 +417,7 @@ class PresenceWalGuard:
                 raw = json.loads(hf.read_text(encoding="utf-8"))
                 pid = int(raw.get("pid") or 0)
                 tok = str(raw.get("csrfToken") or "").strip()
-                if pid > 0 and tok and self._is_pid_alive(pid):
+                if pid > 0 and tok and is_pid_alive(pid):
                     candidates.append(
                         AgyDaemonEndpoint(
                             pid=pid,
@@ -385,7 +435,7 @@ class PresenceWalGuard:
                     return ep
         return candidates[0] if candidates else None
 
-    def _discover_codex_daemon(self) -> CodexDaemonEndpoint | None:
+    def discover_codex_daemon(self) -> CodexDaemonEndpoint | None:
         live_pid: int | None = None
         daemon_json = self._paths.codex_home_dir / "daemon.json"
         if daemon_json.is_file():
@@ -393,7 +443,7 @@ class PresenceWalGuard:
                 raw = json.loads(daemon_json.read_text(encoding="utf-8"))
                 if isinstance(raw, dict):
                     pid = int(raw.get("pid") or 0)
-                    if pid > 0 and self._is_pid_alive(pid):
+                    if pid > 0 and is_pid_alive(pid):
                         live_pid = pid
             except Exception:
                 pass
@@ -419,7 +469,7 @@ class PresenceWalGuard:
 
         return CodexDaemonEndpoint(socket_path=daemon_json, pid=live_pid) if live_pid is not None else None
 
-    def _probe_flock_locked(self, lock_file: Path) -> bool:
+    def probe_flock_locked(self, lock_file: Path) -> bool:
         if not lock_file.exists():
             return False
         try:
@@ -452,32 +502,32 @@ class PresenceWalGuard:
         if codex_thread_id is not None:
             validate_session_id(str(codex_thread_id), label="codex_thread_id")
 
-        agy_daemon = self._discover_agy_daemon()
-        codex_daemon = self._discover_codex_daemon()
+        agy_daemon = self.discover_agy_daemon()
+        codex_daemon = self.discover_codex_daemon()
 
         agy_presence_locked = False
         agy_dbs: list[Path] = [self._paths.agy_data_dir / "conversation_summaries.db"]
         conv_db: Path | None = None
         if cascade_id is not None:
-            lock_path = _validated_child_path(
+            lock_path = validated_child_path(
                 self._paths.agy_data_dir, "presence", f"{cascade_id}.lock", label="cascade_id"
             )
             if not ignore_held_agy_presence:
-                agy_presence_locked = self._probe_flock_locked(lock_path)
-            conv_db = _validated_child_path(
+                agy_presence_locked = self.probe_flock_locked(lock_path)
+            conv_db = validated_child_path(
                 self._paths.agy_data_dir, "conversations", f"{cascade_id}.db", label="cascade_id"
             )
             agy_dbs.append(conv_db)
         agy_wal_active = (
             (agy_daemon is not None and any(_has_nonempty_wal(db) for db in agy_dbs))
             or (conv_db is not None and agy_presence_locked and _has_nonempty_wal(conv_db))
-            or any(_is_sqlite_shm_wal_locked(db) for db in agy_dbs)
+            or any(is_sqlite_shm_wal_locked(db) for db in agy_dbs)
         )
 
         codex_state = self._paths.codex_home_dir / "state_5.sqlite"
         codex_wal_active = bool(
             (codex_daemon is not None and _has_nonempty_wal(codex_state))
-            or _is_sqlite_shm_wal_locked(codex_state)
+            or is_sqlite_shm_wal_locked(codex_state)
         )
 
         return HostLockSnapshot(
@@ -507,24 +557,24 @@ class PresenceWalGuard:
 
         sync_lock_path = self._paths.sync_state_dir / "locks" / "sync.lock"
         sync_lock_path.parent.mkdir(parents=True, exist_ok=True)
-        sync_fd = _open_nonblocking_ex_flock(sync_lock_path, create=True)
+        sync_fd = open_nonblocking_ex_flock(sync_lock_path, create=True)
         presence_fd: int | None = None
         presence_lock_path: Path | None = None
         created_temp_presence = False
         try:
             if target_host == HostKind.ANTIGRAVITY and cascade_id is not None:
                 presence_dir = self._paths.agy_data_dir / "presence"
-                candidate_lock = _validated_child_path(
+                candidate_lock = validated_child_path(
                     self._paths.agy_data_dir, "presence", f"{cascade_id}.lock", label="cascade_id"
                 )
                 if candidate_lock.exists():
                     try:
-                        presence_fd = _open_nonblocking_ex_flock(candidate_lock, create=False)
+                        presence_fd = open_nonblocking_ex_flock(candidate_lock, create=False)
                         presence_lock_path = candidate_lock
                     except FileNotFoundError:
                         pass
                 if presence_fd is None and presence_dir.is_dir():
-                    presence_fd = _open_nonblocking_ex_flock(candidate_lock, create=True)
+                    presence_fd = open_nonblocking_ex_flock(candidate_lock, create=True)
                     presence_lock_path = candidate_lock
                     created_temp_presence = True
 
@@ -563,12 +613,12 @@ class PresenceWalGuard:
         ts_compact = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         base_id = f"backup-{target_host.value}-{target_session_id}-{ts_compact}"
         manifest_id = base_id
-        backup_dir = _validated_child_path(self._paths.sync_state_dir, "backups", manifest_id, label="target_session_id")
+        backup_dir = validated_child_path(self._paths.sync_state_dir, "backups", manifest_id, label="target_session_id")
         seq = 1
         while (backup_dir / "manifest.json").exists():
             seq += 1
             manifest_id = f"{base_id}-{seq}"
-            backup_dir = _validated_child_path(self._paths.sync_state_dir, "backups", manifest_id, label="target_session_id")
+            backup_dir = validated_child_path(self._paths.sync_state_dir, "backups", manifest_id, label="target_session_id")
         backup_dir.mkdir(parents=True, exist_ok=True)
         return manifest_id, backup_dir
 
@@ -619,14 +669,14 @@ class PresenceWalGuard:
                 restore_cmds.append(f"rm -f {shlex.quote(str(new_path))}")
 
         restoration_command = " && ".join(restore_cmds) if restore_cmds else ":"
-        created_iso = _now_iso()
+        created_iso = now_iso()
         manifest_payload = {
             "manifest_id": manifest_id, "created_at_iso": created_iso, "target_host": target_host.value,
             "target_session_id": target_session_id, "backup_dir": str(backup_dir),
             "backed_up_files": [str(p) for p in backed_up], "created_targets": [str(p) for p in created_targets],
             "file_sha256_map": sha_map, "restoration_command": restoration_command,
         }
-        _atomic_write_text(backup_dir / "manifest.json", json.dumps(manifest_payload, ensure_ascii=False, indent=2) + "\n")
+        atomic_write_text(backup_dir / "manifest.json", json.dumps(manifest_payload, ensure_ascii=False, indent=2) + "\n")
         return BackupManifest(
             manifest_id=manifest_id, created_at_iso=created_iso, target_host=target_host,
             target_session_id=target_session_id, backup_dir=backup_dir, backed_up_files=tuple(backed_up),

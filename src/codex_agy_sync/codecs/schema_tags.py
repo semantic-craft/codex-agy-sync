@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Callable, Literal, Mapping, Tuple
 
-from ..ledger import CanonicalToolPayload, RolloutLineNo, StepIndex
+from ..payloads import CanonicalToolPayload
+from ..workspace import RolloutLineNo, StepIndex
 
 
 class CortexStepTypeCode(IntEnum):
@@ -540,11 +541,3 @@ class CodexRawRolloutLine:
 
     line_no: RolloutLineNo
     raw_json: str
-
-
-def __getattr__(name: str) -> Any:
-    if name == "TOOL_CODEC_TABLE":
-        from .tools import TOOL_CODEC_TABLE
-
-        return TOOL_CODEC_TABLE
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -9,8 +9,9 @@ import tempfile
 import unittest
 
 from codex_agy_sync.codecs import (
-    TrajectoryWireCodec, decode_cascade_summary_proto, decode_summaries_state_proto,
-    encode_summaries_state_proto,
+    decode_cascade_summary_proto, decode_codex_rollout, decode_summaries_state_proto,
+    encode_agy_trajectory, encode_cascade_summary_proto, encode_codex_rollout,
+    encode_summaries_state_proto, render_annotation_pbtxt,
 )
 from codex_agy_sync import validate_session_id
 from codex_agy_sync._wire import (
@@ -271,7 +272,7 @@ class TestLedgerBehavior(unittest.TestCase):
         self.assertEqual(transcript_rows[2].step_type_name, "TASK_BOUNDARY")
 
         annot = ledger.project_annotation_pbtxt(cascade_id, "2026-11-10T02:05:00Z")
-        pbtxt_text = annot.render_pbtxt()
+        pbtxt_text = render_annotation_pbtxt(annot)
         self.assertIn('title: "Projection Verification Title"', pbtxt_text)
         self.assertIn("last_user_view_time {", pbtxt_text)
         self.assertIn("seconds:", pbtxt_text)
@@ -285,13 +286,13 @@ class TestLedgerBehavior(unittest.TestCase):
         self.assertEqual(summary.title, annot.title)
         self.assertEqual(summary.annotations.title, annot.title)
         self.assertEqual(summary.nesting_depth, 0)
-        self.assertTrue(len(summary.summary_proto_bytes) > 0)
+        self.assertTrue(len(encode_cascade_summary_proto(summary)) > 0)
 
         repo_root = Path(__file__).resolve().parent.parent
         schema = json.loads((repo_root / "schema" / "antigravity_2_30_schema.json").read_text())
         unknown_fields: list[str] = []
         decoded_summary = decode_protobuf(
-            summary.summary_proto_bytes,
+            encode_cascade_summary_proto(summary),
             "exa.jetski_cortex_pb.CascadeTrajectorySummary",
             schema,
             unknown_fields,
@@ -307,7 +308,7 @@ class TestLedgerBehavior(unittest.TestCase):
             conv_db_mtime=1794200000,
         )
         decoded_hub = decode_protobuf(
-            hub_state.proto_bytes,
+            encode_summaries_state_proto(hub_state),
             "jetbox_summaries_pb.SummariesState",
             schema,
             unknown_fields,
@@ -372,7 +373,7 @@ class TestLedgerBehavior(unittest.TestCase):
             title="Checkpoint\n  Multi\r\nTitle",
             last_user_view_time_iso="2026-11-10T03:00:05Z",
         )
-        self.assertIn('"Checkpoint Multi Title"', proj.render_pbtxt())
+        self.assertIn('"Checkpoint Multi Title"', render_annotation_pbtxt(proj))
 
     def test_from_events_step_indexing_and_recompute_flag(self) -> None:
         ws_path, ws_uri = parse_workspace_identity(self.workspace_dir)
@@ -390,7 +391,7 @@ class TestLedgerBehavior(unittest.TestCase):
         )
         step_indices = [int(ev.anchor.agy_step_index) for ev in recomputed.events if ev.anchor.agy_step_index is not None]
         self.assertEqual(step_indices, [0, 1, 2, 2])
-        encoded_steps = TrajectoryWireCodec.encode_ledger_to_agy_steps(recomputed)
+        encoded_steps = encode_agy_trajectory(recomputed)
         self.assertEqual([int(row.idx) for row in encoded_steps], [0, 1, 2])
 
     def test_cross_host_boundary_digest_matches_and_detects_argument_mutation(self) -> None:
@@ -444,11 +445,11 @@ class TestLedgerBehavior(unittest.TestCase):
         assert agy_wm is not None and mutated_wm is not None
         self.assertNotEqual(agy_wm.boundary_digest, mutated_wm.boundary_digest)
 
-        codex_lines = TrajectoryWireCodec.encode_ledger_to_codex_rollout(
+        codex_lines = encode_codex_rollout(
             agy_ledger,
             session_id="01970000-0000-7000-8000-000000000099",
         )
-        codex_ledger = TrajectoryWireCodec.decode_codex_rollout_to_ledger(ws_path, ws_uri, codex_lines)
+        codex_ledger = decode_codex_rollout(ws_path, ws_uri, codex_lines)
         codex_wm = codex_ledger.latest_watermark()
         self.assertIsNotNone(codex_wm)
         assert codex_wm is not None
@@ -520,15 +521,15 @@ class TestSharedWireAndPureSummaryProjections(unittest.TestCase):
         cid = CascadeId("11111111-2222-3333-4444-555555555599")
         pid = AgyProjectId("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         summary_proj = ledger.project_agy_cascade_summary(cascade_id=cid, project_id=pid)
-        orig_bytes = summary_proj.summary_proto_bytes
+        orig_bytes = encode_cascade_summary_proto(summary_proj)
 
         mutated = dataclasses.replace(summary_proj, step_count=99, title="Updated")
-        self.assertNotEqual(mutated.summary_proto_bytes, orig_bytes)
+        self.assertNotEqual(encode_cascade_summary_proto(mutated), orig_bytes)
         self.assertEqual(mutated.annotations.title, "Updated")
 
         unknowns: list[str] = []
         decoded_raw = decode_protobuf(
-            mutated.summary_proto_bytes,
+            encode_cascade_summary_proto(mutated),
             "exa.jetski_cortex_pb.CascadeTrajectorySummary",
             self.schema,
             unknowns,
@@ -538,7 +539,7 @@ class TestSharedWireAndPureSummaryProjections(unittest.TestCase):
         self.assertEqual(decoded_raw["summary"], "Updated")
         self.assertEqual(decoded_raw["annotations"]["title"], "Updated")
 
-        decoded_proj = decode_cascade_summary_proto(mutated.summary_proto_bytes, fallback_cascade_id=cid)
+        decoded_proj = decode_cascade_summary_proto(encode_cascade_summary_proto(mutated), fallback_cascade_id=cid)
         self.assertEqual(decoded_proj.step_count, 99)
         self.assertEqual(decoded_proj.title, "Updated")
 

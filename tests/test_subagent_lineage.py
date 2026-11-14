@@ -85,7 +85,7 @@ class TestSubagentLineage(BridgeSandboxBase):
             spawn_step_index=StepIndex(1),
         )
 
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=binding,
             cascade_id=parent_cid,
             events=parent_events,
@@ -93,7 +93,7 @@ class TestSubagentLineage(BridgeSandboxBase):
             lock_snapshot=locks,
             mode=TransportMode.OFFLINE_STORAGE,
         )
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=binding,
             cascade_id=child_cid,
             events=child_events,
@@ -240,7 +240,7 @@ class TestOrthogonalSubagentLineage(BridgeSandboxBase):
         )
         self.assertFalse(root_lineage.is_subagent)
         base_ledger = TrajectoryLedger.from_events(self.ws_path, self.ws_uri, events)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=self.binding,
             cascade_id=root_cid,
             events=events,
@@ -266,7 +266,7 @@ class TestOrthogonalSubagentLineage(BridgeSandboxBase):
             nesting_depth=1,
         )
         self.assertTrue(sub_lineage.is_subagent)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=self.binding,
             cascade_id=sub_cid,
             events=events,
@@ -281,7 +281,7 @@ class TestOrthogonalSubagentLineage(BridgeSandboxBase):
         tid_guardian = CodexThreadId("55555555-5555-4555-8555-555555555555")
         tid_root_fork = CodexThreadId("66666666-6666-4666-8666-666666666666")
         for tid in (tid_spawn, tid_review, tid_guardian, tid_root_fork):
-            self.bridge._transport.apply_to_codex(
+            self.bridge.transport.apply_to_codex(
                 binding=self.binding,
                 thread_id=tid,
                 events=events,
@@ -347,7 +347,7 @@ class TestOrthogonalSubagentLineage(BridgeSandboxBase):
         self.assertFalse(by_tid[str(tid_root_fork)].lineage.is_subagent)
         for sub_tid in (tid_spawn, tid_review, tid_guardian):
             self.assertTrue(by_tid[str(sub_tid)].lineage.is_subagent)
-            resolved = self.bridge._resolve_session_lineage(self.binding, None, sub_tid)
+            resolved = self.bridge.resolve_session_lineage(self.binding, None, sub_tid)
             self.assertTrue(resolved.is_subagent)
 
         r_root = self.bridge.sync_session(

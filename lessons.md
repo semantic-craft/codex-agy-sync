@@ -45,7 +45,7 @@
 - 起因与后果：本机真实宿主库核查发现 Antigravity 有大量带 `agent_name`（如自定义模式名）但 `nesting_depth = 0` 的顶层会话，Codex `threads.source` 亦区分 `"desktop"`/`"cli"` 与 `{"subagent": {"thread_spawn": ...}}` JSON，若把非空角色名当作子代理会导致数百条顶层会话被静默过滤或写入 `nesting_depth = 1` 从侧栏消失。同时 macOS 上 Codex Desktop 的 `~/.codex/app-server-control/app-server-control.sock` 是指向 `/private/tmp/codex-...` 的符号链接，使用 `lstat()` 会漏检 `S_ISSOCK`，而在深层沙盒目录直接按原软链路径 `connect()` 会触发 `AF_UNIX` 104 字节 `sun_path` 长度越界。
 - 修复与证据：Unit 3 在 `src/codex_agy_sync/ledger.py` 与 `src/codex_agy_sync/bridge/registry.py` 将 `SubagentLineage.is_subagent` 收紧为显式层级深度、sidecar 文件、`spawn_step_index` 或 `threads.source` 子代理结构；Unit 5 在 `src/codex_agy_sync/bridge/paths_and_locks.py` 与 `rpc.py` 实现 `has_live_unix_socket`（基于 `stat().st_mode`）与 `unix_socket_connect_path`（自动选取软链解析前后字节更短的路径），由 `test_3a_orthogonal_lineage_agy_root_agent_name_and_codex_source_shapes` 与 `test_5b_codex_unix_websocket_rpc_symlink_large_payload_and_a2_sync` 验证通过。
 - 正确做法（Done right）：顶层会话自定义角色名与子代理父子层级分字段正交存储；Unix 套接字探测统一走 `has_live_unix_socket` 并在 `connect()` 前比较软链目标字节长度。
-- 验证点：运行 `./scripts/check`（核对 `test_3a` 与 `test_5b` 测试通过，并在本机只读探测 `_discover_codex_daemon()` 命中软链套接字）。
+- 验证点：运行 `./scripts/check`（核对 `test_3a` 与 `test_5b` 测试通过，并在本机只读探测 `PresenceWalGuard.discover_codex_daemon()` 命中软链套接字）。
 - 复发记录：Seen 1x (2026-11-12)，在全仓真实宿主库只读实测评审与 Unit 3/5 在线 RPC 联调时核实并固化。
 
 ## 记录模板
@@ -80,3 +80,14 @@
 - AGY 会把导入的 generic 工具结果（磁盘 step type 132）在 RPC 中投影成原生 RUN_COMMAND（type 21）。当前七类步骤 decoder 未覆盖该投影，导致回传误补中断结果。Desktop handoff 将工具调用和原始输出平文化，避开运行态重放；旧 codec 不因此宣称支持全部宿主投影。Codex custom `exec` 的非 JSON 脚本输入也必须保留原文，不能按空命令解析。
 
 - AGY 新执行的原生工具也存在相同 RPC 投影差异：真实 Python 结果在磁盘 type 132 中完整，在 RPC type 21 中未被现有解码器读出。handoff 先用 RPC 检查空闲，再用现有只读 SQLite 读取器提取历史；实测原始结果 `1263` 与 call ID 配对保留，数据库指纹不变。
+
+### Codex 侧栏可见性谓词以非空 `cwd` 为准且模块分层必须靠 AST 门禁固化
+
+**Codex Desktop 0.166+ 侧栏筛选使用 `archived = 0 AND preview <> '' AND cwd <> ''`（`threads.project_id` 可为 `NULL`），且包内模块边界必须由自动化 AST 检查强制约束。**
+
+- 标签：#契约 #侧栏可见性 #架构
+- 起因与后果：早期对照 `idx_threads_project_recency` 假设 `threads.project_id IS NOT NULL` 为必需条件，但新版本 Codex Desktop 会将根路径保存在 `threads.cwd` 与 `.codex-global-state.json` 的 `electron-saved-workspace-roots` 中并将 `project_id` 置空，导致校验脚本误筛；同时多轮扩展后跨模块引用了 `_private` 符号与延迟包内导入。
+- 修复与证据：在 `schema/sidebar_visibility_rules.json` 与 `scripts/verify_session_mapping.py` 对齐 `cwd_non_empty` 规则并校验空 `cwd` 反例；重组 `src/codex_agy_sync/` 为 6 层严格向下 DAG（`scripts/check_architecture.py` 集成于 `./scripts/check`），抽离 `workspace.py`、`events.py`、`bridge/store_catalog.py`、`bridge/handoff_store.py` 并提升 `workbench/{discovery,lease,handler}.py` 为公开模块，由 `tests/test_architecture_coherence.py` 回归覆盖。
+- 正确做法（Done right）：所有宿主机侧栏谓词改动同步更新 schema 规则、验证脚本与反例测试；任何新增包内模块须归属清晰层级并通过 `./scripts/check` AST 检查。
+- 验证点：运行 `./scripts/check`（确认 Step `[2/5]`、`[3/5]` AST coherence gate 与 `tests/test_architecture_coherence.py` 全部通过）。
+- 复发记录：Seen 1x (2026-11-14)，在阶段架构一致性重构中发现并固化。

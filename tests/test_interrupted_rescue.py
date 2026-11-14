@@ -188,7 +188,7 @@ class TestInterruptedTurnRescue(BridgeSandboxBase):
         src_ledger = TrajectoryLedger.from_events(self.ws_path, self.ws_uri, events)
         self.assertTrue(src_ledger.has_inflight_turn)
         self.assertEqual(len(src_ledger.completed_turn_watermarks), 1)
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=self.binding,
             cascade_id=cid,
             events=events,
@@ -282,7 +282,7 @@ class TestInterruptedTurnRescue(BridgeSandboxBase):
             UserInputEvent(kind="user_input", anchor=t3, query_text="Continue in Codex Turn 3"),
             AssistantTextEvent(kind="assistant_text", anchor=t3, text="Turn 3 finished in Codex"),
         ]
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             binding=self.binding,
             thread_id=tid,
             events=t3_events,
@@ -351,7 +351,7 @@ class TestInterruptedTurnRescue(BridgeSandboxBase):
         ]
         src_ledger = TrajectoryLedger.from_events(self.ws_path, self.ws_uri, events)
         self.assertTrue(src_ledger.has_inflight_turn)
-        self.bridge._transport.apply_to_codex(
+        self.bridge.transport.apply_to_codex(
             binding=self.binding,
             thread_id=tid,
             events=events,
@@ -418,7 +418,7 @@ class TestInterruptedTurnRescue(BridgeSandboxBase):
             UserInputEvent(kind="user_input", anchor=t2, query_text="Resume in AGY Turn 2"),
             AssistantTextEvent(kind="assistant_text", anchor=t2, text="Turn 2 complete in AGY"),
         ]
-        self.bridge._transport.apply_to_agy(
+        self.bridge.transport.apply_to_agy(
             binding=self.binding,
             cascade_id=cid,
             events=t2_events,

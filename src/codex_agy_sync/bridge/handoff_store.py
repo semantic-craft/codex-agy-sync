@@ -1,31 +1,119 @@
-"""Read-only host store scanners and timestamp helpers for handoff candidate resolution."""
+"""Receipt persistence, read-only host scanners, and chain-tip traversal for handoff."""
 
 from __future__ import annotations
 
 from collections import deque
 import contextlib
+import dataclasses
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
 from typing import Any, Literal, Sequence
 
 from ..codecs import decode_trajectory_metadata_proto, iter_codex_rollout_lines
-from ..codecs.tools import safe_json_dict
-from ..ledger import CascadeId, CodexThreadId, HostKind, WorkspacePath, parse_workspace_identity, validate_session_id
-from .handoff import HandoffPendingError, HandoffReceipt, _receipt_matches_workspace, load_handoff_receipt
-from .paths_and_locks import HostEnvironmentPaths, _open_readonly_sqlite, _validated_child_path
-from .registry import (
-    ProjectRegistry,
-    WorkspaceProjectBinding,
-    _build_combined_lineage,
-    _count_codex_rollout_user_turns,
-    _parse_codex_thread_source_lineage,
-    _safe_valid_session_id,
+from ..events import (
+    AssistantTextEvent,
+    CascadeId,
+    CodexThreadId,
+    HostKind,
+    UserInputEvent,
+    WorkspacePath,
+    is_host_injected_user_event,
 )
-from .rescue_and_fork import compute_codex_nesting_depth
+from ..ledger import TrajectoryLedger
+from ..payloads import safe_json_dict
+from ..workspace import parse_workspace_identity, validate_session_id
+from .paths_and_locks import HostEnvironmentPaths, atomic_write_text, open_readonly_sqlite, validated_child_path
+from .registry import WorkspaceProjectBinding
 from .state_machine import SyncDirection
+from .store_catalog import (
+    build_combined_lineage,
+    compute_codex_nesting_depth,
+    count_codex_rollout_user_turns,
+    discover_agy_subagent_sidecars,
+    enrich_agy_session_from_conv_db,
+    parse_codex_thread_source_lineage,
+    parse_summary_workspace_uris,
+    safe_valid_session_id,
+    scan_agy_summaries_db,
+    uris_match_workspace,
+)
 from .transport import DefaultHostTransport
+
+
+@dataclass(frozen=True)
+class HandoffReceipt:
+    workspace: str
+    source_host: str
+    source_id: str
+    source_digest: str
+    target_host: str
+    target_id: str | None
+    title: str
+    status: Literal["pending", "ready", "no_op"]
+    staging_path: str
+    runtime_state_not_transferred: bool = True
+    error: str | None = None
+    created_at_iso: str = ""
+    chain_id: str | None = None
+    chained_from_source_id: str | None = None
+    chain_depth: int = 0
+    target_seed_turn_count: int | None = None
+    target_seed_text_digest: str | None = None
+
+
+_RECEIPT_FIELDS = frozenset(field.name for field in dataclasses.fields(HandoffReceipt))
+
+
+class HandoffPendingError(RuntimeError):
+    def __init__(self, receipt: HandoffReceipt, receipt_path: Path) -> None:
+        self.receipt = receipt
+        super().__init__(
+            f"Handoff remains pending; target={receipt.target_id or 'unknown'}. Inspect {receipt_path} "
+            f"before retrying; no new session was allocated on retry. Cause: {receipt.error or 'Previous operation did not finish.'}"
+        )
+
+
+class HandoffCancelledError(ValueError):
+    """Raised when an interactive `--pick` selection is cancelled by the user."""
+
+
+def load_handoff_receipt(path: Path) -> HandoffReceipt:
+    """Parse a persisted handoff receipt JSON file while preserving legacy schema compatibility."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Invalid handoff receipt payload in {path}: expected JSON object.")
+    return HandoffReceipt(**{key: value for key, value in raw.items() if key in _RECEIPT_FIELDS})
+
+
+def save_handoff_receipt(path: Path, receipt: HandoffReceipt) -> None:
+    atomic_write_text(path, json.dumps(dataclasses.asdict(receipt), ensure_ascii=False, indent=2) + "\n")
+
+
+def ledger_seed_fingerprint(ledger: TrajectoryLedger) -> tuple[int, str]:
+    """Compute `(completed_turn_count, sha256_digest)` for completed user/assistant texts without extra RPCs."""
+    pairs: list[list[str]] = []
+    for event in ledger.slice_after_watermark(None):
+        if isinstance(event, UserInputEvent):
+            if not is_host_injected_user_event(event):
+                pairs.append(["user_input", event.query_text.strip()])
+        elif isinstance(event, AssistantTextEvent):
+            pairs.append(["assistant_text", event.text.strip()])
+    digest = hashlib.sha256(
+        json.dumps(pairs, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return len(ledger.completed_turn_watermarks), digest
+
+
+def receipt_matches_workspace(receipt_ws: str, ws_path: Path) -> bool:
+    if receipt_ws == str(ws_path):
+        return True
+    with contextlib.suppress(ValueError):
+        return parse_workspace_identity(receipt_ws)[0] == ws_path
+    return False
 
 
 def parse_ts_epoch_iso(raw: Any, *, fallback_mtime: float = 0.0) -> tuple[float, str]:
@@ -65,39 +153,40 @@ def load_workspace_receipts(paths: HostEnvironmentPaths, ws_path: WorkspacePath)
             mtime = p.stat().st_mtime
         except (json.JSONDecodeError, ValueError, TypeError, OSError):
             continue
-        if _receipt_matches_workspace(receipt.workspace, ws_path):
+        if receipt_matches_workspace(receipt.workspace, ws_path):
             out.append((p, receipt, mtime))
     return out
 
 
 def discover_agy_entries(
     paths: HostEnvironmentPaths,
-    registry: ProjectRegistry,
     transport: DefaultHostTransport,
     binding: WorkspaceProjectBinding,
 ) -> list[dict[str, Any]]:
-    sidecars = registry._discover_agy_subagent_sidecars()
-    agy_sessions = registry._scan_agy_summaries_db(binding, sidecars)
+    sidecars = discover_agy_subagent_sidecars(paths)
+    agy_sessions = scan_agy_summaries_db(paths, binding.agy_project_id, binding.workspace_uri, sidecars)
     sum_mtimes: dict[str, Any] = {}
     if (sum_db := paths.agy_data_dir / "conversation_summaries.db").is_file():
         with contextlib.suppress(sqlite3.OperationalError):
-            with contextlib.closing(_open_readonly_sqlite(sum_db)) as conn:
+            with contextlib.closing(open_readonly_sqlite(sum_db)) as conn:
                 for cid_val, lm_val in conn.execute("SELECT conversation_id, last_modified_time FROM conversation_summaries"):
                     if cid_val:
                         sum_mtimes[str(cid_val)] = lm_val
     if (conv_dir := paths.agy_data_dir / "conversations").is_dir():
         for db_file in sorted(conv_dir.glob("*.db")):
-            registry._enrich_agy_session_from_conv_db(db_file, binding, sidecars, agy_sessions)
+            enrich_agy_session_from_conv_db(
+                db_file, binding.agy_project_id, binding.workspace_uri, sidecars, agy_sessions
+            )
     results: list[dict[str, Any]] = []
     for cid_str, info in agy_sessions.items():
-        if _build_combined_lineage(info, {}).is_subagent:
+        if build_combined_lineage(info, {}).is_subagent:
             continue
-        db_path = _validated_child_path(paths.agy_data_dir, "conversations", f"{cid_str}.db", label="cascade_id")
+        db_path = validated_child_path(paths.agy_data_dir, "conversations", f"{cid_str}.db", label="cascade_id")
         if not db_path.is_file():
             continue
         mtime = db_path.stat().st_mtime
         epoch, iso = parse_ts_epoch_iso(sum_mtimes.get(cid_str), fallback_mtime=mtime)
-        explicit_title = transport._read_agy_explicit_title(CascadeId(cid_str))
+        explicit_title = transport.read_agy_explicit_title(CascadeId(cid_str))
         results.append({
             "host": HostKind.ANTIGRAVITY, "session_id": cid_str, "direction": SyncDirection.AGY_TO_CODEX,
             "title": explicit_title or str(info.get("title") or "Untitled Session"),
@@ -125,7 +214,7 @@ def codex_rollout_fallback_entries(
                 break
         if meta_payload is None:
             continue
-        tid_str = _safe_valid_session_id(meta_payload.get("id"), "codex_thread_id")
+        tid_str = safe_valid_session_id(meta_payload.get("id"), "codex_thread_id")
         if not tid_str or tid_str in skip_ids:
             continue
         ws_ok = False
@@ -133,18 +222,18 @@ def codex_rollout_fallback_entries(
             with contextlib.suppress(ValueError):
                 ws_ok = parse_workspace_identity(str(meta_payload["cwd"]))[0] == binding.workspace_path
         src_raw = meta_payload.get("source")
-        src_is_sub, _, _, _, _ = _parse_codex_thread_source_lineage(
+        src_is_sub, _, _, _, _ = parse_codex_thread_source_lineage(
             json.dumps(src_raw) if isinstance(src_raw, dict) else (str(src_raw) if src_raw else None)
         )
         if not ws_ok or src_is_sub:
             continue
         skip_ids.add(tid_str)
-        _, probed_title = transport._probe_codex_rollout_and_title(CodexThreadId(tid_str))
+        _, probed_title = transport.probe_codex_rollout_and_title(CodexThreadId(tid_str))
         epoch, iso = parse_ts_epoch_iso(meta_payload.get("timestamp"), fallback_mtime=rpath.stat().st_mtime)
         entries.append({
             "host": HostKind.CODEX, "session_id": tid_str, "direction": SyncDirection.CODEX_TO_AGY,
             "title": probed_title or "Untitled Session",
-            "count": _count_codex_rollout_user_turns(str(rpath)), "epoch": epoch, "iso": iso,
+            "count": count_codex_rollout_user_turns(str(rpath)), "epoch": epoch, "iso": iso,
         })
     return entries
 
@@ -158,13 +247,13 @@ def discover_codex_entries(
     entries: list[dict[str, Any]] = []
     if (state_db := paths.codex_home_dir / "state_5.sqlite").is_file():
         with contextlib.suppress(sqlite3.OperationalError):
-            with contextlib.closing(_open_readonly_sqlite(state_db)) as conn:
+            with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
                 rows = conn.execute(
                     "SELECT id, title, preview, cwd, project_id, attached_thread_parent_id, rollout_path, "
                     "agent_nickname, agent_role, source, recency_at_ms, updated_at_ms, updated_at, archived FROM threads"
                 ).fetchall()
             for tid, title, preview, cwd, pid, ptid, rpath, nick, role, src, rec_ms, upd_ms, upd, archived in rows:
-                tid_str = _safe_valid_session_id(tid, "codex_thread_id")
+                tid_str = safe_valid_session_id(tid, "codex_thread_id")
                 if not tid_str:
                     continue
                 seen_or_archived.add(tid_str)
@@ -176,8 +265,8 @@ def discover_codex_entries(
                         ws_ok = parse_workspace_identity(str(cwd))[0] == binding.workspace_path
                 if not ws_ok:
                     continue
-                src_sub, src_parent, src_depth, src_type, src_nick = _parse_codex_thread_source_lineage(str(src) if src else None)
-                parent_str = _safe_valid_session_id(str(ptid or "").strip() or src_parent, "parent_codex_thread_id")
+                src_sub, src_parent, src_depth, src_type, src_nick = parse_codex_thread_source_lineage(str(src) if src else None)
+                parent_str = safe_valid_session_id(str(ptid or "").strip() or src_parent, "parent_codex_thread_id")
                 if compute_codex_nesting_depth(src, src_sub, src_depth, parent_str, str(role or "").strip() or src_type, str(nick or "").strip() or src_nick) > 0:
                     continue
                 rp = Path(str(rpath)) if rpath else None
@@ -186,7 +275,7 @@ def discover_codex_entries(
                 entries.append({
                     "host": HostKind.CODEX, "session_id": tid_str, "direction": SyncDirection.CODEX_TO_AGY,
                     "title": str(title or preview or "").strip() or "Untitled Session",
-                    "count": _count_codex_rollout_user_turns(str(rpath or "")), "epoch": epoch, "iso": iso,
+                    "count": count_codex_rollout_user_turns(str(rpath or "")), "epoch": epoch, "iso": iso,
                 })
     entries.extend(codex_rollout_fallback_entries(paths, binding, seen_or_archived, transport))
     return entries
@@ -201,51 +290,39 @@ def _ws_path_matches(raw_val: Any, target_ws: WorkspacePath) -> bool:
     return False
 
 
-def _parse_summary_uris(raw_uris: Any) -> list[str]:
-    text = str(raw_uris or "").strip()
-    if not text:
-        return []
-    if text.startswith("["):
-        with contextlib.suppress(ValueError):
-            parsed = json.loads(text)
-            if isinstance(parsed, list):
-                return [str(u).strip() for u in parsed if str(u).strip()]
-    return [text]
-
-
 def _probe_agy_ownership(
     paths: HostEnvironmentPaths, source_id: str, binding: WorkspaceProjectBinding | None,
 ) -> tuple[bool, Literal["match", "foreign", "unknown"]]:
-    conv_db = _validated_child_path(paths.agy_data_dir, "conversations", f"{source_id}.db", label="cascade_id")
+    conv_db = validated_child_path(paths.agy_data_dir, "conversations", f"{source_id}.db", label="cascade_id")
     exists = conv_db.is_file()
     has_meta = matches = False
     if exists and binding is not None:
         with contextlib.suppress(sqlite3.OperationalError):
-            with contextlib.closing(_open_readonly_sqlite(conv_db)) as conn:
+            with contextlib.closing(open_readonly_sqlite(conv_db)) as conn:
                 tblob = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()
             if tblob and tblob[0]:
                 meta = decode_trajectory_metadata_proto(bytes(tblob[0]))
                 pid = str(meta.get("project_id") or "").strip()
                 uris = [str(u).strip() for u in meta.get("workspace_uris", ()) if str(u).strip()]
                 has_meta = has_meta or bool(pid or uris)
-                matches = matches or pid == str(binding.agy_project_id) or ProjectRegistry._uris_match_workspace(uris, binding.workspace_uri)
+                matches = matches or pid == str(binding.agy_project_id) or uris_match_workspace(uris, binding.workspace_uri)
     if (sum_db := paths.agy_data_dir / "conversation_summaries.db").is_file():
         with contextlib.suppress(sqlite3.OperationalError):
-            with contextlib.closing(_open_readonly_sqlite(sum_db)) as conn:
+            with contextlib.closing(open_readonly_sqlite(sum_db)) as conn:
                 row = conn.execute("SELECT project_id, workspace_uris FROM conversation_summaries WHERE conversation_id = ?", (source_id,)).fetchone()
             if row is not None:
                 exists = True
                 if binding is not None:
                     pid = str(row[0] or "").strip()
-                    uris = _parse_summary_uris(row[1])
+                    uris = parse_summary_workspace_uris(row[1])
                     has_meta = has_meta or bool(pid or uris)
-                    matches = matches or pid == str(binding.agy_project_id) or ProjectRegistry._uris_match_workspace(uris, binding.workspace_uri)
-    if (sidecar := ProjectRegistry(paths)._discover_agy_subagent_sidecars().get(source_id)) is not None:
+                    matches = matches or pid == str(binding.agy_project_id) or uris_match_workspace(uris, binding.workspace_uri)
+    if (sidecar := discover_agy_subagent_sidecars(paths).get(source_id)) is not None:
         exists = True
         if binding is not None:
             sc_uris = [str(u).strip() for u in sidecar.get("workspace_uris", ()) if str(u).strip()]
             has_meta = has_meta or bool(sc_uris)
-            matches = matches or ProjectRegistry._uris_match_workspace(sc_uris, binding.workspace_uri)
+            matches = matches or uris_match_workspace(sc_uris, binding.workspace_uri)
     if binding is None:
         return exists, "unknown"
     return exists, ("match" if matches else ("foreign" if has_meta else "unknown"))
@@ -257,7 +334,7 @@ def _probe_codex_ownership(
     exists = has_meta = matches = False
     if (state_db := paths.codex_home_dir / "state_5.sqlite").is_file():
         with contextlib.suppress(sqlite3.OperationalError):
-            with contextlib.closing(_open_readonly_sqlite(state_db)) as conn:
+            with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
                 row = conn.execute("SELECT project_id, cwd FROM threads WHERE id = ?", (source_id,)).fetchone()
             if row is not None:
                 exists = True
@@ -268,7 +345,7 @@ def _probe_codex_ownership(
                         matches = True
     rpath: Path | None = None
     with contextlib.suppress(FileNotFoundError):
-        rpath, _ = transport._find_codex_rollout_and_title(CodexThreadId(source_id))
+        rpath, _ = transport.find_codex_rollout_and_title(CodexThreadId(source_id))
     if rpath is not None:
         exists = True
         if binding is not None:
