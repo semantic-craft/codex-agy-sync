@@ -25,6 +25,8 @@
 
 ## 当前状态
 
+- 2026-11-14 完成 Stage 1 本地工作台 PR 2（分支 `feat/workbench-stage1`）：新增 `src/codex_agy_sync/workbench/`（`models.py`、`_discovery.py`、`indexer.py`、`service.py`、`_lease.py`、`_handler.py`、`server.py`）与 `codex-agy-sync serve`（`--ui` / `--port` / `--idle-timeout` / `--max-lifetime` / `--open` / `--status` / `--stop`）；严格限定仅监听 `127.0.0.1`、注入单次 `X-Workbench-Token` 并校验 `Host` / `Origin` / `Sec-Fetch-Site`、`server.json` 以 `0o600` 无 token 落盘、过滤 `$HOME/Archive`、`$HOME/.private_keys`、软链逃逸与 `outside-of-project`，提供跨端检索、只复制 Markdown 草稿（`POST /api/send` 返回 `404`）与一键真实桌面交接；单元测试 `tests/test_workbench_service_and_server.py`、`tests/test_workbench_interrogate_fixes.py` 与浏览器端到端脚本 `skills/verify-codex-agy-sync/scripts/workbench_verify.py`（含 `_workbench_sandbox.py`，使用隔离沙盒 + 回环 AGY RPC 桩）全部通过，宿主数据库零变动。
+
 - 2026-11-14 完成 `handoff` CLI/UX 增强（分支 `feat/handoff-cli-ux`）：新增 `bridge/handoff_resolve.py`（配对诊断、候选会话扫描、`--source-id` 方向自动推断、`--latest` 跳过未动过的接力目标、`--chain` 接力链游标/幂等 `no_op`、`--pick` 仅写 `stderr` 的 TTY 交互菜单及 `--pair-if-offline`），扩展 `HandoffReceipt` 向后兼容加载（`load_handoff_receipt`）与种子指纹（`ledger_seed_fingerprint`），使 `guarded_pair_workspace` 双端已注册时零锁零写入幂等，并在 `cli.py` 为未配对/忙锁/挂起返回退出码 `2` 与结构化 `stderr` JSON。单元测试补齐 `tests/test_handoff_cli_ux.py`。
 
 - 2026-11-14 为外置工作台原型新增独立浏览器验收入口，见 `skills/verify-codex-agy-sync/features/ui-prototype.md`。覆盖搜索、共享草稿、模拟请教、完整历史接续与重复接续；证据与原型留在仓库外。截图由 Agent 单独复核，真实 Desktop 与消息投递须另行验收。
@@ -38,7 +40,7 @@
 
 ## 下一步
 
-1. 使用 `handoff` 在 Desktop 间按需交接；同一会话 ID 的在线增量追加仍不在此路径内。
+1. 使用 `codex-agy-sync serve`（配合外部工作台前端原型 `Main.html`）开展本地只读检索、引用草稿整理与 `handoff` 按需交接；真实双端 Desktop 运行下的工作台一键交接与 Stage 2 远端发送仍待后续独立实机验收。
 2. 其他工具类型的 Desktop 运行态兼容性按实际使用反馈验证；现有编码器回归不等于这些工具的全部实机验收。
 
 ## 记录

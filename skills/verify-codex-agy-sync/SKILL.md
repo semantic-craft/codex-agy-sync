@@ -9,6 +9,17 @@ description: "Drive and verify the codex-agy-sync CLI and its multi-store SQLite
 
 Run the repository gate `./scripts/check` alongside this skill whenever source or schema files change. Read [`features/README.md`](./features/README.md) for the maintained feature map.
 
+## Live Stage-1 workbench route
+
+For the live Stage-1 Local Workbench (`codex-agy-sync serve`) paired with the external prototype HTML, follow [Live Stage-1 workbench](./features/live-workbench.md). Supply the prototype artifact explicitly; it stays outside the repository.
+
+```bash
+python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py doctor --prototype "$PROTOTYPE"
+python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py suite --prototype "$PROTOTYPE"
+```
+
+This isolated suite runs `./bin/codex-agy-sync serve`, validates token/loopback security gates (`401`/`404` and `0o600` token-free lease), seeds paired/unpaired/excluded sandbox stores plus an ephemeral loopback AGY Connect-RPC stub (`target_daemon_mode: "sandbox_loopback_rpc_stub"`), and drives cross-host search, copy-only drafts, IME guards, and one-click handoff in `agent-browser` before `--stop` and sandbox cleanup. Visual semantics remain `REVIEW_REQUIRED` until screenshots are reviewed, and real Desktop apps remain `NOT_RUN`.
+
 ## UI prototype route
 
 For the external workspace HTML prototype, follow [UI prototype verification](./features/ui-prototype.md). Supply the artifact explicitly. It stays outside the repository.
@@ -52,7 +63,7 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py doctor --run
 `doctor` performs a strictly read-only check and exits `0` with `"status": "PASS"` only when all conditions hold:
 - `RUN_DIR` resolves via `Path.resolve()` outside `/tmp` and `/private/tmp`.
 - `_sandbox/owner.json` exists and carries `"marker": "codex-agy-sync-verify-sandbox"`.
-- `./bin/codex-agy-sync --help` exits `0` and exposes all five subcommands (`pair`, `status`, `inspect`, `sync-session`, `sync-workspace`).
+- `./bin/codex-agy-sync --help` exits `0` and exposes all seven subcommands (`pair`, `status`, `inspect`, `sync-session`, `handoff`, `sync-workspace`, `serve`).
 - Live host files (`$HOME/.gemini/antigravity/conversation_summaries.db` and `$HOME/.codex/state_5.sqlite`, when present) match the `(inode, size, mtime_ns)` fingerprint captured at `init`.
 
 ## Drive
@@ -120,5 +131,9 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py cleanup --ru
 - `suite [--run-dir <dir>] [--run-id <id>]`
 
 `skills/verify-codex-agy-sync/scripts/ui_prototype_verify.py` is an executable Python 3 script supporting two subcommands:
+- `doctor --prototype <path>`
+- `suite --prototype <path> [--run-dir <dir>] [--timeout <seconds>]`
+
+`skills/verify-codex-agy-sync/scripts/workbench_verify.py` (with helper `_workbench_sandbox.py`) is an executable Python 3 script for live Stage-1 workbench verification (`codex-agy-sync serve`) supporting two subcommands:
 - `doctor --prototype <path>`
 - `suite --prototype <path> [--run-dir <dir>] [--timeout <seconds>]`

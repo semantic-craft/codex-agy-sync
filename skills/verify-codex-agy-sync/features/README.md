@@ -48,4 +48,5 @@ Browser prototype feature files keep the same four-section layout, list prototyp
 - [Subagent isolation and lock deferral](./subagent-isolation-and-lock-deferral.md) covers `status` and `sync-workspace` subagent filtering (`--include-subagents`), active `presence/<id>.lock` deferral, and `online_rpc` write-guard deferral.
 - [Desktop session handoff](./desktop-handoff.md) covers `handoff` unpaired diagnosis (`exit 2`), `--pair-if-offline`, `--source-id` direction auto-inference, `--latest`, `--chain`, and `--pick` TTY behavior.
 
+- [Live Stage-1 workbench](./live-workbench.md) covers `codex-agy-sync serve` launch/status/stop, token/loopback security gates, excluded workspace filtering, cross-host search/locate, Stage-1 copy-only Markdown drafts with IME-safe submit, and real one-click handoff in an isolated browser session.
 - [Workspace UI prototype](./ui-prototype.md) covers search, shared draft, simulated review and handoff, reset, themes, and responsive views through an owned browser session.

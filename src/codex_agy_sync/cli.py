@@ -33,6 +33,8 @@ from .ledger import (
     ToolResultEvent,
     UserInputEvent,
 )
+from .workbench import query_workbench_status, run_serve_server, stop_workbench_server
+from .workbench._discovery import normalize_workspace_spec
 
 
 def _binding_to_dict(binding: WorkspaceProjectBinding) -> dict[str, Any]:
@@ -159,7 +161,20 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_sync_common_args(sync_w)
     sync_w.add_argument("--include-subagents", action="store_true", help="Synchronize spawned subagent sessions in addition to top-level sessions.")
 
+    _add_serve_subparser(subparsers)
     return parser
+
+
+def _add_serve_subparser(subparsers: Any) -> None:
+    serve_p = subparsers.add_parser("serve", help="Start the Stage-1 read-only Local Workbench server.")
+    serve_p.add_argument("--workspace", "-w", action="append", default=None, help="Seed workspace path or file:// URI (repeatable).")
+    serve_p.add_argument("--ui", type=Path, default=None, help="Path to standalone workbench HTML file.")
+    serve_p.add_argument("--port", type=int, default=8765, help="Loopback HTTP port (default: 8765; 0 picks an ephemeral port).")
+    serve_p.add_argument("--idle-timeout", type=int, default=1800, help="Idle self-reclaim timeout in seconds (default: 1800; 0 disables).")
+    serve_p.add_argument("--max-lifetime", type=int, default=14400, help="Maximum server lifetime in seconds (default: 14400; 0 disables).")
+    serve_p.add_argument("--open", action="store_true", help="Open the workbench URL in the default browser after startup.")
+    serve_p.add_argument("--status", action="store_true", help="Inspect running Local Workbench server status and exit.")
+    serve_p.add_argument("--stop", action="store_true", help="Stop a running Local Workbench server via lease + loopback health check.")
 
 
 def _resolve_paths(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> HostEnvironmentPaths:
@@ -242,6 +257,16 @@ def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
 
 
 def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.subcommand == "serve":
+        if args.status and args.stop:
+            parser.error("--status cannot be combined with --stop.")
+        if not (0 <= int(args.port) <= 65535):
+            parser.error("--port must be between 0 and 65535.")
+        if int(args.idle_timeout) < 0:
+            parser.error("--idle-timeout must be >= 0.")
+        if int(args.max_lifetime) < 0:
+            parser.error("--max-lifetime must be >= 0.")
+        return
     if args.subcommand != "handoff":
         return
     if args.chain and (args.latest or args.pick):
@@ -250,6 +275,25 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         parser.error("--source-id cannot be combined with --latest or --pick.")
     if args.latest and args.pick:
         parser.error("--latest cannot be combined with --pick.")
+
+
+def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
+    if args.status:
+        print(json.dumps(query_workbench_status(paths), ensure_ascii=False, indent=2))
+        return 0
+    if args.stop:
+        print(json.dumps(stop_workbench_server(paths), ensure_ascii=False, indent=2))
+        return 0
+    seeds = [item for raw in (args.workspace or ()) if (item := normalize_workspace_spec(raw))]
+    return run_serve_server(
+        paths,
+        seed_workspaces=seeds,
+        ui_path=args.ui,
+        port=int(args.port),
+        idle_timeout_sec=int(args.idle_timeout),
+        max_lifetime_sec=int(args.max_lifetime),
+        open_browser=bool(args.open),
+    )
 
 
 def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
@@ -302,16 +346,11 @@ def main(
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     _validate_cli_args(parser, args)
-    bridge = SyncBridge(paths=_resolve_paths(args, env=env))
-    if args.workspace is not None:
-        raw_ws = str(args.workspace).strip()
-        workspace_arg = (
-            str(Path(os.path.expandvars(raw_ws)).expanduser().resolve(strict=False))
-            if (raw_ws and not raw_ws.startswith("file://") and "://" not in raw_ws)
-            else raw_ws
-        )
-    else:
-        workspace_arg = os.getcwd()
+    paths = _resolve_paths(args, env=env)
+    if args.subcommand == "serve":
+        return _run_serve_cmd(paths, args)
+    bridge = SyncBridge(paths=paths)
+    workspace_arg = normalize_workspace_spec(args.workspace) if args.workspace is not None else os.getcwd()
 
     if args.subcommand == "pair":
         try:
