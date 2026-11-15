@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
+from ..bridge.handoff_reconcile import reconcile_workspace_handoffs
 from ..bridge.handoff_resolve import execute_handoff, validate_handoff_selector_flags
 from ..bridge.paths_and_locks import HostEnvironmentPaths
 from ..bridge.state_machine import SyncDirection
@@ -292,6 +293,8 @@ class WorkbenchService:
         chain: bool = False,
         title: str | None = None,
         pair_if_offline: bool = False,
+        auto_pair: bool = False,
+        include_interrupted: bool = False,
     ) -> dict[str, Any]:
         for field_name, field_val in (("source_id", source_id), ("direction", direction), ("title", title)):
             if field_val is not None and not isinstance(field_val, str):
@@ -315,7 +318,30 @@ class WorkbenchService:
             chain=bool(chain),
             pick=False,
             pair_if_offline=bool(pair_if_offline),
+            auto_pair=bool(auto_pair),
+            include_interrupted=bool(include_interrupted),
         )
         if mutated:
             self._indexer.invalidate()
         return dataclasses.asdict(receipt)
+
+    def reconcile_handoffs(
+        self,
+        *,
+        workspace: str,
+        source_id: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Verify pending handoff receipts for a workspace and promote ready or clear absent entries."""
+        if source_id is not None and not isinstance(source_id, str):
+            raise ValueError("source_id must be a string.")
+        clean_source = (source_id or "").strip() or None
+        result = reconcile_workspace_handoffs(
+            self._paths,
+            self._resolve_workspace_arg(workspace),
+            source_id=clean_source,
+            dry_run=bool(dry_run),
+        )
+        if not dry_run and (result["promoted"] or result["cleared"]):
+            self._indexer.invalidate()
+        return result

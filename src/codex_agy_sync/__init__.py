@@ -51,9 +51,11 @@ from .bridge import (
     list_handoff_candidates,
     load_handoff_receipt,
     pair_workspace_with_mode,
+    reconcile_workspace_handoffs,
     register_agy_project_via_rpc,
     register_codex_project_via_rpc,
     resolve_handoff_request,
+    summarize_workspace_handoffs,
     validate_handoff_selector_flags,
 )
 from .codecs import (
@@ -309,6 +311,7 @@ __all__ = [
     "normalize_tool_file_path",
     "pair_workspace_with_mode",
     "parse_workspace_identity",
+    "reconcile_workspace_handoffs",
     "register_agy_project_via_rpc",
     "register_codex_project_via_rpc",
     "render_annotation_pbtxt",
@@ -317,6 +320,7 @@ __all__ = [
     "rescue_interrupted_turn",
     "resolve_canonical_title",
     "resolve_handoff_request",
+    "summarize_workspace_handoffs",
     "validate_handoff_selector_flags",
     "STAGE_1_CAPABILITIES",
     "SearchHit",

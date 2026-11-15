@@ -7,11 +7,12 @@ import contextlib
 import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Literal, Sequence
+from typing import Any, Iterator, Literal, Sequence
 
 from ..codecs import decode_trajectory_metadata_proto, iter_codex_rollout_lines
 from ..events import (
@@ -26,7 +27,7 @@ from ..events import (
 from ..ledger import TrajectoryLedger
 from ..payloads import safe_json_dict
 from ..workspace import parse_workspace_identity, validate_session_id
-from .paths_and_locks import HostEnvironmentPaths, atomic_write_text, open_readonly_sqlite, validated_child_path
+from .paths_and_locks import HostEnvironmentPaths, SyncBusyLockError, atomic_write_text, open_readonly_sqlite, validated_child_path
 from .registry import WorkspaceProjectBinding
 from .state_machine import SyncDirection
 from .store_catalog import (
@@ -73,9 +74,30 @@ class HandoffPendingError(RuntimeError):
     def __init__(self, receipt: HandoffReceipt, receipt_path: Path) -> None:
         self.receipt = receipt
         super().__init__(
-            f"Handoff remains pending; target={receipt.target_id or 'unknown'}. Inspect {receipt_path} "
-            f"before retrying; no new session was allocated on retry. Cause: {receipt.error or 'Previous operation did not finish.'}"
+            f"Handoff remains pending; target={receipt.target_id or 'unknown'}. Run "
+            f"`codex-agy-sync handoff --reconcile` or inspect {receipt_path} before retrying; "
+            f"no new session was allocated on retry. Cause: {receipt.error or 'Previous operation did not finish.'}"
         )
+
+
+@contextlib.contextmanager
+def open_handoff_lock(paths: HostEnvironmentPaths, workspace_path: Path) -> Iterator[Path]:
+    """Acquire exclusive non-blocking handoff state lock and yield the handoffs state directory."""
+    state = paths.sync_state_dir / "handoffs"
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / "handoff.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise SyncBusyLockError(
+                "Another handoff operation is currently running; wait and retry.",
+                host="handoff",
+                remediation=(f'Wait for the active handoff to finish, then retry: codex-agy-sync handoff -w "{workspace_path}"',),
+            ) from exc
+        try:
+            yield state
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 class HandoffCancelledError(ValueError):

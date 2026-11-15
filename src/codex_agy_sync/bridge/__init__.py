@@ -13,6 +13,10 @@ from .handoff import (
     publish_new_file,
     read_handoff_source,
 )
+from .handoff_reconcile import (
+    reconcile_workspace_handoffs,
+    summarize_workspace_handoffs,
+)
 from .handoff_resolve import (
     HandoffCancelledError,
     HandoffCandidate,
@@ -168,9 +172,11 @@ __all__ = [
     "pair_workspace_with_mode",
     "publish_new_file",
     "read_handoff_source",
+    "reconcile_workspace_handoffs",
     "register_agy_project_via_rpc",
     "register_codex_project_via_rpc",
     "resolve_handoff_request",
+    "summarize_workspace_handoffs",
     "validate_handoff_selector_flags",
     "validated_child_path",
 ]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import fcntl
 import hashlib
 import json
 import os
@@ -28,7 +27,7 @@ from ..events import (
     is_host_injected_tool_result,
     is_host_injected_user_event,
 )
-from ..ledger import TrajectoryLedger
+from ..ledger import TrajectoryLedger, rescue_interrupted_ledger
 from ..payloads import serialize_tool_payload_arguments_json
 from ..workspace import validate_session_id
 from . import rpc
@@ -39,12 +38,14 @@ from .handoff_store import (
     assert_source_belongs_to_binding,
     ledger_seed_fingerprint,
     load_handoff_receipt,
+    open_handoff_lock,
     receipt_matches_workspace,
     save_handoff_receipt,
 )
 from .native_codex import import_codex_rollout_via_rpc
-from .paths_and_locks import HostEnvironmentPaths, PresenceWalGuard, SyncBusyLockError, TransportMode, now_iso
+from .paths_and_locks import HostEnvironmentPaths, PresenceWalGuard, TransportMode, now_iso, validated_child_path
 from .registry import ProjectRegistry, UnpairedWorkspaceError, WorkspaceProjectBinding, diagnose_workspace_binding
+from .rescue_and_fork import is_source_actively_running
 from .state_machine import EmptySessionError, SyncDirection, generate_uuid7
 from .transport import DefaultHostTransport
 
@@ -82,6 +83,8 @@ def read_handoff_source(
     binding: WorkspaceProjectBinding,
     direction: SyncDirection,
     source_id: str,
+    *,
+    include_interrupted: bool = False,
 ) -> TrajectoryLedger:
     assert_source_belongs_to_binding(paths, binding, direction, source_id)
     transport = DefaultHostTransport(paths)
@@ -102,7 +105,12 @@ def read_handoff_source(
             raise ValueError("Source session is active. Finish the turn before handoff.")
         ledger, _, _ = transport.read_agy_ledger_with_meta(binding, CascadeId(source_id), locks, TransportMode.OFFLINE_STORAGE)
     if active or ledger.has_inflight_turn:
-        raise ValueError("Source session is active or has an incomplete turn. Finish the turn before handoff.")
+        if not ledger.has_inflight_turn or not include_interrupted:
+            raise ValueError("Source session is active or has an incomplete turn. Finish the turn before handoff.")
+        host = HostKind.CODEX if to_agy else HostKind.ANTIGRAVITY
+        if is_source_actively_running(host, ledger, locks, rpc_active=active):
+            raise ValueError("Source session is active. Finish the turn before handoff.")
+        ledger, _ = rescue_interrupted_ledger(ledger)
     if ledger.latest_watermark() is None:
         raise ValueError("Source session has no completed history to hand off.")
     return ledger
@@ -209,6 +217,11 @@ def _import_agy(paths: HostEnvironmentPaths, binding: WorkspaceProjectBinding, l
     files = _stage_agy(paths, binding, ledger, stage, target_id)
     for file in files:
         publish_new_file(file, paths.agy_data_dir / file.relative_to(stage))
+    if paths.agy_cli_data_dir is not None and paths.agy_cli_data_dir.resolve(strict=False) != paths.agy_data_dir.resolve(strict=False):
+        staged_tx = stage / "brain" / target_id / ".system_generated" / "logs" / "transcript.jsonl"
+        cli_tx = validated_child_path(paths.agy_cli_data_dir, "brain", target_id, ".system_generated", "logs", "transcript.jsonl", label="target_id")
+        if staged_tx.is_file() and not cli_tx.exists():
+            publish_new_file(staged_tx, cli_tx)
     endpoint = PresenceWalGuard(paths).discover_agy_daemon()
     result = rpc.fetch_agy_trajectory_via_rpc(endpoint, CascadeId(target_id), timeout_s=30.0)
     if len(result.raw_steps) != len(DefaultHostTransport(dataclasses.replace(paths, agy_data_dir=stage)).read_persisted_agy_steps(files[-1])):
@@ -285,8 +298,9 @@ def _handoff_locked(
     chain_id: str | None = None,
     chained_from_source_id: str | None = None,
     chain_depth: int = 0,
+    include_interrupted: bool = False,
 ) -> HandoffReceipt:
-    ledger = read_handoff_source(paths, binding, direction, source_id)
+    ledger = read_handoff_source(paths, binding, direction, source_id, include_interrupted=include_interrupted)
     watermark = ledger.latest_watermark()
     assert watermark is not None
     to_agy = direction == SyncDirection.CODEX_TO_AGY
@@ -342,24 +356,16 @@ def handoff_session(
     chain_id: str | None = None,
     chained_from_source_id: str | None = None,
     chain_depth: int = 0,
+    include_interrupted: bool = False,
 ) -> HandoffReceipt:
     """Create a new Desktop session once per completed source history."""
     if direction not in (SyncDirection.CODEX_TO_AGY, SyncDirection.AGY_TO_CODEX):
         raise ValueError("Handoff requires an explicit direction.")
     validate_session_id(source_id, label="source_id")
     binding = _require_binding(paths, workspace)
-    state = paths.sync_state_dir / "handoffs"
-    state.mkdir(parents=True, exist_ok=True)
-    with (state / "handoff.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise SyncBusyLockError(
-                "Another handoff operation is currently running; wait and retry.",
-                host="handoff",
-                remediation=(f'Wait for the active handoff to finish, then retry: codex-agy-sync handoff -w "{binding.workspace_path}"',),
-            ) from exc
+    with open_handoff_lock(paths, binding.workspace_path) as state:
         return _handoff_locked(
             paths, binding, direction, source_id, title, state,
             chain_id=chain_id, chained_from_source_id=chained_from_source_id, chain_depth=chain_depth,
+            include_interrupted=include_interrupted,
         )

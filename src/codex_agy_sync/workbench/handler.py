@@ -18,6 +18,7 @@ import urllib.parse
 from ..bridge.handoff_store import HandoffPendingError
 from ..bridge.paths_and_locks import SyncBusyLockError
 from ..bridge.registry import UnpairedWorkspaceError
+from ..bridge.rpc import OnlineRpcUnavailableError
 
 _MAX_BODY_BYTES = 1_048_576
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -280,6 +281,8 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
             self._handle_draft_render(payload)
         elif path == "/api/handoff":
             self._handle_handoff(payload)
+        elif path == "/api/handoff/reconcile":
+            self._handle_handoff_reconcile(payload)
         else:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
@@ -334,7 +337,7 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
             payload, ("workspace", "workspace_id", "source_id", "direction", "title", "target_session"),
         ):
             return
-        if not self._validate_bool_fields(payload, ("latest", "chain", "pair_if_offline")):
+        if not self._validate_bool_fields(payload, ("latest", "chain", "pair_if_offline", "auto_pair", "include_interrupted")):
             return
         ws = payload.get("workspace") or payload.get("workspace_id") or ""
         try:
@@ -346,6 +349,8 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
                 chain=bool(payload.get("chain", False)),
                 title=payload.get("title"),
                 pair_if_offline=bool(payload.get("pair_if_offline", False)),
+                auto_pair=bool(payload.get("auto_pair", False)),
+                include_interrupted=bool(payload.get("include_interrupted", False)),
             )
             self._send_json(HTTPStatus.OK, receipt)
         except HandoffPendingError as exc:
@@ -354,5 +359,27 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.CONFLICT, exc.to_error_payload())
         except UnpairedWorkspaceError as exc:
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY, exc.to_error_payload())
+        except OnlineRpcUnavailableError as exc:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "online_rpc_unavailable", "message": str(exc)})
         except (ValueError, RuntimeError) as exc:
             self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "handoff_rejected", "message": str(exc)})
+
+    def _handle_handoff_reconcile(self, payload: dict[str, Any]) -> None:
+        if not self._validate_str_fields(payload, ("workspace", "workspace_id", "source_id")):
+            return
+        if not self._validate_bool_fields(payload, ("dry_run",)):
+            return
+        ws = payload.get("workspace") or payload.get("workspace_id") or ""
+        try:
+            result = self.server.owner.service.reconcile_handoffs(
+                workspace=ws,
+                source_id=payload.get("source_id"),
+                dry_run=bool(payload.get("dry_run", False)),
+            )
+            self._send_json(HTTPStatus.OK, result)
+        except SyncBusyLockError as exc:
+            self._send_json(HTTPStatus.CONFLICT, exc.to_error_payload())
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_reconcile_request", "message": str(exc)})
+        except (RuntimeError, OSError) as exc:
+            self._send_json(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "reconcile_failed", "message": str(exc)})
