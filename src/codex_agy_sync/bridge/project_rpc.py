@@ -250,7 +250,7 @@ def _wait_for_agy_project_id(
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
 
 
-def _post_agy_create_project(endpoint: AgyDaemonEndpoint, payload: bytes, *, timeout: float) -> None:
+def _post_agy_create_project(endpoint: AgyDaemonEndpoint, payload: bytes, *, timeout: float) -> int:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     url = f"http://127.0.0.1:{endpoint.http_port}/exa.language_server_pb.LanguageServerService/CreateProject"
     headers = {
@@ -262,12 +262,43 @@ def _post_agy_create_project(endpoint: AgyDaemonEndpoint, payload: bytes, *, tim
     try:
         with opener.open(req, timeout=timeout) as resp:
             resp.read()
+        return 200
     except urllib.error.HTTPError as exc:
         with contextlib.suppress(Exception):
             exc.close()
+        if exc.code == 409:
+            return 409
         raise OnlineRpcUnavailableError(f"Antigravity CreateProject RPC failed with HTTP {exc.code}.") from None
     except (urllib.error.URLError, TimeoutError, OSError):
         raise OnlineRpcUnavailableError("Antigravity CreateProject RPC connection failed.") from None
+
+
+def _existing_agy_project_names(paths: HostEnvironmentPaths) -> set[str]:
+    projects_dir = paths.gemini_config_dir / "projects"
+    if not projects_dir.is_dir():
+        return set()
+    names: set[str] = set()
+    with contextlib.suppress(OSError):
+        for pfile in sorted(projects_dir.glob("*.json")):
+            if not pfile.is_file():
+                continue
+            with contextlib.suppress(OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                payload = json.loads(pfile.read_text(encoding="utf-8"))
+                if isinstance(payload, Mapping) and (name := str(payload.get("name") or "").strip()):
+                    names.add(name)
+    return names
+
+
+def _agy_project_name_candidates(ws_path: Path, project_id: str, existing_names: set[str]) -> list[str]:
+    base_name = ws_path.name or str(ws_path)
+    parent_name = ws_path.parent.name.strip()
+    fallback = f"{base_name} ({project_id[:8]})"
+    raw = [base_name]
+    if parent_name:
+        raw.append(f"{base_name} ({parent_name})")
+    raw.append(fallback)
+    deduped = list(dict.fromkeys(raw))
+    return [cand for cand in deduped if cand == fallback or cand not in existing_names]
 
 
 def register_agy_project_via_rpc(
@@ -286,10 +317,17 @@ def register_agy_project_via_rpc(
     if existing is not None:
         return str(existing)
     project_id = str(uuid.uuid4())
-    payload = encode_agy_create_project_request(ws_path, project_id=project_id, name=ws_path.name or str(ws_path))
-    _post_agy_create_project(endpoint, payload, timeout=timeout)
-    confirmed = _wait_for_agy_project_id(paths, ws_uri, registry, timeout=min(timeout, 0.25))
-    return str(confirmed) if confirmed is not None else project_id
+    candidates = _agy_project_name_candidates(ws_path, project_id, _existing_agy_project_names(paths))
+    for candidate in candidates:
+        payload = encode_agy_create_project_request(ws_path, project_id=project_id, name=candidate)
+        status = _post_agy_create_project(endpoint, payload, timeout=timeout)
+        if status == 200:
+            confirmed = _wait_for_agy_project_id(paths, ws_uri, registry, timeout=min(timeout, 0.25))
+            return str(confirmed) if confirmed is not None else project_id
+        concurrent_existing = _lookup_agy_project(paths, ws_uri, registry)
+        if concurrent_existing is not None:
+            return str(concurrent_existing)
+    raise OnlineRpcUnavailableError("Antigravity CreateProject RPC failed with HTTP 409.")
 
 
 def _codex_project_matches_workspace(project: Any, target_path: WorkspacePath) -> str | None:

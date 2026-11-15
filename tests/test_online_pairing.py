@@ -87,10 +87,18 @@ def _read_ws_client_frame(conn: socket.socket, buf: bytearray) -> tuple[int, boo
 
 
 class _MockAgyServer:
-    def __init__(self, paths: HostEnvironmentPaths, secret: str, *, status_code: int = 200) -> None:
+    def __init__(
+        self,
+        paths: HostEnvironmentPaths,
+        secret: str,
+        *,
+        status_code: int = 200,
+        on_create_project: object | None = None,
+    ) -> None:
         self.paths = paths
         self.secret = secret
         self.status_code = status_code
+        self.on_create_project = on_create_project
         self.captured: list[dict[str, object]] = []
         self._httpd: http.server.ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -120,6 +128,12 @@ class _MockAgyServer:
                     self.end_headers()
                     return
                 if self.path == "/exa.language_server_pb.LanguageServerService/CreateProject":
+                    if callable(parent.on_create_project):
+                        override = parent.on_create_project(body)
+                        if override is not None and override != 200:
+                            self.send_response(int(override))
+                            self.end_headers()
+                            return
                     parent._handle_create_project(body)
                     self.send_response(200)
                     self.send_header("Content-Type", "application/proto")
@@ -557,3 +571,75 @@ class TestOnlinePairingRpc(unittest.TestCase):
         finally:
             cli_sock.close()
             srv_sock.close()
+
+    def test_f_agy_create_project_409_duplicate_name_disambiguation_and_race_lookup(self) -> None:
+        projects_dir = self.paths.gemini_config_dir / "projects"
+        projects_dir.mkdir(parents=True, exist_ok=True)
+        (projects_dir / "existing-1.json").write_text(
+            json.dumps({
+                "id": "existing-1",
+                "name": "shared-app",
+                "projectResources": {"resources": [{"folderUri": (self.root / "unrelated-ws").as_uri()}]},
+            }),
+            encoding="utf-8",
+        )
+        (projects_dir / "corrupt.json").write_text("{corrupt", encoding="utf-8")
+
+        def _req_name(raw_body: bytes) -> str:
+            top = _decode_proto_fields(raw_body)
+            proj = _decode_proto_fields(top[1][0][2])
+            return proj[2][0][2].decode("utf-8")
+
+        # 1) Pre-existing colliding name skips basename directly and registers disambiguated parent candidate
+        ws1 = self.root / "clone-one" / "shared-app"
+        ws1.mkdir(parents=True)
+        with _MockAgyServer(self.paths, "s-409-1") as srv1:
+            pid1 = register_agy_project_via_rpc(self.paths, ws1, registry=self.registry)
+        self.assertEqual(len(srv1.captured), 1)
+        self.assertEqual(_req_name(srv1.captured[0]["body"]), "shared-app (clone-one)")  # type: ignore[arg-type]
+        self.assertEqual(json.loads((projects_dir / f"{pid1}.json").read_text(encoding="utf-8"))["name"], "shared-app (clone-one)")
+
+        # 2) HTTP 409 on candidate 1 (lookup None) retries with candidate 2 and returns project_id on 200
+        ws2 = self.root / "clone-two" / "dup-repo"
+        ws2.mkdir(parents=True)
+        with _MockAgyServer(
+            self.paths, "s-409-2",
+            on_create_project=lambda body: 409 if _req_name(body) == "dup-repo" else 200,
+        ) as srv2:
+            pid2 = register_agy_project_via_rpc(self.paths, ws2, registry=self.registry)
+        self.assertEqual([_req_name(r["body"]) for r in srv2.captured], ["dup-repo", "dup-repo (clone-two)"])  # type: ignore[arg-type]
+        self.assertEqual(json.loads((projects_dir / f"{pid2}.json").read_text(encoding="utf-8"))["id"], pid2)
+
+        # 3) HTTP 409 when concurrent registration wrote the workspace project returns existing ID without extra retries
+        ws3 = self.root / "clone-three" / "race-repo"
+        ws3.mkdir(parents=True)
+        concurrent_pid = str(uuid.uuid4())
+
+        def _write_concurrent_on_409(body: bytes) -> int:
+            _ = body
+            (projects_dir / f"{concurrent_pid}.json").write_text(
+                json.dumps({
+                    "id": concurrent_pid,
+                    "name": "race-repo",
+                    "projectResources": {"resources": [{"folderUri": parse_workspace_identity(ws3)[1]}]},
+                }),
+                encoding="utf-8",
+            )
+            return 409
+
+        with _MockAgyServer(self.paths, "s-409-3", on_create_project=_write_concurrent_on_409) as srv3:
+            got_pid = register_agy_project_via_rpc(self.paths, ws3, registry=self.registry)
+        self.assertEqual(got_pid, concurrent_pid)
+        self.assertEqual(len(srv3.captured), 1)
+
+        # 4) Exhausting all candidates with HTTP 409 raises OnlineRpcUnavailableError
+        ws4 = self.root / "clone-four" / "always-conflict"
+        ws4.mkdir(parents=True)
+        with _MockAgyServer(self.paths, "s-409-4", status_code=409) as srv4:
+            with self.assertRaises(OnlineRpcUnavailableError) as err_ctx:
+                register_agy_project_via_rpc(self.paths, ws4, registry=self.registry)
+        self.assertIn("409", str(err_ctx.exception))
+        self.assertEqual(len(srv4.captured), 3)
+        self.assertEqual(_req_name(srv4.captured[0]["body"]), "always-conflict")  # type: ignore[arg-type]
+        self.assertEqual(_req_name(srv4.captured[1]["body"]), "always-conflict (clone-four)")  # type: ignore[arg-type]
+        self.assertRegex(_req_name(srv4.captured[2]["body"]), r"^always-conflict \([0-9a-f]{8}\)$")  # type: ignore[arg-type]
