@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME="CodexAgyHandoff"
 BUNDLE_ID="dev.semanticcraft.codex-agy-handoff"
 OUTPUT_DIR=""
+ARCHIVE_ZIP=""
 INSTALL=0
 
 usage() {
@@ -14,10 +15,11 @@ usage() {
 Usage: build_menubar_app.sh [options]
 
 Options:
-  --output-dir <dir>   Target directory for CodexAgyHandoff.app (default: $REPO_ROOT/out/app)
-  --bundle-id <id>     CFBundleIdentifier (default: dev.semanticcraft.codex-agy-handoff)
-  --install            Output to $HOME/Applications and register with LaunchServices
-  -h, --help           Show this help text
+  --output-dir <dir>    Target directory for CodexAgyHandoff.app (default: $REPO_ROOT/out/app)
+  --bundle-id <id>      CFBundleIdentifier (default: dev.semanticcraft.codex-agy-handoff)
+  --archive-zip <path>  Package signed .app into <path> via ditto and write <path>.sha256
+  --install             Output to $HOME/Applications and register with LaunchServices
+  -h, --help            Show this help text
 EOF
 }
 
@@ -31,6 +33,11 @@ while [[ $# -gt 0 ]]; do
         --bundle-id)
             [[ $# -ge 2 ]] || { echo "Error: --bundle-id requires an argument" >&2; exit 1; }
             BUNDLE_ID="$2"
+            shift 2
+            ;;
+        --archive-zip)
+            [[ $# -ge 2 ]] || { echo "Error: --archive-zip requires an argument" >&2; exit 1; }
+            ARCHIVE_ZIP="$2"
             shift 2
             ;;
         --install)
@@ -57,21 +64,25 @@ if [[ -z "$OUTPUT_DIR" ]]; then
     fi
 fi
 
-validate_output_dir() {
+validate_non_tmp_path() {
     local candidate="$1"
+    local label="$2"
     if [[ "$candidate" == "/tmp" || "$candidate" == /tmp/* || "$candidate" == "/private/tmp" || "$candidate" == /private/tmp/* ]]; then
-        echo "Error: refusing /tmp or /private/tmp output directory: $candidate" >&2
+        echo "Error: refusing /tmp or /private/tmp $label: $candidate" >&2
         exit 1
     fi
     local resolved
     resolved="$(python3 -c 'import os, sys; print(os.path.realpath(os.path.abspath(sys.argv[1])))' "$candidate")"
     if [[ "$resolved" == "/tmp" || "$resolved" == /tmp/* || "$resolved" == "/private/tmp" || "$resolved" == /private/tmp/* ]]; then
-        echo "Error: refusing resolved /tmp or /private/tmp output directory: $resolved" >&2
+        echo "Error: refusing resolved /tmp or /private/tmp $label: $resolved" >&2
         exit 1
     fi
 }
 
-validate_output_dir "$OUTPUT_DIR"
+validate_non_tmp_path "$OUTPUT_DIR" "output directory"
+if [[ -n "$ARCHIVE_ZIP" ]]; then
+    validate_non_tmp_path "$ARCHIVE_ZIP" "archive zip path"
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "Error: build_menubar_app.sh requires macOS (Darwin)." >&2
@@ -80,8 +91,18 @@ fi
 
 command -v swift >/dev/null 2>&1 || { echo "Error: swift toolchain not found in PATH." >&2; exit 1; }
 
+APP_VERSION="$(python3 -c '
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.M)
+if not match:
+    raise SystemExit("Error: missing version in pyproject.toml")
+print(match.group(1))
+' "$REPO_ROOT/pyproject.toml")"
+
 SCRATCH_PATH="$REPO_ROOT/out/swift-build"
-mkdir -p "$OUTPUT_DIR" "$SCRATCH_PATH"
+ICON_SCRATCH_PATH="$REPO_ROOT/out/app-icon"
+mkdir -p "$OUTPUT_DIR" "$SCRATCH_PATH" "$ICON_SCRATCH_PATH"
 
 swift build \
     --package-path "$REPO_ROOT/macos" \
@@ -104,28 +125,33 @@ fi
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
 PLIST_PATH="$CONTENTS_DIR/Info.plist"
+ICNS_PATH="$RESOURCES_DIR/AppIcon.icns"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$MACOS_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 chmod 755 "$MACOS_DIR/$APP_NAME"
 
-python3 - "$PLIST_PATH" "$BUNDLE_ID" "$APP_NAME" <<'PY'
+swift "$REPO_ROOT/scripts/generate_app_icon.swift" "$ICNS_PATH" "$ICON_SCRATCH_PATH"
+
+python3 - "$PLIST_PATH" "$BUNDLE_ID" "$APP_NAME" "$APP_VERSION" <<'PY'
 import plistlib
 import sys
 
-plist_path, bundle_id, app_name = sys.argv[1:4]
+plist_path, bundle_id, app_name, app_version = sys.argv[1:5]
 payload = {
     "CFBundleDevelopmentRegion": "zh_CN",
     "CFBundleDisplayName": app_name,
     "CFBundleExecutable": app_name,
-    "CFBundleIdentifier": bundle_id,
+    "CFBundleIconFile": "AppIcon",
+    "CFBundleIconName": "AppIcon",
     "CFBundleInfoDictionaryVersion": "6.0",
     "CFBundleName": app_name,
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.3.0",
-    "CFBundleVersion": "1",
+    "CFBundleShortVersionString": app_version,
+    "CFBundleVersion": app_version,
     "LSMinimumSystemVersion": "14.0",
     "LSUIElement": True,
     "NSHighResolutionCapable": True,
@@ -136,6 +162,17 @@ PY
 
 codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --verify --deep --strict "$APP_BUNDLE"
+
+if [[ -n "$ARCHIVE_ZIP" ]]; then
+    ARCHIVE_ZIP_ABS="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$ARCHIVE_ZIP")"
+    mkdir -p "$(dirname "$ARCHIVE_ZIP_ABS")"
+    rm -f "$ARCHIVE_ZIP_ABS" "$ARCHIVE_ZIP_ABS.sha256"
+    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ARCHIVE_ZIP_ABS"
+    (
+        cd "$(dirname "$ARCHIVE_ZIP_ABS")"
+        shasum -a 256 "$(basename "$ARCHIVE_ZIP_ABS")"
+    ) > "$ARCHIVE_ZIP_ABS.sha256"
+fi
 
 if [[ "$INSTALL" -eq 1 ]]; then
     LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"

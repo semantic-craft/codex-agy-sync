@@ -1,6 +1,6 @@
 # codex-agy-sync（Codex 与 Antigravity 会话同频桥）
 
-在同一项目中按需交接 Codex 与 Antigravity Desktop 的本地会话历史，优先用于某端额度中断后的极速抢救与接力续聊。提供原生 macOS 菜单栏应用 `CodexAgyHandoff.app` 与按需 CLI `codex-agy-sync handoff`，零后台轮询、不考虑远端会话、不向运行中数据库裸写。Stage 1 浏览器工作台（`serve`）与旧版离线同步（`sync-session` / `sync-workspace`）保留为冻结维护入口。
+在同一项目中按需交接 Codex 与 Antigravity Desktop 的本地对话历史，用于单端额度耗尽或回复中断后的快速切端续聊。提供原生 macOS 菜单栏应用 `CodexAgyHandoff.app` 与按需 CLI `codex-agy-sync handoff`，零后台轮询、不考虑远端会话、不向运行中数据库裸写。Stage 1 浏览器工作台（`serve`）与旧版离线同步（`sync-session` / `sync-workspace`）保留为冻结维护入口。
 
 ## 背景与核心问题
 
@@ -10,19 +10,23 @@
 
 本项目复用现有账本与编码器，参考开源 Desktop 导入项目的做法，并以本机真实 Desktop 验证兼容性。存储转换成功、侧栏可见和模型能连续续聊是三项不同的验收，不能互相替代。
 
-## macOS 菜单栏极速接力（CodexAgyHandoff.app）
+## macOS 菜单栏对话接力（CodexAgyHandoff.app）
 
-针对额度中断后的即时切端场景，仓库内 `macos/` 提供原生 Swift 6 菜单栏应用 `CodexAgyHandoff.app`（`LSUIElement` 常驻、零后台定时轮询）。
+针对额度中断后的即时切端场景，仓库内 `macos/` 提供原生 Swift 6 菜单栏应用 `CodexAgyHandoff.app`（`LSUIElement` 常驻、零后台定时轮询、原生毛玻璃命令流面板）。
 
 ```bash
 ./scripts/build_menubar_app.sh --install
+./scripts/build_menubar_app.sh --archive-zip out/release/CodexAgyHandoff-macos.zip
 open "$HOME/Applications/CodexAgyHandoff.app"
 ```
 
-- **零轮询按需刷新**：仅在点击菜单栏图标或按下全局快捷键 `⌃⌥H` 展开面板（以及点击刷新）时触发一次只读 `./bin/codex-agy-sync menubar-feed --limit 6`；日常待机 0% 轮询占用。
-- **中断急救首卡与一键交接**：`menubar-feed` 按工作区边界快速扫描并结合在线回环 `IDLE` 状态识别已停止的半途中断会话（`interrupted_stopped`）与已完成会话（`completed_ready`）；主按钮直接执行 `handoff --workspace <path> --source-id <id> --auto-pair --include-interrupted`（若处于 `pending_reconcile` 则执行 `--reconcile`），并在交接完成后自动拉起目标端 `/Applications/ChatGPT.app`（`com.openai.codex`）或 `/Applications/Antigravity.app`（`com.google.antigravity`）。
-- **CLI 可执行文件发现顺序**：应用按 `CODEX_AGY_SYNC_BIN` 环境变量、`UserDefaults`（`cliExecutablePath`，可在界面通过 `NSOpenPanel` “选择 CLI…” 指定）、`$PATH`、`~/.local/bin/codex-agy-sync`、`/opt/homebrew/bin/codex-agy-sync` 与 `/usr/local/bin/codex-agy-sync` 顺序解析 `codex-agy-sync`。
-- **范围收敛说明**：不考虑远端会话与 Stage 2 `POST /api/send` 自动投递；日常切端以 `CodexAgyHandoff.app` 与 `codex-agy-sync handoff` 为主入口，`serve` 与 `sync-session` / `sync-workspace` 仅作为冻结维护入口保留。
+- **零轮询按需刷新**。仅在点击菜单栏图标、按下全局快捷键（默认 `⌃⌥H`）或手动刷新（`⌘R`）时触发一次只读 `./bin/codex-agy-sync menubar-feed --limit <N>`，日常待机 0% 轮询占用。
+- **Raycast 式命令流与全键盘操作**。`392pt` 宽度毛玻璃面板顶部提供即时搜索框（`筛选项目或对话标题…`），按“继续当前工作”与“最近对话”分组展示会话；支持 `↑` / `↓` 移动选中项、`↵` 执行当前动作、`Esc` 先清空筛选再收起面板、`⌘R` 刷新、`⌘,` 打开设置、`⌘Q` 退出。
+- **原生设置面板、品牌图标与 4 款菜单栏模板图标**。构建脚本通过 `scripts/generate_app_icon.swift` 生成 10 尺寸 Retina `AppIcon.icns`（“双轨接力桥”圆角方图标），并从 `pyproject.toml` 动态同步 `CFBundleShortVersionString`。点击底栏 `设置 ⌘,` 打开独立 `CodexAgyHandoff 设置` 窗口（含开机自启 `SMAppService.mainApp`、自定义快捷键录制与触发行为切换、面板最近会话条数、交接后自动切端开关），支持实时切换 `接力双轨`、`切端闪电`、`双向穿梭`、`同频双环` 4 款自适应黑白单色模板图标及状态栏右下角镂空圆点提示。
+- **App + CLI 版本同频看板与按需双通道同步更新**。“版本与同步更新”分栏按需探测当前 `codex-agy-sync --version` 与应用版本对齐状态（`双端已同频` / `版本不一致` / `CLI 未就绪`），支持两套无后台轮询的显式同频升级通道：（A）已关联或自动识别本地源码仓时直接重装 Python CLI 并调用 `scripts/build_menubar_app.sh` 重编替换当前 `.app`；（B）按需拉取 GitHub Releases 最新版本，经 `SHA256SUMS` 校验后同步安装新 `.whl` 与 `CodexAgyHandoff-macos.zip` 并提供一键重启。
+- **平实一致的操作文案与一键切端**。`menubar-feed` 结合在线回环 `IDLE` 状态识别未完成回复（`interrupted_stopped`）与已完成对话（`completed_ready`），界面统一呈现 `用 Codex 继续` / `用 Antigravity 继续`（待确认收据呈现 `重新同步状态`），底层执行 `handoff --workspace <path> --source-id <id> --auto-pair --include-interrupted`（`pending_reconcile` 执行 `--reconcile`），完成后提示 `已在 Codex 打开对话` 并按偏好自动拉起目标端 `/Applications/ChatGPT.app`（`com.openai.codex`）或 `/Applications/Antigravity.app`（`com.google.antigravity`）。
+- **命令行工具发现顺序**。应用按 `CODEX_AGY_SYNC_BIN` 环境变量、`UserDefaults`（`cliExecutablePath`，可在界面通过 `NSOpenPanel` “选择工具…” 指定）、`$PATH`、`~/.local/bin/codex-agy-sync`、`/opt/homebrew/bin/codex-agy-sync` 与 `/usr/local/bin/codex-agy-sync` 顺序解析 `codex-agy-sync`。
+- **范围收敛说明**。不考虑远端会话与 Stage 2 `POST /api/send` 自动投递；日常切端以 `CodexAgyHandoff.app` 与 `codex-agy-sync handoff` 为主入口，`serve` 与 `sync-session` / `sync-workspace` 仅作为冻结维护入口保留。
 
 ## Desktop 按需交接
 
@@ -114,6 +118,6 @@ open "$HOME/Applications/CodexAgyHandoff.app"
 
 - `python3 scripts/extract_schema.py` 从本机 `/Applications/Antigravity.app/Contents/Resources/bin/language_server`、`agy` CLI 与 `app.asar` 提取编译态 `FileDescriptorProto` 与侧栏可见性规则，生成 `schema/antigravity_2_30_schema.json`、`schema/antigravity_2_30.proto` 与 `schema/sidebar_visibility_rules.json`。
 - `python3 scripts/verify_session_mapping.py` 以 `SQLITE_OPEN_READONLY`（`?mode=ro` + `PRAGMA query_only=ON`）只读解码本机真实 Antigravity `.db` 会话与 Codex `rollout-*.jsonl`，校验 `unknown_wire_fields_count == 0` 且宿主数据库零变动。
-- `python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py doctor` 与 `suite` 在隔离沙盒与双端回环 RPC 桩下通过 `cua-driver` 端到端验收 `CodexAgyHandoff.app` 中断抢救、在线自动配对、Codex rollout 生成与宿主库零污染。
+- `python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py doctor` 与 `suite` 在隔离沙盒、双端回环 RPC 桩与本地 Release HTTP 桩下通过 `cua-driver` 端到端验收 `CodexAgyHandoff.app` 搜索筛选、一键继续对话、独立设置面板、实时状态栏图标切换持久化、版本同频看板与更新检查及宿主库零污染。
 - `python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py doctor` 与 `suite`（可选传 `--prototype <path>` 覆盖内置 UI）在隔离沙盒 + 回环 AGY RPC 桩下通过 `agent-browser` 端到端验收 `serve` 启停、安全门禁、跨端检索与一键交接。
 - `./scripts/check`（含 `scripts/check_architecture.py`）一键运行描述符完整性校验、真实会话只读无损解码、6 层 DAG 与边界 AST 门禁、路径与 `csrfToken` 卫生扫描、Python 回归测试以及 `[5b/5]` macOS Swift XCTest（`swift test --package-path macos --scratch-path out/swift-test-check`）。
