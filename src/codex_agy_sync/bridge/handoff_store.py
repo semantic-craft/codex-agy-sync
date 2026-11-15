@@ -12,7 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterator, Literal, Sequence
+from typing import AbstractSet, Any, Iterator, Literal, Sequence
 
 from ..codecs import decode_trajectory_metadata_proto, iter_codex_rollout_lines
 from ..events import (
@@ -36,10 +36,13 @@ from .store_catalog import (
     count_codex_rollout_user_turns,
     discover_agy_subagent_sidecars,
     enrich_agy_session_from_conv_db,
+    extract_rollout_filename_uuid,
+    optional_select_columns_sql,
     parse_codex_thread_source_lineage,
     parse_summary_workspace_uris,
     safe_valid_session_id,
-    scan_agy_summaries_db,
+    scan_agy_summaries_with_foreign_ids,
+    table_column_names,
     uris_match_workspace,
 )
 from .transport import DefaultHostTransport
@@ -187,16 +190,13 @@ def discover_agy_entries(
     binding: WorkspaceProjectBinding,
 ) -> list[dict[str, Any]]:
     sidecars = discover_agy_subagent_sidecars(paths)
-    agy_sessions = scan_agy_summaries_db(paths, binding.agy_project_id, binding.workspace_uri, sidecars)
-    sum_mtimes: dict[str, Any] = {}
-    if (sum_db := paths.agy_data_dir / "conversation_summaries.db").is_file():
-        with contextlib.suppress(sqlite3.OperationalError):
-            with contextlib.closing(open_readonly_sqlite(sum_db)) as conn:
-                for cid_val, lm_val in conn.execute("SELECT conversation_id, last_modified_time FROM conversation_summaries"):
-                    if cid_val:
-                        sum_mtimes[str(cid_val)] = lm_val
+    agy_sessions, foreign_cids, sum_mtimes = scan_agy_summaries_with_foreign_ids(
+        paths, binding.agy_project_id, binding.workspace_uri, sidecars
+    )
     if (conv_dir := paths.agy_data_dir / "conversations").is_dir():
         for db_file in sorted(conv_dir.glob("*.db")):
+            if db_file.stem in foreign_cids:
+                continue
             enrich_agy_session_from_conv_db(
                 db_file, binding.agy_project_id, binding.workspace_uri, sidecars, agy_sessions
             )
@@ -223,12 +223,18 @@ def codex_rollout_fallback_entries(
     binding: WorkspaceProjectBinding,
     skip_ids: set[str],
     transport: DefaultHostTransport,
+    *,
+    known_rollout_paths: AbstractSet[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     sessions_dir = paths.codex_home_dir / "sessions"
     if not sessions_dir.is_dir():
         return []
     entries: list[dict[str, Any]] = []
     for rpath in sorted({*sessions_dir.rglob("rollout-*.jsonl"), *sessions_dir.rglob("rollout-*.jsonl.zst")}):
+        if str(rpath) in known_rollout_paths:
+            continue
+        if (tail_id := extract_rollout_filename_uuid(rpath.name)) and tail_id in skip_ids:
+            continue
         meta_payload: dict[str, Any] | None = None
         for row in iter_codex_rollout_lines(rpath):
             rec = safe_json_dict(row.raw_json)
@@ -261,46 +267,71 @@ def codex_rollout_fallback_entries(
     return entries
 
 
+_CODEX_DISCOVER_COLS = (
+    "id",
+    "title",
+    "preview",
+    "cwd",
+    "project_id",
+    "attached_thread_parent_id",
+    "rollout_path",
+    "agent_nickname",
+    "agent_role",
+    "source",
+    "recency_at_ms",
+    "updated_at_ms",
+    "updated_at",
+    "archived",
+)
+
+
 def discover_codex_entries(
     paths: HostEnvironmentPaths,
     binding: WorkspaceProjectBinding,
     transport: DefaultHostTransport,
 ) -> list[dict[str, Any]]:
     seen_or_archived: set[str] = set()
+    known_rollout_paths: set[str] = set()
     entries: list[dict[str, Any]] = []
     if (state_db := paths.codex_home_dir / "state_5.sqlite").is_file():
-        with contextlib.suppress(sqlite3.OperationalError):
+        rows: list[Any] = []
+        with contextlib.suppress(sqlite3.DatabaseError):
             with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
-                rows = conn.execute(
-                    "SELECT id, title, preview, cwd, project_id, attached_thread_parent_id, rollout_path, "
-                    "agent_nickname, agent_role, source, recency_at_ms, updated_at_ms, updated_at, archived FROM threads"
-                ).fetchall()
-            for tid, title, preview, cwd, pid, ptid, rpath, nick, role, src, rec_ms, upd_ms, upd, archived in rows:
-                tid_str = safe_valid_session_id(tid, "codex_thread_id")
-                if not tid_str:
-                    continue
-                seen_or_archived.add(tid_str)
-                if archived:
-                    continue
-                ws_ok = str(pid or "") == str(binding.codex_project_id)
-                if not ws_ok and cwd:
-                    with contextlib.suppress(ValueError):
-                        ws_ok = parse_workspace_identity(str(cwd))[0] == binding.workspace_path
-                if not ws_ok:
-                    continue
-                src_sub, src_parent, src_depth, src_type, src_nick = parse_codex_thread_source_lineage(str(src) if src else None)
-                parent_str = safe_valid_session_id(str(ptid or "").strip() or src_parent, "parent_codex_thread_id")
-                if compute_codex_nesting_depth(src, src_sub, src_depth, parent_str, str(role or "").strip() or src_type, str(nick or "").strip() or src_nick) > 0:
-                    continue
-                rp = Path(str(rpath)) if rpath else None
-                mtime = rp.stat().st_mtime if (rp and rp.is_file()) else 0.0
-                epoch, iso = parse_ts_epoch_iso(rec_ms or upd_ms or upd, fallback_mtime=mtime)
-                entries.append({
-                    "host": HostKind.CODEX, "session_id": tid_str, "direction": SyncDirection.CODEX_TO_AGY,
-                    "title": str(title or preview or "").strip() or "Untitled Session",
-                    "count": count_codex_rollout_user_turns(str(rpath or "")), "epoch": epoch, "iso": iso,
-                })
-    entries.extend(codex_rollout_fallback_entries(paths, binding, seen_or_archived, transport))
+                cols = table_column_names(conn, "threads")
+                if "id" in cols:
+                    sql = f"SELECT {optional_select_columns_sql(cols, _CODEX_DISCOVER_COLS)} FROM threads"
+                    rows = conn.execute(sql).fetchall()
+        for tid, title, preview, cwd, pid, ptid, rpath, nick, role, src, rec_ms, upd_ms, upd, archived in rows:
+            if rpath:
+                raw_rp = str(rpath)
+                known_rollout_paths.update((raw_rp, f"{raw_rp}.zst", raw_rp.removesuffix(".zst")))
+            tid_str = safe_valid_session_id(tid, "codex_thread_id")
+            if not tid_str:
+                continue
+            seen_or_archived.add(tid_str)
+            if archived:
+                continue
+            ws_ok = str(pid or "") == str(binding.codex_project_id)
+            if not ws_ok and cwd:
+                with contextlib.suppress(ValueError):
+                    ws_ok = parse_workspace_identity(str(cwd))[0] == binding.workspace_path
+            if not ws_ok:
+                continue
+            src_sub, src_parent, src_depth, src_type, src_nick = parse_codex_thread_source_lineage(str(src) if src else None)
+            parent_str = safe_valid_session_id(str(ptid or "").strip() or src_parent, "parent_codex_thread_id")
+            if compute_codex_nesting_depth(src, src_sub, src_depth, parent_str, str(role or "").strip() or src_type, str(nick or "").strip() or src_nick) > 0:
+                continue
+            rp = Path(str(rpath)) if rpath else None
+            mtime = rp.stat().st_mtime if (rp and rp.is_file()) else 0.0
+            epoch, iso = parse_ts_epoch_iso(rec_ms or upd_ms or upd, fallback_mtime=mtime)
+            entries.append({
+                "host": HostKind.CODEX, "session_id": tid_str, "direction": SyncDirection.CODEX_TO_AGY,
+                "title": str(title or preview or "").strip() or "Untitled Session",
+                "count": count_codex_rollout_user_turns(str(rpath or "")), "epoch": epoch, "iso": iso,
+            })
+    entries.extend(codex_rollout_fallback_entries(
+        paths, binding, seen_or_archived, transport, known_rollout_paths=known_rollout_paths
+    ))
     return entries
 
 

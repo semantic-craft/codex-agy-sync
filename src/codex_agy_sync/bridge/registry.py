@@ -46,7 +46,7 @@ from .store_catalog import (
     extract_agy_project_folder_uris as _extract_agy_project_folder_uris,
     find_readonly_agy_project_id as _find_readonly_agy_project_id,
     safe_valid_session_id,
-    scan_agy_summaries_db,
+    scan_agy_summaries_with_foreign_ids,
     scan_codex_state_sessions,
     uris_match_workspace as _uris_match_workspace,
 )
@@ -347,10 +347,14 @@ class ProjectRegistry:
         self, binding: WorkspaceProjectBinding, *, include_subagents: bool = False,
     ) -> Tuple[PairedSessionDescriptor, ...]:
         sidecars = discover_agy_subagent_sidecars(self._paths)
-        agy_sessions = scan_agy_summaries_db(self._paths, binding.agy_project_id, binding.workspace_uri, sidecars)
+        agy_sessions, foreign_cids, _ = scan_agy_summaries_with_foreign_ids(
+            self._paths, binding.agy_project_id, binding.workspace_uri, sidecars
+        )
         conv_dir = self._paths.agy_data_dir / "conversations"
         if conv_dir.is_dir():
             for db_file in sorted(conv_dir.glob("*.db")):
+                if db_file.stem in foreign_cids:
+                    continue
                 enrich_agy_session_from_conv_db(
                     db_file, binding.agy_project_id, binding.workspace_uri, sidecars, agy_sessions
                 )
@@ -401,15 +405,15 @@ class ProjectRegistry:
         return tuple(descriptors)
 
 
-def diagnose_workspace_binding(paths: HostEnvironmentPaths, workspace: str | Path) -> WorkspaceBindingDiagnosis:
-    """Inspect read-only workspace registrations and daemon presence without mutating host files."""
-    ws_path, ws_uri = parse_workspace_identity(workspace)
-    registry = ProjectRegistry(paths)
-    guard = PresenceWalGuard(paths)
-    agy_pid = registry.find_readonly_agy_project_id(ws_uri)
-    codex_pid = registry.find_readonly_codex_project_id(ws_path)
-    agy_active = guard.discover_agy_daemon() is not None
-    codex_active = guard.discover_codex_daemon() is not None
+def build_workspace_binding_diagnosis(
+    ws_path: WorkspacePath,
+    ws_uri: WorkspaceRootUri,
+    agy_pid: AgyProjectId | str | None,
+    codex_pid: CodexProjectId | str | None,
+    agy_active: bool,
+    codex_active: bool,
+) -> WorkspaceBindingDiagnosis:
+    """Build a read-only workspace pairing diagnosis from pre-resolved IDs and daemon states."""
     steps: list[str] = []
     if agy_pid is None and agy_active:
         steps.append(f'Open "{ws_path}" in Antigravity Desktop so it registers natively, or quit Antigravity Desktop before offline pairing.')
@@ -422,8 +426,24 @@ def diagnose_workspace_binding(paths: HostEnvironmentPaths, workspace: str | Pat
     return WorkspaceBindingDiagnosis(
         ws_path, ws_uri, ws_path.name or "workspace",
         agy_pid is not None, codex_pid is not None,
-        str(agy_pid) if agy_pid is not None else None, codex_pid,
+        str(agy_pid) if agy_pid is not None else None,
+        str(codex_pid) if codex_pid is not None else None,
         agy_active, codex_active, tuple(steps),
+    )
+
+
+def diagnose_workspace_binding(paths: HostEnvironmentPaths, workspace: str | Path) -> WorkspaceBindingDiagnosis:
+    """Inspect read-only workspace registrations and daemon presence without mutating host files."""
+    ws_path, ws_uri = parse_workspace_identity(workspace)
+    registry = ProjectRegistry(paths)
+    guard = PresenceWalGuard(paths)
+    return build_workspace_binding_diagnosis(
+        ws_path,
+        ws_uri,
+        registry.find_readonly_agy_project_id(ws_uri),
+        registry.find_readonly_codex_project_id(ws_path),
+        guard.discover_agy_daemon() is not None,
+        guard.discover_codex_daemon() is not None,
     )
 
 

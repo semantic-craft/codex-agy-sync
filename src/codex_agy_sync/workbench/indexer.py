@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
+from dataclasses import dataclass
 import hashlib
 import json
 import sqlite3
@@ -11,15 +14,9 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..bridge.handoff_store import (
-    HandoffReceipt,
-    discover_agy_entries,
-    discover_codex_entries,
-    load_workspace_receipts,
-    parse_ts_epoch_iso,
-)
+from ..bridge.handoff_store import HandoffReceipt, parse_ts_epoch_iso
 from ..bridge.paths_and_locks import HostEnvironmentPaths, now_iso
-from ..bridge.registry import ProjectRegistry, WorkspaceProjectBinding, diagnose_workspace_binding
+from ..bridge.registry import WorkspaceProjectBinding
 from ..bridge.transport import DefaultHostTransport
 from ..codecs import decode_agy_trajectory, decode_codex_rollout, read_codex_rollout_lines
 from ..events import (
@@ -37,8 +34,9 @@ from ..payloads import (
     RunCommandPayload,
     SearchWebPayload,
 )
-from ..workspace import CodexThreadId, HostKind, WorkspacePath, WorkspaceRootUri
-from .discovery import UnionFind, discover_workspaces
+from ..workspace import CodexThreadId, HostKind, WorkspacePath, WorkspaceRootUri, parse_workspace_identity
+from .catalog import WorkspaceCatalogBucket, scan_host_catalog
+from .discovery import UnionFind, discover_workspaces, load_preloaded_host_tables
 from .models import (
     HandoffHopSummary,
     TimelineTurn,
@@ -106,6 +104,66 @@ def _ledger_to_turns(
     return turns
 
 
+@dataclass(frozen=True)
+class UnhydratedWorkSpec:
+    """Deferred single-session work metadata enabling on-demand turn hydration."""
+
+    ws_id: str
+    binding: WorkspaceProjectBinding
+    is_paired: bool
+    session_key: tuple[str, str]
+    entry: dict[str, Any]
+    work_card_template: WorkCard
+
+
+def _resolve_session_target_and_stat(
+    paths: HostEnvironmentPaths, transport: DefaultHostTransport, entry: Mapping[str, Any],
+) -> tuple[Path | None, str | None, int, int]:
+    host: HostKind = entry["host"]
+    sid = str(entry["session_id"])
+    if host == HostKind.ANTIGRAVITY:
+        conv_db = paths.agy_data_dir / "conversations" / f"{sid}.db"
+        if not conv_db.is_file():
+            return None, None, 0, 0
+        st = conv_db.stat()
+        return conv_db, None, st.st_mtime_ns, st.st_size
+    cand = entry.get("rollout_path")
+    rollout_path = cand if (isinstance(cand, Path) and cand.is_file()) else None
+    probed_title: str | None = None
+    if rollout_path is None:
+        tid = CodexThreadId(sid)
+        rollout_path, probed_title = transport.probe_codex_rollout_and_title(tid)
+        if rollout_path is None:
+            rollout_path, probed_title = transport.find_codex_rollout_and_title(tid)
+    if rollout_path is None or not rollout_path.is_file():
+        return None, probed_title, 0, 0
+    st = rollout_path.stat()
+    return rollout_path, probed_title, st.st_mtime_ns, st.st_size
+
+
+def _decode_session_turns_from_file(
+    transport: DefaultHostTransport,
+    binding: WorkspaceProjectBinding,
+    host: HostKind,
+    sid: str,
+    title: str,
+    fallback_iso: str,
+    target_file: Path,
+    probed_title: str | None,
+) -> list[TimelineTurn]:
+    if host == HostKind.ANTIGRAVITY:
+        raw_steps = transport.read_persisted_agy_steps(target_file)
+        ledger = decode_agy_trajectory(
+            binding.workspace_path, binding.workspace_uri, raw_steps, explicit_title_override=title,
+        )
+        return _ledger_to_turns(ledger, host.value, sid, title, fallback_iso)
+    eff_title = probed_title or title
+    ledger = decode_codex_rollout(
+        binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(target_file), explicit_title_override=eff_title,
+    )
+    return _ledger_to_turns(ledger, host.value, sid, eff_title, fallback_iso)
+
+
 def _read_session_turns(
     paths: HostEnvironmentPaths,
     transport: DefaultHostTransport,
@@ -115,25 +173,10 @@ def _read_session_turns(
     host: HostKind = entry["host"]
     sid, title, fallback_iso = str(entry["session_id"]), str(entry["title"]), str(entry["iso"])
     try:
-        if host == HostKind.ANTIGRAVITY:
-            conv_db = paths.agy_data_dir / "conversations" / f"{sid}.db"
-            if not conv_db.is_file():
-                return []
-            raw_steps = transport.read_persisted_agy_steps(conv_db)
-            ledger = decode_agy_trajectory(
-                binding.workspace_path, binding.workspace_uri, raw_steps, explicit_title_override=title,
-            )
-            return _ledger_to_turns(ledger, host.value, sid, title, fallback_iso)
-
-        tid = CodexThreadId(sid)
-        rollout_path, probed_title = transport.probe_codex_rollout_and_title(tid)
-        if rollout_path is None:
-            rollout_path, probed_title = transport.find_codex_rollout_and_title(tid)
-        eff_title = probed_title or title
-        ledger = decode_codex_rollout(
-            binding.workspace_path, binding.workspace_uri, read_codex_rollout_lines(rollout_path), explicit_title_override=eff_title,
-        )
-        return _ledger_to_turns(ledger, host.value, sid, eff_title, fallback_iso)
+        target_file, probed_title, _, _ = _resolve_session_target_and_stat(paths, transport, entry)
+        if target_file is None:
+            return []
+        return _decode_session_turns_from_file(transport, binding, host, sid, title, fallback_iso, target_file, probed_title)
     except (sqlite3.DatabaseError, OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError):
         return []
 
@@ -310,15 +353,12 @@ def build_work_card(
     )
 
 
-def _cluster_workspace_works(
-    ws_id: str,
-    binding: WorkspaceProjectBinding,
-    is_paired: bool,
-    sessions_by_key: Mapping[tuple[str, str], dict[str, Any]],
+def _build_uf_components(
+    session_keys: Sequence[tuple[str, str]],
     cursor_pairs: Sequence[tuple[str, str]],
     receipts: Sequence[tuple[str, HandoffReceipt, float]],
-) -> list[WorkCard]:
-    all_nodes: set[tuple[str, str]] = set(sessions_by_key.keys())
+) -> tuple[dict[tuple[str, str], list[tuple[str, str]]], dict[tuple[str, str], list[tuple[str, str]]], dict[tuple[str, str], list[tuple[str, HandoffReceipt, float]]]]:
+    all_nodes: set[tuple[str, str]] = set(session_keys)
     cursor_peers: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for cid_str, tid_str in cursor_pairs:
         ak, ck = (HostKind.ANTIGRAVITY.value, cid_str), (HostKind.CODEX.value, tid_str)
@@ -336,17 +376,95 @@ def _cluster_workspace_works(
         if rec.target_id:
             uf.union((rec.source_host, rec.source_id), (rec.target_host, rec.target_id))
     comp_sessions: dict[tuple[str, str], list[tuple[str, str]]] = {}
-    for key in sessions_by_key:
+    for key in session_keys:
         comp_sessions.setdefault(uf.find(key), []).append(key)
     comp_receipts: dict[tuple[str, str], list[tuple[str, HandoffReceipt, float]]] = {}
     for item in receipts:
         comp_receipts.setdefault(uf.find((item[1].source_host, item[1].source_id)), []).append(item)
+    return cursor_peers, comp_sessions, comp_receipts
+
+
+def _cluster_workspace_works(
+    ws_id: str,
+    binding: WorkspaceProjectBinding,
+    is_paired: bool,
+    sessions_by_key: Mapping[tuple[str, str], dict[str, Any]],
+    cursor_pairs: Sequence[tuple[str, str]],
+    receipts: Sequence[tuple[str, HandoffReceipt, float]],
+) -> list[WorkCard]:
+    cursor_peers, comp_sessions, comp_receipts = _build_uf_components(list(sessions_by_key.keys()), cursor_pairs, receipts)
     works = [
         build_work_card(ws_id, binding, is_paired, keys, sessions_by_key, comp_receipts.get(root, ()), cursor_peers)
         for root, keys in comp_sessions.items()
     ]
     works.sort(key=lambda w: (w.updated_at_iso, w.work_id), reverse=True)
     return works
+
+
+def _apply_hydrated_entry(entry: Mapping[str, Any], turns: list[TimelineTurn]) -> dict[str, Any]:
+    updated = dict(entry)
+    updated["turns"] = turns
+    if not updated["iso"] and turns:
+        last_ts = turns[-1].timestamp_iso
+        updated["iso"] = last_ts
+        updated["epoch"] = parse_ts_epoch_iso(last_ts)[0]
+    if updated["host"] == HostKind.CODEX and turns:
+        updated["count"] = max(1, len(turns))
+    return updated
+
+
+def _build_unhydrated_work_card(
+    ws_id: str,
+    binding: WorkspaceProjectBinding,
+    is_paired: bool,
+    key: tuple[str, str],
+    entry: Mapping[str, Any],
+) -> WorkCard:
+    work_id = "work-" + hashlib.sha256(f"{ws_id}:{key[0]}:{key[1]}".encode("utf-8")).hexdigest()[:16]
+    raw_count = int(entry["count"])
+    turn_count = max(1, raw_count) if raw_count > 0 else 0
+    title = str(entry["title"] or "").strip() or "Untitled Session"
+    iso = str(entry["iso"])
+    link = WorkSessionLink(
+        host=key[0], session_id=key[1], title=title, updated_at_iso=iso,
+        turn_or_step_count=raw_count, is_baton_target=False, handoff_status=None, handoff_direction=None,
+    )
+    return WorkCard(
+        work_id=work_id, workspace_id=ws_id, workspace_path=str(binding.workspace_path), title=title,
+        updated_at_iso=iso, active_host=key[0], latest_source_id=key[1],
+        latest_direction=("codex_to_agy" if key[0] == HostKind.CODEX.value else "agy_to_codex"),
+        chain_id=None, chain_depth=0, session_count=1, turn_count=turn_count, is_paired=is_paired,
+        sessions=(link,), handoffs=(), turns=(),
+    )
+
+
+def _splice_snapshot_works(
+    base: WorkbenchSnapshot, hydrated: Mapping[str, WorkCard],
+) -> WorkbenchSnapshot:
+    if not hydrated:
+        return base
+    works_list = [hydrated.get(w.work_id, w) for w in base.works]
+    works_list.sort(key=lambda w: (w.updated_at_iso, w.work_id), reverse=True)
+    last_by_ws: dict[str, str] = {}
+    for w in works_list:
+        cur = last_by_ws.get(w.workspace_id, "")
+        if w.updated_at_iso > cur:
+            last_by_ws[w.workspace_id] = w.updated_at_iso
+    ws_list = [
+        WorkspaceCard(
+            workspace_id=ws.workspace_id, workspace_path=ws.workspace_path, workspace_uri=ws.workspace_uri,
+            name=ws.name, agy_registered=ws.agy_registered, codex_registered=ws.codex_registered,
+            is_paired=ws.is_paired, agy_session_count=ws.agy_session_count,
+            codex_session_count=ws.codex_session_count, work_count=ws.work_count,
+            last_updated_iso=last_by_ws.get(ws.workspace_id, ws.last_updated_iso), diagnosis=ws.diagnosis,
+        )
+        for ws in base.workspaces
+    ]
+    ws_list.sort(key=lambda c: (c.last_updated_iso, c.name.lower(), c.workspace_path), reverse=True)
+    return WorkbenchSnapshot(
+        generated_at_iso=base.generated_at_iso, workspaces=tuple(ws_list), works=tuple(works_list),
+        selected_workspace_id=base.selected_workspace_id, stage=base.stage, capabilities=base.capabilities,
+    )
 
 
 class WorkbenchIndexer:
@@ -358,72 +476,178 @@ class WorkbenchIndexer:
         *,
         seed_workspaces: Sequence[str | Path] = (),
         ttl_seconds: float = 3.0,
+        eager_turn_budget: int = 24,
     ) -> None:
         self._paths = paths or HostEnvironmentPaths.discover()
         self._seed_workspaces = tuple(seed_workspaces)
         self._ttl_seconds = max(0.0, float(ttl_seconds))
+        self._eager_turn_budget = max(0, int(eager_turn_budget))
         self._lock = threading.RLock()
         self._cached_at: float = 0.0
         self._cached_snapshot: WorkbenchSnapshot | None = None
+        self._generation: int = 0
+        self._turn_cache: dict[tuple[str, str], tuple[int, int, tuple[TimelineTurn, ...]]] = {}
+        self._agy_meta_cache: dict[str, tuple[int, int, dict[str, Any], int]] = {}
+        self._unhydrated_specs: dict[str, UnhydratedWorkSpec] = {}
 
     def invalidate(self) -> None:
         with self._lock:
             self._cached_at = 0.0
             self._cached_snapshot = None
+            self._generation += 1
+            self._unhydrated_specs.clear()
+            self._turn_cache.clear()
+            self._agy_meta_cache.clear()
 
     def discover_workspaces(self) -> tuple[tuple[WorkspacePath, WorkspaceRootUri], ...]:
         return discover_workspaces(self._paths, self._seed_workspaces)
 
-    def _index_workspace(
-        self, ws_path: WorkspacePath, ws_uri: WorkspaceRootUri, registry: ProjectRegistry, transport: DefaultHostTransport,
-    ) -> tuple[WorkspaceCard, list[WorkCard]]:
-        ws_id = "ws-" + hashlib.sha256(str(ws_uri).encode("utf-8")).hexdigest()[:16]
-        diagnosis = diagnose_workspace_binding(self._paths, ws_path)
-        binding = registry.resolve_readonly_binding(ws_path)
+    def _read_session_turns_cached(
+        self,
+        transport: DefaultHostTransport,
+        binding: WorkspaceProjectBinding,
+        entry: Mapping[str, Any],
+        *,
+        gen: int | None = None,
+    ) -> list[TimelineTurn]:
+        host: HostKind = entry["host"]
+        sid, title, fallback_iso = str(entry["session_id"]), str(entry["title"]), str(entry["iso"])
+        cache_key = (host.value, sid)
         try:
-            agy_entries = discover_agy_entries(self._paths, transport, binding)
-        except (sqlite3.DatabaseError, OSError, ValueError):
-            agy_entries = []
+            target_file, probed_title, mtime_ns, size = _resolve_session_target_and_stat(self._paths, transport, entry)
+        except (sqlite3.DatabaseError, OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError):
+            return []
+        if target_file is None:
+            return []
+        with self._lock:
+            cached = self._turn_cache.get(cache_key)
+            if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+                return list(cached[2])
         try:
-            codex_entries = discover_codex_entries(self._paths, binding, transport)
-        except (sqlite3.DatabaseError, OSError, ValueError):
-            codex_entries = []
-        sessions_by_key: dict[tuple[str, str], dict[str, Any]] = {}
-        for entry in [*agy_entries, *codex_entries]:
-            key = (entry["host"].value, str(entry["session_id"]))
-            enriched = dict(entry)
-            enriched["turns"] = _read_session_turns(self._paths, transport, binding, entry)
-            if not enriched["iso"] and enriched["turns"]:
-                last_ts = enriched["turns"][-1].timestamp_iso
-                enriched["iso"] = last_ts
-                enriched["epoch"] = parse_ts_epoch_iso(last_ts)[0]
-            sessions_by_key[key] = enriched
-        cursor_pairs = registry.load_sorted_workspace_cursor_pairs(binding.workspace_uri)
-        receipts = [(p.stem, r, mtime) for p, r, mtime in load_workspace_receipts(self._paths, ws_path)]
-        works = _cluster_workspace_works(ws_id, binding, diagnosis.is_paired(), sessions_by_key, cursor_pairs, receipts)
-        last_iso = max((w.updated_at_iso for w in works), default="")
-        ws_card = WorkspaceCard(
-            workspace_id=ws_id, workspace_path=str(ws_path), workspace_uri=str(ws_uri),
-            name=diagnosis.workspace_name, agy_registered=diagnosis.agy_registered,
-            codex_registered=diagnosis.codex_registered, is_paired=diagnosis.is_paired(),
-            agy_session_count=len(agy_entries), codex_session_count=len(codex_entries),
-            work_count=len(works), last_updated_iso=last_iso, diagnosis=diagnosis.to_dict(),
-        )
-        return ws_card, works
+            turns = _decode_session_turns_from_file(
+                transport, binding, host, sid, title, fallback_iso, target_file, probed_title
+            )
+        except (sqlite3.DatabaseError, OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError):
+            return []
+        with self._lock:
+            if gen is None or self._generation == gen:
+                self._turn_cache[cache_key] = (mtime_ns, size, tuple(turns))
+        return turns
+
+    def _normalized_seed_paths(self) -> set[WorkspacePath]:
+        seed_paths: set[WorkspacePath] = set()
+        for raw_ws in self._seed_workspaces:
+            with contextlib.suppress(ValueError):
+                seed_paths.add(parse_workspace_identity(raw_ws)[0])
+        return seed_paths
 
     def _build_full_snapshot(self) -> WorkbenchSnapshot:
-        registry, transport = ProjectRegistry(self._paths), DefaultHostTransport(self._paths)
+        transport = DefaultHostTransport(self._paths)
+        preloaded = load_preloaded_host_tables(self._paths)
+        workspaces = (
+            discover_workspaces(self._paths, self._seed_workspaces, preloaded=preloaded)
+            if type(self).discover_workspaces is WorkbenchIndexer.discover_workspaces
+            else self.discover_workspaces()
+        )
+        catalog = scan_host_catalog(self._paths, workspaces, transport, self._agy_meta_cache, preloaded=preloaded)
+        seed_paths = self._normalized_seed_paths()
+
+        bucket_data: list[tuple[WorkspaceCatalogBucket, dict[tuple[str, str], dict[str, Any]], dict[tuple[str, str], list[tuple[str, str]]], dict[tuple[str, str], list[tuple[str, str]]], dict[tuple[str, str], list[tuple[str, HandoffReceipt, float]]]]] = []
+        eager_set: set[tuple[str, tuple[str, str]]] = set()
+        standalone: list[tuple[tuple[float, str, str], str, tuple[str, str]]] = []
+        for ws_path, _ in workspaces:
+            bucket = catalog[ws_path]
+            sessions_by_key: dict[tuple[str, str], dict[str, Any]] = {
+                (e["host"].value, str(e["session_id"])): {**e, "turns": []}
+                for e in [*bucket.agy_entries, *bucket.codex_entries]
+            }
+            cursor_peers, comp_sessions, comp_receipts = _build_uf_components(
+                list(sessions_by_key.keys()), bucket.cursor_pairs, bucket.receipts
+            )
+            bucket_data.append((bucket, sessions_by_key, cursor_peers, comp_sessions, comp_receipts))
+            for root, keys in comp_sessions.items():
+                if len(keys) > 1 or bool(comp_receipts.get(root)) or bucket.ws_path in seed_paths:
+                    eager_set.add((bucket.ws_id, root))
+                else:
+                    e = sessions_by_key[keys[0]]
+                    standalone.append(((float(e["epoch"]), keys[0][0], keys[0][1]), bucket.ws_id, root))
+
+        standalone.sort(key=lambda item: item[0], reverse=True)
+        for _, ws_id, root in standalone[: self._eager_turn_budget]:
+            eager_set.add((ws_id, root))
+
         ws_cards: list[WorkspaceCard] = []
         all_works: list[WorkCard] = []
-        for ws_path, ws_uri in self.discover_workspaces():
-            ws_card, works = self._index_workspace(ws_path, ws_uri, registry, transport)
-            ws_cards.append(ws_card)
-            all_works.extend(works)
+        new_unhydrated: dict[str, UnhydratedWorkSpec] = {}
+        for bucket, sessions_by_key, cursor_peers, comp_sessions, comp_receipts in bucket_data:
+            ws_works = self._build_bucket_works(
+                transport, bucket, sessions_by_key, cursor_peers, comp_sessions, comp_receipts, eager_set, new_unhydrated
+            )
+            all_works.extend(ws_works)
+            ws_cards.append(WorkspaceCard(
+                workspace_id=bucket.ws_id, workspace_path=str(bucket.ws_path), workspace_uri=str(bucket.ws_uri),
+                name=bucket.diagnosis.workspace_name, agy_registered=bucket.diagnosis.agy_registered,
+                codex_registered=bucket.diagnosis.codex_registered, is_paired=bucket.diagnosis.is_paired(),
+                agy_session_count=len(bucket.agy_entries), codex_session_count=len(bucket.codex_entries),
+                work_count=len(ws_works), last_updated_iso=max((w.updated_at_iso for w in ws_works), default=""),
+                diagnosis=bucket.diagnosis.to_dict(),
+            ))
+        self._unhydrated_specs = new_unhydrated
         ws_cards.sort(key=lambda c: (c.last_updated_iso, c.name.lower(), c.workspace_path), reverse=True)
         all_works.sort(key=lambda w: (w.updated_at_iso, w.work_id), reverse=True)
         return WorkbenchSnapshot(generated_at_iso=now_iso(), workspaces=tuple(ws_cards), works=tuple(all_works))
 
-    def get_snapshot(self, workspace_id: str | None = None, refresh: bool = False) -> WorkbenchSnapshot:
+    def _build_bucket_works(
+        self,
+        transport: DefaultHostTransport,
+        bucket: WorkspaceCatalogBucket,
+        sessions_by_key: dict[tuple[str, str], dict[str, Any]],
+        cursor_peers: Mapping[tuple[str, str], list[tuple[str, str]]],
+        comp_sessions: Mapping[tuple[str, str], list[tuple[str, str]]],
+        comp_receipts: Mapping[tuple[str, str], list[tuple[str, HandoffReceipt, float]]],
+        eager_set: set[tuple[str, tuple[str, str]]],
+        new_unhydrated: dict[str, UnhydratedWorkSpec],
+    ) -> list[WorkCard]:
+        is_paired = bucket.diagnosis.is_paired()
+        ws_works: list[WorkCard] = []
+        for root, keys in comp_sessions.items():
+            if (bucket.ws_id, root) in eager_set:
+                for k in keys:
+                    turns = self._read_session_turns_cached(transport, bucket.binding, sessions_by_key[k])
+                    sessions_by_key[k] = _apply_hydrated_entry(sessions_by_key[k], turns)
+                card = build_work_card(
+                    bucket.ws_id, bucket.binding, is_paired, keys, sessions_by_key, comp_receipts.get(root, ()), cursor_peers
+                )
+            else:
+                k = keys[0]
+                card = _build_unhydrated_work_card(bucket.ws_id, bucket.binding, is_paired, k, sessions_by_key[k])
+                new_unhydrated[card.work_id] = UnhydratedWorkSpec(
+                    ws_id=bucket.ws_id, binding=bucket.binding, is_paired=is_paired,
+                    session_key=k, entry=dict(sessions_by_key[k]), work_card_template=card,
+                )
+            ws_works.append(card)
+        ws_works.sort(key=lambda w: (w.updated_at_iso, w.work_id), reverse=True)
+        return ws_works
+
+    def _hydrate_spec_card(self, transport: DefaultHostTransport, spec: UnhydratedWorkSpec, gen: int) -> WorkCard:
+        turns = self._read_session_turns_cached(transport, spec.binding, spec.entry, gen=gen)
+        updated = _apply_hydrated_entry(spec.entry, turns)
+        return build_work_card(spec.ws_id, spec.binding, spec.is_paired, [spec.session_key], {spec.session_key: updated}, (), {})
+
+    def _hydrate_specs(self, specs: Sequence[UnhydratedWorkSpec], gen: int) -> dict[str, WorkCard]:
+        if not specs:
+            return {}
+        transport = DefaultHostTransport(self._paths)
+        if len(specs) == 1:
+            card = self._hydrate_spec_card(transport, specs[0], gen)
+            return {card.work_id: card}
+        hydrated: dict[str, WorkCard] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(specs))) as pool:
+            for card in pool.map(lambda s: self._hydrate_spec_card(transport, s, gen), specs):
+                hydrated[card.work_id] = card
+        return hydrated
+
+    def _ensure_base_snapshot(self, *, refresh: bool = False) -> tuple[WorkbenchSnapshot, int]:
         with self._lock:
             cache_valid = (
                 not refresh
@@ -434,18 +658,75 @@ class WorkbenchIndexer:
             if not cache_valid:
                 self._cached_snapshot = self._build_full_snapshot()
                 self._cached_at = time.monotonic()
-            base = self._cached_snapshot
-            assert base is not None
-        sel = (workspace_id or "").strip() or None
-        if sel is None:
+            assert self._cached_snapshot is not None
+            return self._cached_snapshot, self._generation
+
+    def _commit_hydrated_works(self, base: WorkbenchSnapshot, gen: int, hydrated: Mapping[str, WorkCard]) -> WorkbenchSnapshot:
+        if not hydrated:
             return base
-        matched_ws = next((w for w in base.workspaces if w.workspace_id == sel or w.workspace_path == sel), None)
-        resolved_id = matched_ws.workspace_id if matched_ws is not None else sel
+        with self._lock:
+            if self._generation == gen and self._cached_snapshot is not None:
+                for wid in hydrated:
+                    self._unhydrated_specs.pop(wid, None)
+                self._cached_snapshot = _splice_snapshot_works(self._cached_snapshot, hydrated)
+                return self._cached_snapshot
+        return _splice_snapshot_works(base, hydrated)
+
+    @staticmethod
+    def _filter_snapshot(base: WorkbenchSnapshot, resolved_id: str | None) -> WorkbenchSnapshot:
+        if resolved_id is None:
+            return base
         return WorkbenchSnapshot(
             generated_at_iso=base.generated_at_iso, workspaces=base.workspaces,
             works=tuple(w for w in base.works if w.workspace_id == resolved_id),
             selected_workspace_id=resolved_id, stage=base.stage, capabilities=base.capabilities,
         )
+
+    def get_snapshot(self, workspace_id: str | None = None, refresh: bool = False) -> WorkbenchSnapshot:
+        base, gen = self._ensure_base_snapshot(refresh=refresh)
+        sel = (workspace_id or "").strip() or None
+        if sel is None:
+            return base
+        matched_ws = next((w for w in base.workspaces if w.workspace_id == sel or w.workspace_path == sel), None)
+        resolved_id = matched_ws.workspace_id if matched_ws is not None else sel
+        with self._lock:
+            pending = [s for s in self._unhydrated_specs.values() if s.ws_id == resolved_id] if self._generation == gen else []
+        if pending:
+            hydrated = self._hydrate_specs(pending, gen)
+            base = self._commit_hydrated_works(base, gen, hydrated)
+        return self._filter_snapshot(base, resolved_id)
+
+    def get_work(self, work_id: str, refresh: bool = False) -> WorkCard:
+        cleaned = (work_id or "").strip()
+        if not cleaned:
+            raise ValueError("work_id is required.")
+        base, gen = self._ensure_base_snapshot(refresh=refresh)
+        with self._lock:
+            spec = self._unhydrated_specs.get(cleaned) if self._generation == gen else None
+        if spec is not None:
+            hydrated = self._hydrate_specs([spec], gen)
+            self._commit_hydrated_works(base, gen, hydrated)
+            return hydrated[cleaned]
+        for work in base.works:
+            if work.work_id == cleaned:
+                return work
+        raise KeyError(f"Work not found: {cleaned}")
+
+    def get_snapshot_for_search(self, *, workspace_id: str | None = None, scope: str = "all") -> WorkbenchSnapshot:
+        snap = self.get_snapshot(workspace_id=workspace_id)
+        norm_scope = HostKind.ANTIGRAVITY.value if scope.strip().lower() in {"agy", HostKind.ANTIGRAVITY.value} else scope.strip().lower()
+        target_ids = {w.work_id for w in snap.works}
+        with self._lock:
+            gen = self._generation
+            pending = [
+                spec for wid, spec in self._unhydrated_specs.items()
+                if wid in target_ids and (norm_scope == "all" or spec.session_key[0] == norm_scope)
+            ]
+        if not pending:
+            return snap
+        hydrated = self._hydrate_specs(pending, gen)
+        updated_base = self._commit_hydrated_works(snap, gen, hydrated)
+        return self._filter_snapshot(updated_base, snap.selected_workspace_id)
 
     def get_all_works(self, refresh: bool = False) -> tuple[WorkCard, ...]:
         return self.get_snapshot(workspace_id=None, refresh=refresh).works

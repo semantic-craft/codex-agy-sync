@@ -192,9 +192,12 @@ class WorkbenchService:
         *,
         seed_workspaces: Sequence[str | Path] = (),
         ttl_seconds: float = 3.0,
+        eager_turn_budget: int = 24,
     ) -> None:
         self._paths = paths or HostEnvironmentPaths.discover()
-        self._indexer = WorkbenchIndexer(self._paths, seed_workspaces=seed_workspaces, ttl_seconds=ttl_seconds)
+        self._indexer = WorkbenchIndexer(
+            self._paths, seed_workspaces=seed_workspaces, ttl_seconds=ttl_seconds, eager_turn_budget=eager_turn_budget
+        )
 
     @property
     def paths(self) -> HostEnvironmentPaths:
@@ -207,13 +210,7 @@ class WorkbenchService:
         return self._indexer.get_snapshot(workspace_id=workspace_id, refresh=refresh)
 
     def get_work(self, work_id: str, refresh: bool = False) -> WorkCard:
-        cleaned = (work_id or "").strip()
-        if not cleaned:
-            raise ValueError("work_id is required.")
-        for work in self._indexer.get_snapshot(refresh=refresh).works:
-            if work.work_id == cleaned:
-                return work
-        raise KeyError(f"Work not found: {cleaned}")
+        return self._indexer.get_work(work_id, refresh=refresh)
 
     def search(
         self, query: str, *, workspace_id: str | None = None, scope: str = "all", limit: int = 50,
@@ -224,7 +221,7 @@ class WorkbenchService:
         if not q_norm:
             return []
         tokens = list(dict.fromkeys(tok for tok in re.split(r"\s+", q_norm) if tok))
-        snap = self._indexer.get_snapshot(workspace_id=workspace_id)
+        snap = self._indexer.get_snapshot_for_search(workspace_id=workspace_id, scope=norm_scope)
         ws_names = {ws.workspace_id: ws.name for ws in snap.workspaces}
         all_hits: list[SearchHit] = []
         for work in snap.works:
