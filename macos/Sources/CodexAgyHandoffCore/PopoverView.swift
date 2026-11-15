@@ -1,6 +1,13 @@
 import AppKit
 import SwiftUI
 
+private struct FlatSurfaceButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.86 : 1.0)
+    }
+}
+
 private struct HeroPresentation {
     let statusText: String
     let iconName: String
@@ -110,7 +117,7 @@ public struct PopoverView: View {
                 )
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FlatSurfaceButtonStyle())
             .focusEffectDisabled()
             .disabled(viewModel.isLoading)
             .accessibilityLabel("刷新会话列表")
@@ -162,13 +169,7 @@ public struct PopoverView: View {
                 }
 
                 Button {
-                    Task {
-                        if hero.state == .pendingReconcile {
-                            await viewModel.reconcile(workspacePath: hero.workspacePath)
-                        } else {
-                            await viewModel.handoff(hero)
-                        }
-                    }
+                    triggerHeroAction(hero)
                 } label: {
                     HStack(spacing: 6) {
                         if isBusy {
@@ -191,10 +192,13 @@ public struct PopoverView: View {
                     )
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FlatSurfaceButtonStyle())
                 .focusEffectDisabled()
                 .disabled(viewModel.busyItemId != nil)
                 .accessibilityLabel(spec.ctaTitle)
+                .accessibilityAction {
+                    triggerHeroAction(hero)
+                }
             }
             .padding(12)
             .background(
@@ -271,9 +275,9 @@ public struct PopoverView: View {
                             .padding(3)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(FlatSurfaceButtonStyle())
                     .focusEffectDisabled()
-                    .accessibilityLabel("关闭提示")
+                    .accessibilityLabel("关闭提示：\(text)")
                 }
                 .padding(9)
                 .background(
@@ -305,7 +309,7 @@ public struct PopoverView: View {
                         )
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(FlatSurfaceButtonStyle())
                 .focusEffectDisabled()
                 .accessibilityLabel("选择 CLI…")
             }
@@ -399,7 +403,7 @@ public struct PopoverView: View {
                 )
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FlatSurfaceButtonStyle())
             .focusEffectDisabled()
             .disabled(viewModel.busyItemId != nil)
             .accessibilityLabel("接力 \(item.title)")
@@ -419,7 +423,7 @@ public struct PopoverView: View {
                     )
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FlatSurfaceButtonStyle())
             .focusEffectDisabled()
             .disabled(viewModel.busyItemId != nil)
             .accessibilityLabel("核对 \(item.title)")
@@ -470,7 +474,7 @@ public struct PopoverView: View {
                     )
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FlatSurfaceButtonStyle())
             .focusEffectDisabled()
             .accessibilityLabel("退出应用")
         }
@@ -484,6 +488,16 @@ public struct PopoverView: View {
             Text(label)
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func triggerHeroAction(_ hero: MenubarSessionItem) {
+        Task {
+            if hero.state == .pendingReconcile {
+                await viewModel.reconcile(workspacePath: hero.workspacePath)
+            } else {
+                await viewModel.handoff(hero)
+            }
         }
     }
 

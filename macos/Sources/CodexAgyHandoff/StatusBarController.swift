@@ -2,12 +2,17 @@ import AppKit
 import CodexAgyHandoffCore
 import SwiftUI
 
+private final class HandoffPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 @MainActor
 final class StatusBarController: NSObject, NSWindowDelegate {
     private let viewModel: HandoffViewModel
     private let environment: [String: String]
     private let statusItem: NSStatusItem
-    private let panel: NSPanel
+    private let panel: HandoffPanel
     private let hostingController: NSHostingController<PopoverView>
     private var hotKey: GlobalHotKey?
 
@@ -25,7 +30,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         self.hostingController = NSHostingController(rootView: PopoverView(viewModel: viewModel))
         self.hostingController.sizingOptions = [.preferredContentSize]
 
-        let panel = NSPanel(
+        let panel = HandoffPanel(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 420),
             styleMask: [.titled, .fullSizeContentView],
             backing: .buffered,
@@ -95,6 +100,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     func showPanel() {
         positionPanel()
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(nil)

@@ -1,6 +1,6 @@
 # codex-agy-sync verification map
 
-This directory is the maintained source for verifying the user-facing CLI, live Stage-1 workbench, and multi-store behavior of `codex-agy-sync`. Read this index before driving the CLI, then follow the matching feature file or run `control_sync_verify.py suite` / `workbench_verify.py suite` for isolated sandbox smoke gates.
+This directory is the maintained source for verifying the user-facing CLI, native macOS menu bar app (`CodexAgyHandoff.app`), frozen Stage-1 workbench, and multi-store behavior of `codex-agy-sync`. Read this index before driving the CLI, then follow the matching feature file or run `menubar_verify.py suite` / `control_sync_verify.py suite` / `workbench_verify.py suite` for isolated sandbox smoke gates.
 
 ## Baseline preconditions
 
