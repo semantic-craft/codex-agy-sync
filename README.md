@@ -31,7 +31,7 @@
   - `--reconcile`（可配 `--source-id <id>` 定向过滤与 `--dry-run` 只读预览）按工作区核对滞留 `pending` 收据：结合目标端 RPC 与只读存储校验目标会话存在性及种子回合数，确认已落盘则晋升为 `status: "ready"` 并清理暂存目录（`promoted`），确认目标从未落盘或不存在则安全删除 `pending` 收据与暂存目录（`cleared`），仅部分落盘或受锁阻塞无法确认时保留原收据等待后续核对（`unresolved`）。
 - **状态总览与结构化 CLI 错误**：
   - `codex-agy-sync status` 输出 `"workspace"`、`"sessions"`、`"pairing"`（含 `paired`、`agy_registered`、`codex_registered`、`agy_pid`、`codex_pid`、`agy_project_id`、`codex_project_id`、`agy_daemon_active`、`codex_daemon_active`、`remediation_steps`）、`"handoff_chains"` 与 `"pending_handoffs"`。
-  - CLI 业务失败（如未配对、活跃锁、滞留 `pending` 收据或参数冲突）统一以退出码 `2` 向 `stderr` 输出结构化 JSON（含 `"error"` 与 `"message"`，并按场景附带 `"diagnosis"` / `"remediation"` / `"host"` / `"receipt"` / `"cause"`），不打印裸 traceback。
+  - CLI 业务与运行时校验失败（如未配对、活跃锁、滞留 `pending` 收据、目标宿主 RPC 不可用或参数值校验错误）统一以退出码 `2` 向 `stderr` 输出结构化 JSON（含 `"error"` 与 `"message"`，并按场景附带 `"diagnosis"` / `"remediation"` / `"host"` / `"receipt"` / `"cause"`），不打印裸 traceback；`argparse` 命令行参数语法冲突（如未传 `--reconcile` 却传 `--dry-run`、`--auto-pair` 与 `--pair-if-offline` 互斥等）则以退出码 `2` 输出标准用法错误提示。
 - **兼容性**：仍支持显式 `--direction codex_to_agy|agy_to_codex --source-id <id> --title <title>`。旧版 `handoffs/*.json` 收据无新字段（`created_at_iso`、`chain_id`、`chained_from_source_id`、`chain_depth`、`target_seed_turn_count`、`target_seed_text_digest`、`pairing_mode`）也可直接读取。
 
 收据返回目标 `target_id` 和 `status`。在目标 Desktop 打开对应标题的会话继续工作；下次换端时，将正在使用的会话 ID 作为 `--source-id`。可用 `--title` 指定新标题。
@@ -59,7 +59,7 @@
 通过按需启停的本地工作台在浏览器汇总检索与交接 Antigravity / Codex 会话，不驻留后台服务、不向运行中数据库写盘、不向远端会话自动发送消息：
 
 - **启停与内置 UI**：
-  - 启动：`codex-agy-sync serve [-w <path>] [--ui <path>] [--port 8765] [--idle-timeout 1800] [--max-lifetime 14400] [--open]`，仅绑定 `127.0.0.1` 并输出启动 JSON（`--port` 默认 `8765`，传 `0` 自动选择空闲端口）。`pyproject.toml` 通过 `package-data` 默认随包附带内置工作台页面 `src/codex_agy_sync/workbench/ui/index.html`，`codex-agy-sync serve --open` 开箱即用；`--ui <path>` 作为可选覆盖入口指向外部自定义 HTML（仅当默认 UI 与自定义路径均缺失时 `GET /` 返回 `404 ui_not_found`）。
+  - 启动：`codex-agy-sync serve [-w <path>] [--ui <path>] [--port 8765] [--idle-timeout 1800] [--max-lifetime 14400] [--open]`，仅绑定 `127.0.0.1` 并输出启动 JSON（`--port` 默认 `8765`，传 `0` 自动选择空闲端口）。`pyproject.toml` 通过 `package-data` 默认随包附带内置工作台页面 `src/codex_agy_sync/workbench/ui/index.html`，省略 `--ui` 时默认提供内置 UI（`codex-agy-sync serve --open` 开箱即用）；传入 `--ui <path>` 时仅使用该指定文件（不回退内置页面）：CLI `serve --ui <缺失路径>` 会在启动服务或打开浏览器前即以退出码 `2`（`file_not_found`）拦截报错，直接实例化 `WorkbenchServer` 并显式配置缺失的 `ui_path` 时 `GET /` 返回 `404 ui_not_found`。
   - 状态与停止：`codex-agy-sync serve --status` 查询当前租约与 `/api/health`；`codex-agy-sync serve --stop` 发送 `SIGTERM` 干净退出并清理 `<sync-state-dir>/workbench/server.json`（文件权限 `0o600`，不含任何鉴权 token）。
 - **安全边界与敏感路径隔离**：
   - 所有 `/api/*`（除 `/api/health`）均要求 `X-Workbench-Token` 与回环 `Host` / `Origin`（`127.0.0.1`、`localhost`、`[::1]`）/ `Sec-Fetch-Site` 校验，未授权返回 `401` / `403`。
@@ -69,7 +69,7 @@
   - `workbench/indexer.py` 对独立工作区卡片采用分层水合（默认 `eager_turn_budget=24` 优先解码聚簇、有交接收据、种子工作区及最新 24 条独立会话，其余卡片保留元数据骨架，点击 `GET /api/works/<work_id>`、按工作区过滤 `GET /api/snapshot?workspace_id=...` 或触发 `GET /api/search` 时并行按需水合并按 `(mtime_ns, size)` 缓存）。
 - **Stage 1 能力范围**：
   - 支持多工作区并查集聚合、跨端正文检索、引用片段组织只复制 Markdown 草稿（`stage_1_copy_only`，`delivery_executed: false`；Stage 2 远端投递暂未开启，`POST /api/send` 当前返回 `404`）。
-  - 支持工作台一键触发真实 `handoff`（UI `#handoffPairIfOffline` 默认勾选走 `auto_pair`，支持 `#handoffIncludeInterrupted`），未配对时返回 `422 unpaired_workspace` 与 `#retryPairHandoff`（自动在线配对重试），滞留挂起时返回 `409 handoff_pending` 与 `#reconcilePendingHandoff`（调用 `POST /api/handoff/reconcile` 核对恢复或清理），忙锁返回 `409 sync_busy_lock`。
+  - 支持工作台一键触发真实 `handoff`（UI `#handoffPairIfOffline` 默认不勾选，手动勾选或点击 `#retryPairHandoff` 时发送 `auto_pair: true`；支持 `#handoffIncludeInterrupted`），未配对且未开启自动配对时返回 `422 unpaired_workspace` 与 `#retryPairHandoff`（自动在线配对重试），滞留挂起时返回 `409 handoff_pending` 与 `#reconcilePendingHandoff`（调用 `POST /api/handoff/reconcile` 核对恢复或清理），忙锁返回 `409 sync_busy_lock`。
 
 ## 运行机制与架构选型（`A2 + B2 + C1`）
 

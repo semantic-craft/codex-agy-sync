@@ -35,8 +35,8 @@ from ..payloads import (
     SearchWebPayload,
 )
 from ..workspace import CodexThreadId, HostKind, WorkspacePath, WorkspaceRootUri, parse_workspace_identity
-from .catalog import WorkspaceCatalogBucket, scan_host_catalog
-from .discovery import UnionFind, discover_workspaces, load_preloaded_host_tables
+from .catalog import AgyMetaCache, WorkspaceCatalogBucket, scan_host_catalog
+from .discovery import UnionFind, discover_workspaces, load_preloaded_host_tables, stat_with_wal_fingerprint
 from .models import (
     HandoffHopSummary,
     TimelineTurn,
@@ -118,15 +118,15 @@ class UnhydratedWorkSpec:
 
 def _resolve_session_target_and_stat(
     paths: HostEnvironmentPaths, transport: DefaultHostTransport, entry: Mapping[str, Any],
-) -> tuple[Path | None, str | None, int, int]:
+) -> tuple[Path | None, str | None, tuple[int, int, int, int]]:
     host: HostKind = entry["host"]
     sid = str(entry["session_id"])
     if host == HostKind.ANTIGRAVITY:
         conv_db = paths.agy_data_dir / "conversations" / f"{sid}.db"
         if not conv_db.is_file():
-            return None, None, 0, 0
-        st = conv_db.stat()
-        return conv_db, None, st.st_mtime_ns, st.st_size
+            return None, None, (0, 0, 0, 0)
+        fp, _ = stat_with_wal_fingerprint(conv_db, include_wal=True)
+        return conv_db, None, fp
     cand = entry.get("rollout_path")
     rollout_path = cand if (isinstance(cand, Path) and cand.is_file()) else None
     probed_title: str | None = None
@@ -136,9 +136,9 @@ def _resolve_session_target_and_stat(
         if rollout_path is None:
             rollout_path, probed_title = transport.find_codex_rollout_and_title(tid)
     if rollout_path is None or not rollout_path.is_file():
-        return None, probed_title, 0, 0
-    st = rollout_path.stat()
-    return rollout_path, probed_title, st.st_mtime_ns, st.st_size
+        return None, probed_title, (0, 0, 0, 0)
+    fp, _ = stat_with_wal_fingerprint(rollout_path, include_wal=False)
+    return rollout_path, probed_title, fp
 
 
 def _decode_session_turns_from_file(
@@ -173,7 +173,7 @@ def _read_session_turns(
     host: HostKind = entry["host"]
     sid, title, fallback_iso = str(entry["session_id"]), str(entry["title"]), str(entry["iso"])
     try:
-        target_file, probed_title, _, _ = _resolve_session_target_and_stat(paths, transport, entry)
+        target_file, probed_title, _ = _resolve_session_target_and_stat(paths, transport, entry)
         if target_file is None:
             return []
         return _decode_session_turns_from_file(transport, binding, host, sid, title, fallback_iso, target_file, probed_title)
@@ -486,8 +486,8 @@ class WorkbenchIndexer:
         self._cached_at: float = 0.0
         self._cached_snapshot: WorkbenchSnapshot | None = None
         self._generation: int = 0
-        self._turn_cache: dict[tuple[str, str], tuple[int, int, tuple[TimelineTurn, ...]]] = {}
-        self._agy_meta_cache: dict[str, tuple[int, int, dict[str, Any], int]] = {}
+        self._turn_cache: dict[tuple[str, str], tuple[tuple[int, int, int, int], tuple[TimelineTurn, ...]]] = {}
+        self._agy_meta_cache: AgyMetaCache = {}
         self._unhydrated_specs: dict[str, UnhydratedWorkSpec] = {}
 
     def invalidate(self) -> None:
@@ -514,15 +514,15 @@ class WorkbenchIndexer:
         sid, title, fallback_iso = str(entry["session_id"]), str(entry["title"]), str(entry["iso"])
         cache_key = (host.value, sid)
         try:
-            target_file, probed_title, mtime_ns, size = _resolve_session_target_and_stat(self._paths, transport, entry)
+            target_file, probed_title, fp = _resolve_session_target_and_stat(self._paths, transport, entry)
         except (sqlite3.DatabaseError, OSError, ValueError, RuntimeError, json.JSONDecodeError, subprocess.SubprocessError):
             return []
         if target_file is None:
             return []
         with self._lock:
             cached = self._turn_cache.get(cache_key)
-            if cached is not None and cached[0] == mtime_ns and cached[1] == size:
-                return list(cached[2])
+            if cached is not None and cached[0] == fp:
+                return list(cached[1])
         try:
             turns = _decode_session_turns_from_file(
                 transport, binding, host, sid, title, fallback_iso, target_file, probed_title
@@ -531,7 +531,7 @@ class WorkbenchIndexer:
             return []
         with self._lock:
             if gen is None or self._generation == gen:
-                self._turn_cache[cache_key] = (mtime_ns, size, tuple(turns))
+                self._turn_cache[cache_key] = (fp, tuple(turns))
         return turns
 
     def _normalized_seed_paths(self) -> set[WorkspacePath]:
@@ -656,6 +656,7 @@ class WorkbenchIndexer:
                 and (time.monotonic() - self._cached_at) < self._ttl_seconds
             )
             if not cache_valid:
+                self._generation += 1
                 self._cached_snapshot = self._build_full_snapshot()
                 self._cached_at = time.monotonic()
             assert self._cached_snapshot is not None
@@ -690,7 +691,11 @@ class WorkbenchIndexer:
         matched_ws = next((w for w in base.workspaces if w.workspace_id == sel or w.workspace_path == sel), None)
         resolved_id = matched_ws.workspace_id if matched_ws is not None else sel
         with self._lock:
-            pending = [s for s in self._unhydrated_specs.values() if s.ws_id == resolved_id] if self._generation == gen else []
+            if self._generation != gen:
+                base, gen = self._ensure_base_snapshot(refresh=False)
+            else:
+                base = self._cached_snapshot or base
+            pending = [s for s in self._unhydrated_specs.values() if s.ws_id == resolved_id]
         if pending:
             hydrated = self._hydrate_specs(pending, gen)
             base = self._commit_hydrated_works(base, gen, hydrated)
@@ -700,16 +705,26 @@ class WorkbenchIndexer:
         cleaned = (work_id or "").strip()
         if not cleaned:
             raise ValueError("work_id is required.")
-        base, gen = self._ensure_base_snapshot(refresh=refresh)
-        with self._lock:
-            spec = self._unhydrated_specs.get(cleaned) if self._generation == gen else None
-        if spec is not None:
-            hydrated = self._hydrate_specs([spec], gen)
-            self._commit_hydrated_works(base, gen, hydrated)
-            return hydrated[cleaned]
-        for work in base.works:
-            if work.work_id == cleaned:
-                return work
+        for attempt in range(2):
+            base, gen = self._ensure_base_snapshot(refresh=(refresh and attempt == 0))
+            with self._lock:
+                if self._generation != gen:
+                    if attempt == 0:
+                        continue
+                    spec = None
+                    latest_snap = self._cached_snapshot or base
+                else:
+                    spec = self._unhydrated_specs.get(cleaned)
+                    latest_snap = self._cached_snapshot or base
+            if spec is not None:
+                hydrated = self._hydrate_specs([spec], gen)
+                self._commit_hydrated_works(base, gen, hydrated)
+                return hydrated[cleaned]
+            found = next((w for w in latest_snap.works if w.work_id == cleaned), None)
+            if found is None:
+                raise KeyError(f"Work not found: {cleaned}")
+            if found.turns or found.turn_count == 0 or attempt > 0:
+                return found
         raise KeyError(f"Work not found: {cleaned}")
 
     def get_snapshot_for_search(self, *, workspace_id: str | None = None, scope: str = "all") -> WorkbenchSnapshot:
@@ -718,6 +733,8 @@ class WorkbenchIndexer:
         target_ids = {w.work_id for w in snap.works}
         with self._lock:
             gen = self._generation
+            if self._cached_snapshot is not None:
+                snap = self._filter_snapshot(self._cached_snapshot, snap.selected_workspace_id)
             pending = [
                 spec for wid, spec in self._unhydrated_specs.items()
                 if wid in target_ids and (norm_scope == "all" or spec.session_key[0] == norm_scope)

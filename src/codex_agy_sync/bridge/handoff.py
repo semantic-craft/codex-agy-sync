@@ -29,7 +29,7 @@ from ..events import (
 )
 from ..ledger import TrajectoryLedger, rescue_interrupted_ledger
 from ..payloads import serialize_tool_payload_arguments_json
-from ..workspace import validate_session_id
+from ..workspace import parse_workspace_identity, validate_session_id
 from . import rpc
 from .handoff_store import (
     HandoffCancelledError,
@@ -240,7 +240,7 @@ def _import_codex(paths: HostEnvironmentPaths, binding: WorkspaceProjectBinding,
         stream.write("\n".join(row.raw_json for row in rows) + "\n")
     endpoint = PresenceWalGuard(paths).discover_codex_daemon()
     if endpoint is None:
-        raise RuntimeError("No live Codex app-server Unix socket available.")
+        raise rpc.OnlineRpcUnavailableError("No live Codex app-server Unix socket available.")
     return str(import_codex_rollout_via_rpc(
         endpoint, rollout, binding.workspace_path, str(binding.codex_project_id), ledger.title, timeout_s=90.0,
     ))
@@ -317,7 +317,7 @@ def _handoff_locked(
     _ensure_no_pending_sibling(state, receipt_path, binding.workspace_path, source_host, source_id)
     guard = PresenceWalGuard(paths)
     if (guard.discover_agy_daemon() if to_agy else guard.discover_codex_daemon()) is None:
-        raise RuntimeError("Open the target Desktop app before handoff.")
+        raise rpc.OnlineRpcUnavailableError("Open the target Desktop app before handoff.")
     handed = handoff_ledger(ledger, title)
     seed_turns, seed_digest = ledger_seed_fingerprint(handed)
     eff_chain_id, eff_from_source, eff_depth = chain_id, chained_from_source_id, chain_depth
@@ -357,15 +357,17 @@ def handoff_session(
     chained_from_source_id: str | None = None,
     chain_depth: int = 0,
     include_interrupted: bool = False,
+    binding: WorkspaceProjectBinding | None = None,
 ) -> HandoffReceipt:
     """Create a new Desktop session once per completed source history."""
     if direction not in (SyncDirection.CODEX_TO_AGY, SyncDirection.AGY_TO_CODEX):
         raise ValueError("Handoff requires an explicit direction.")
     validate_session_id(source_id, label="source_id")
-    binding = _require_binding(paths, workspace)
-    with open_handoff_lock(paths, binding.workspace_path) as state:
+    ws_path, _ = parse_workspace_identity(workspace)
+    eff_binding = binding if (binding is not None and binding.workspace_path == ws_path) else _require_binding(paths, workspace)
+    with open_handoff_lock(paths, eff_binding.workspace_path) as state:
         return _handoff_locked(
-            paths, binding, direction, source_id, title, state,
+            paths, eff_binding, direction, source_id, title, state,
             chain_id=chain_id, chained_from_source_id=chained_from_source_id, chain_depth=chain_depth,
             include_interrupted=include_interrupted,
         )

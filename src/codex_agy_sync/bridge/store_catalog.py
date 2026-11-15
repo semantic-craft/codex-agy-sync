@@ -376,7 +376,7 @@ def scan_agy_summaries_with_foreign_ids(
             order_sql = " ORDER BY last_modified_time DESC" if has_lm else ""
             sql = f"SELECT {optional_select_columns_sql(cols, select_cols)} FROM conversation_summaries{order_sql}"
             rows = conn.execute(sql).fetchall()
-    except sqlite3.DatabaseError:
+    except (sqlite3.DatabaseError, OSError, ValueError):
         return agy_sessions, foreign_cids, sum_mtimes
 
     summary_has_scope: dict[str, bool] = {}
@@ -478,7 +478,7 @@ def enrich_agy_session_from_conv_db(
                 "agent_role": eff_role,
                 "spawn_step_index": sc_info.get("spawn_step_index"),
             }
-    except sqlite3.DatabaseError:
+    except (sqlite3.DatabaseError, OSError, ValueError):
         return
 
 
@@ -501,7 +501,7 @@ def scan_codex_state_sessions(
             order_sql = f" ORDER BY {', '.join(f'{c} DESC' for c in order_parts)}" if order_parts else ""
             sql = f"SELECT {optional_select_columns_sql(cols, _CODEX_STATE_COLS)} FROM threads{where_sql}{order_sql}"
             rows = conn.execute(sql).fetchall()
-    except sqlite3.DatabaseError:
+    except (sqlite3.DatabaseError, OSError, ValueError):
         return codex_sessions
 
     for tid, title, preview, cwd, pid, parent_tid, rpath, agent_nickname, agent_role, raw_source in rows:

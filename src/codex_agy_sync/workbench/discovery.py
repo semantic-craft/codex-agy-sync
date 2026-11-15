@@ -45,6 +45,19 @@ class UnionFind:
             self._parent[rr] = rl
 
 
+def stat_with_wal_fingerprint(path: Path, *, include_wal: bool = True) -> tuple[tuple[int, int, int, int], float]:
+    """Return `((mtime_ns, size, wal_mtime_ns, wal_size), mtime_sec)` for WAL-aware cache checks."""
+    st = path.stat()
+    wal_mtime_ns = 0
+    wal_size = 0
+    if include_wal:
+        wal_path = path.with_name(f"{path.name}-wal")
+        with contextlib.suppress(OSError):
+            wst = wal_path.stat()
+            wal_mtime_ns, wal_size = wst.st_mtime_ns, wst.st_size
+    return (st.st_mtime_ns, st.st_size, wal_mtime_ns, wal_size), st.st_mtime
+
+
 def _try_register_workspace(
     raw_spec: str | Path,
     homes: Sequence[Path],

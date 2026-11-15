@@ -107,6 +107,8 @@ class UnixWebSocketClient:
                 (plen,) = struct.unpack("!H", self._read_exact(2))
             elif plen == 127:
                 (plen,) = struct.unpack("!Q", self._read_exact(8))
+            if plen > 67_108_864 or len(fragments) + plen > 67_108_864:
+                raise OnlineRpcUnavailableError("Codex WebSocket frame exceeds 64 MiB limit.")
             mask_key = self._read_exact(4) if masked else b""
             payload = self._read_exact(plen) if plen > 0 else b""
             if masked and plen > 0:

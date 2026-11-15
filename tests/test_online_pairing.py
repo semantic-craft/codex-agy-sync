@@ -542,3 +542,18 @@ class TestOnlinePairingRpc(unittest.TestCase):
         self.assertEqual(receipt.pairing_mode, "online_rpc")
         self.assertEqual(dataclasses.asdict(receipt)["pairing_mode"], "online_rpc")
         self.assertTrue(diagnose_workspace_binding(self.paths, self.workspace).is_paired())
+
+    def test_p2_unix_ws_client_rejects_oversized_frame_above_64mib(self) -> None:
+        from codex_agy_sync.bridge.project_rpc import UnixWebSocketClient
+
+        srv_sock, cli_sock = socket.socketpair()
+        try:
+            cli_sock.settimeout(2.0)
+            client = UnixWebSocketClient(cli_sock)
+            oversized_header = struct.pack("!BBQ", 0x81, 127, 67_108_865)
+            srv_sock.sendall(oversized_header)
+            with self.assertRaises(OnlineRpcUnavailableError):
+                client.recv_json()
+        finally:
+            cli_sock.close()
+            srv_sock.close()

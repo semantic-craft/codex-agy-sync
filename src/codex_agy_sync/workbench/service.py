@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 from ..bridge.handoff_reconcile import reconcile_workspace_handoffs
 from ..bridge.handoff_resolve import execute_handoff, validate_handoff_selector_flags
+from ..bridge.handoff_store import HandoffPendingError
 from ..bridge.paths_and_locks import HostEnvironmentPaths
 from ..bridge.state_machine import SyncDirection
 from ..workspace import (
@@ -305,19 +306,27 @@ class WorkbenchService:
             pick=False,
             require_selector=True,
         )
-        receipt, mutated = execute_handoff(
-            self._paths,
-            self._resolve_workspace_arg(workspace),
-            direction=SyncDirection(clean_dir) if clean_dir else None,
-            source_id=clean_source,
-            title=title,
-            latest=bool(latest),
-            chain=bool(chain),
-            pick=False,
-            pair_if_offline=bool(pair_if_offline),
-            auto_pair=bool(auto_pair),
-            include_interrupted=bool(include_interrupted),
-        )
+        try:
+            receipt, mutated = execute_handoff(
+                self._paths,
+                self._resolve_workspace_arg(workspace),
+                direction=SyncDirection(clean_dir) if clean_dir else None,
+                source_id=clean_source,
+                title=title,
+                latest=bool(latest),
+                chain=bool(chain),
+                pick=False,
+                pair_if_offline=bool(pair_if_offline),
+                auto_pair=bool(auto_pair),
+                include_interrupted=bool(include_interrupted),
+            )
+        except HandoffPendingError:
+            self._indexer.invalidate()
+            raise
+        except Exception:
+            if auto_pair or pair_if_offline:
+                self._indexer.invalidate()
+            raise
         if mutated:
             self._indexer.invalidate()
         return dataclasses.asdict(receipt)

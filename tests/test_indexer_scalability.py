@@ -344,6 +344,197 @@ class IndexerScalabilityTest(unittest.TestCase):
         self.assertEqual(min_snap.works[0].turns, ())
         self.assertEqual(min_snap.works[0].turn_count, 1)
 
+    def test_p1_wal_fingerprint_corrupt_meta_cursor_uri_and_unmapped_pid_skip(self) -> None:
+        from codex_agy_sync.bridge.store_catalog import enrich_agy_session_from_conv_db
+        from codex_agy_sync.workbench.catalog import AgyMetaCache, scan_host_catalog
+        from codex_agy_sync.workbench.discovery import load_preloaded_host_tables
+
+        ws_main = self.root / "p1-main"
+        ws_main.mkdir(parents=True, exist_ok=True)
+        ws_arch = self.root / "Archive" / "hidden-proj"
+        ws_arch.mkdir(parents=True, exist_ok=True)
+
+        sum_db = self.paths.agy_data_dir / "conversation_summaries.db"
+        sum_db.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.closing(sqlite3.connect(str(sum_db))) as sconn:
+            ensure_agy_summaries_db_schema(sconn)
+            sconn.close()
+
+        # 1) WAL-only updates without touching main .db must invalidate both _agy_meta_cache & _turn_cache
+        cid_wal = str(uuid.uuid4())
+        conv_wal_db = self.paths.agy_data_dir / "conversations" / f"{cid_wal}.db"
+        conv_wal_db.parent.mkdir(parents=True, exist_ok=True)
+        wal_pid = deterministic_uuid("agy-project", ws_main.as_uri())
+
+        def _make_meta_blob(role: str) -> bytes:
+            from codex_agy_sync.codecs import encode_trajectory_metadata_proto
+            from codex_agy_sync.workspace import AgyProjectId, WorkspaceRootUri
+            return encode_trajectory_metadata_proto(
+                AgyProjectId(wal_pid),
+                (WorkspaceRootUri(ws_main.as_uri()),),
+                "2026-11-11T00:00:00Z",
+                agent_role=role,
+            )
+
+        live_conn = sqlite3.connect(str(conv_wal_db))
+        try:
+            live_conn.execute("PRAGMA journal_mode=WAL;")
+            live_conn.execute("PRAGMA wal_autocheckpoint=0;")
+            ensure_agy_conversation_db_schema(live_conn)
+            rows1 = encode_agy_trajectory([
+                UserInputEvent("user_input", EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("w1"), "2026-11-11T00:00:00Z"), "wal one"),
+                AssistantTextEvent("assistant_text", EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("w1"), "2026-11-11T00:00:01Z"), "ans one"),
+            ])
+            for row in rows1:
+                live_conn.execute(
+                    "INSERT INTO steps (idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (int(row.idx), row.step_type, row.status, 1 if row.has_subtrajectory else 0, row.metadata_blob, row.step_payload_blob, row.step_format),
+                )
+            live_conn.execute("INSERT OR REPLACE INTO trajectory_metadata_blob (id, data) VALUES ('main', ?)", (_make_meta_blob("WAL Initial"),))
+            live_conn.commit()
+            live_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+
+            indexer = WorkbenchIndexer(self.paths, seed_workspaces=[ws_main], eager_turn_budget=5)
+            snap1 = indexer.get_snapshot()
+            wid_wal = next(w.work_id for w in snap1.works if w.latest_source_id == cid_wal)
+            self.assertEqual(len(indexer.get_work(wid_wal).turns), 1)
+
+            meta_cache: AgyMetaCache = {}
+            pre1 = load_preloaded_host_tables(self.paths)
+            cat1 = scan_host_catalog(self.paths, [(ws_main, ws_main.as_uri())], DefaultHostTransport(self.paths), meta_cache, preloaded=pre1)
+            self.assertEqual(cat1[ws_main].agy_entries[0]["count"], 2)
+
+            main_stat_before = (conv_wal_db.stat().st_mtime_ns, conv_wal_db.stat().st_size)
+
+            rows2 = encode_agy_trajectory([
+                UserInputEvent("user_input", EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("w1"), "2026-11-11T00:00:00Z"), "wal one"),
+                AssistantTextEvent("assistant_text", EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("w1"), "2026-11-11T00:00:01Z"), "ans one"),
+                UserInputEvent("user_input", EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("w2"), "2026-11-11T00:01:00Z"), "wal two"),
+                AssistantTextEvent("assistant_text", EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("w2"), "2026-11-11T00:01:01Z"), "ans two"),
+            ])
+            for row in rows2[2:]:
+                live_conn.execute(
+                    "INSERT INTO steps (idx, step_type, status, has_subtrajectory, metadata, step_payload, step_format) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (int(row.idx), row.step_type, row.status, 1 if row.has_subtrajectory else 0, row.metadata_blob, row.step_payload_blob, row.step_format),
+                )
+            live_conn.execute("INSERT OR REPLACE INTO trajectory_metadata_blob (id, data) VALUES ('main', ?)", (_make_meta_blob("WAL Updated"),))
+            live_conn.commit()
+            main_stat_after = (conv_wal_db.stat().st_mtime_ns, conv_wal_db.stat().st_size)
+            self.assertEqual(main_stat_before, main_stat_after)
+            self.assertGreater(conv_wal_db.with_name(f"{conv_wal_db.name}-wal").stat().st_size, 0)
+
+            work_after = indexer.get_work(wid_wal, refresh=True)
+            self.assertEqual(len(work_after.turns), 2)
+            cat2 = scan_host_catalog(self.paths, [(ws_main, ws_main.as_uri())], DefaultHostTransport(self.paths), meta_cache, preloaded=load_preloaded_host_tables(self.paths))
+            self.assertEqual(cat2[ws_main].agy_entries[0]["count"], 4)
+        finally:
+            live_conn.close()
+
+        # 2) Corrupt trajectory_metadata_blob tolerated in both catalog and store_catalog
+        cid_bad = str(uuid.uuid4())
+        with contextlib.closing(sqlite3.connect(str(sum_db))) as sconn:
+            _write_agy_session(self.paths, sconn, ws_main, cid_bad, "Corrupt Blob Conv", "u bad", "a bad", "2026-11-11T01:00:00Z", 1762822800.0)
+            sconn.commit()
+        bad_conv = self.paths.agy_data_dir / "conversations" / f"{cid_bad}.db"
+        with contextlib.closing(sqlite3.connect(str(bad_conv))) as bconn:
+            bconn.execute("UPDATE trajectory_metadata_blob SET data = ? WHERE id = 'main'", (b"\xff\xff\x80",))
+            bconn.commit()
+        agy_sessions: dict[str, dict] = {}
+        enrich_agy_session_from_conv_db(bad_conv, wal_pid, ws_main.as_uri(), {}, agy_sessions)
+        self.assertEqual(agy_sessions, {})
+        discovered_bad = discover_agy_entries(self.paths, DefaultHostTransport(self.paths), ProjectRegistry(self.paths).resolve_readonly_binding(ws_main))
+        self.assertIn(cid_bad, {e["session_id"] for e in discovered_bad})
+
+        # 3) Non-canonical cursor workspace_uri trailing slash matches normalized bucket
+        cursors_dir = self.paths.sync_state_dir / "cursors"
+        cursors_dir.mkdir(parents=True, exist_ok=True)
+        (cursors_dir / "slash-cursor.json").write_text(
+            json.dumps({"workspace_uri": f"{ws_main.as_uri()}/", "cascade_id": cid_wal, "codex_thread_id": cid_bad}),
+            encoding="utf-8",
+        )
+
+        # 4) Unmapped project_id with empty workspace_uris falls through to conv DB; known Archive pid is skipped unopened
+        arch_pid = "known-archive-pid"
+        proj_dir = self.paths.gemini_config_dir / "projects"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        (proj_dir / f"{arch_pid}.json").write_text(json.dumps({"id": arch_pid, "workspacePath": str(ws_arch)}), encoding="utf-8")
+
+        cid_unmapped = str(uuid.uuid4())
+        cid_archive = str(uuid.uuid4())
+        with contextlib.closing(sqlite3.connect(str(sum_db))) as sconn:
+            _write_agy_session(self.paths, sconn, ws_main, cid_unmapped, "Unmapped Pid Conv", "u unm", "a unm", "2026-11-11T02:00:00Z", 1762826400.0)
+            sconn.execute("UPDATE conversation_summaries SET project_id = 'unmapped-unknown-pid', workspace_uris = '[]' WHERE conversation_id = ?", (cid_unmapped,))
+            _write_agy_session(self.paths, sconn, ws_arch, cid_archive, "Archive Conv", "u arch", "a arch", "2026-11-11T03:00:00Z", 1762830000.0)
+            sconn.execute("UPDATE conversation_summaries SET project_id = ?, workspace_uris = '[]' WHERE conversation_id = ?", (arch_pid, cid_archive))
+            sconn.commit()
+        with contextlib.closing(sqlite3.connect(str(self.paths.agy_data_dir / "conversations" / f"{cid_unmapped}.db"))) as uconn:
+            uconn.execute("INSERT OR REPLACE INTO trajectory_metadata_blob (id, data) VALUES ('main', ?)", (_make_meta_blob("Unmapped Pid Conv"),))
+            uconn.commit()
+
+        opened_dbs: list[str] = []
+        orig_open = open_readonly_sqlite
+        with patch("codex_agy_sync.workbench.catalog.open_readonly_sqlite", side_effect=lambda p: opened_dbs.append(p.name) or orig_open(p)):
+            cat_scan = scan_host_catalog(self.paths, [(ws_main, ws_main.as_uri())], DefaultHostTransport(self.paths), {})
+        found_cids = {e["session_id"] for e in cat_scan[ws_main].agy_entries}
+        self.assertTrue({cid_wal, cid_bad, cid_unmapped}.issubset(found_cids))
+        self.assertNotIn(cid_archive, found_cids)
+        self.assertNotIn(f"{cid_archive}.db", opened_dbs)
+        self.assertEqual(len(cat_scan[ws_main].cursor_pairs), 1)
+
+    def test_p1_indexer_generation_and_concurrent_get_work_race(self) -> None:
+        import concurrent.futures
+        import threading
+
+        ws = self.root / "race-ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        tid = str(uuid.uuid4())
+        with contextlib.closing(sqlite3.connect(str(self.paths.codex_home_dir / "state_5.sqlite"))) as cconn:
+            ensure_codex_state_db_schema(cconn)
+            _write_codex_session(self.paths, cconn, ws, tid, "Race Work", "prompt race", "reply race", "2026-11-11T04:00:00Z", 1762833600.0)
+            cconn.commit()
+
+        indexer = WorkbenchIndexer(self.paths, eager_turn_budget=0)
+        snap0 = indexer.get_snapshot()
+        self.assertEqual(snap0.works[0].turns, ())
+        wid = snap0.works[0].work_id
+
+        # Concurrent get_work calls on same unhydrated work must both return hydrated turns (never empty tuple)
+        barrier = threading.Barrier(2)
+        orig_hydrate = indexer._hydrate_spec_card
+
+        def _slow_hydrate(transport, spec, gen):
+            if barrier.n_waiting < 1:
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    barrier.wait(timeout=1.0)
+            else:
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    barrier.wait(timeout=1.0)
+            return orig_hydrate(transport, spec, gen)
+
+        with patch.object(indexer, "_hydrate_spec_card", side_effect=_slow_hydrate):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                r1, r2 = pool.submit(indexer.get_work, wid), pool.submit(indexer.get_work, wid)
+                w1, w2 = r1.result(timeout=5.0), r2.result(timeout=5.0)
+        self.assertEqual(len(w1.turns), 1)
+        self.assertEqual(len(w2.turns), 1)
+
+        # Mid-flight generation bump during hydration must retry and return fresh hydrated turns
+        indexer.get_snapshot(refresh=True)
+        bumped = False
+        orig_hydrate_2 = indexer._hydrate_spec_card
+
+        def _bump_on_first_hydrate(transport, spec, gen):
+            nonlocal bumped
+            if not bumped:
+                bumped = True
+                indexer.get_snapshot(refresh=True)
+            return orig_hydrate_2(transport, spec, gen)
+
+        with patch.object(indexer, "_hydrate_spec_card", side_effect=_bump_on_first_hydrate):
+            work_retried = indexer.get_work(wid)
+        self.assertTrue(bumped)
+        self.assertEqual(len(work_retried.turns), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

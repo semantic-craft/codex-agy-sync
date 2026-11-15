@@ -331,11 +331,16 @@ def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int
     if args.stop:
         print(json.dumps(stop_workbench_server(paths), ensure_ascii=False, indent=2))
         return 0
+    ui_path: Path | None = None
+    if args.ui is not None:
+        ui_path = Path(args.ui).expanduser()
+        if not ui_path.is_file():
+            raise FileNotFoundError(f"UI file not found: {args.ui}")
     seeds = [item for raw in (args.workspace or ()) if (item := normalize_workspace_spec(raw))]
     return run_serve_server(
         paths,
         seed_workspaces=seeds,
-        ui_path=args.ui,
+        ui_path=ui_path,
         port=int(args.port),
         idle_timeout_sec=int(args.idle_timeout),
         max_lifetime_sec=int(args.max_lifetime),

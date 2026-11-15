@@ -537,6 +537,139 @@ class HandoffConvergenceTest(unittest.TestCase):
         finally:
             server.stop()
 
+    def test_p0_reconcile_missing_columns_unreadable_state_and_unsafe_promoted_path(self) -> None:
+        import sqlite3
+        from codex_agy_sync.bridge import handoff_reconcile
+
+        self.bridge.registry.ensure_workspace_binding(self.workspace)
+        state_dir = self.paths.sync_state_dir / "handoffs"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        src_cid = "55555555-5555-4555-8555-555555550901"
+        orphan_tid = "01970000-0000-7000-8000-000000000901"
+
+        self.paths.codex_home_dir.mkdir(parents=True, exist_ok=True)
+        state_db = self.paths.codex_home_dir / "state_5.sqlite"
+        state_db.unlink(missing_ok=True)
+        with contextlib.closing(sqlite3.connect(str(state_db))) as conn:
+            conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, title TEXT)")
+            conn.execute(
+                "INSERT INTO threads (id, cwd, title) VALUES (?, ?, ?)",
+                (orphan_tid, str(self.workspace), "Minimal Columns Title"),
+            )
+            conn.commit()
+
+        match_file = state_dir / "codex-orphan-match.json"
+        absent_file = state_dir / "codex-orphan-absent.json"
+        match_file.write_text(json.dumps({
+            "workspace": str(self.workspace), "source_host": "antigravity", "source_id": src_cid,
+            "source_digest": "d1", "target_host": "codex", "target_id": None,
+            "title": "Minimal Columns Title", "status": "pending",
+            "staging_path": str(state_dir / "staging" / "m1"), "error": "err",
+        }), encoding="utf-8")
+        absent_file.write_text(json.dumps({
+            "workspace": str(self.workspace), "source_host": "antigravity", "source_id": src_cid,
+            "source_digest": "d2", "target_host": "codex", "target_id": None,
+            "title": "Absent Title", "status": "pending",
+            "staging_path": str(state_dir / "staging" / "m2"), "error": "err",
+        }), encoding="utf-8")
+
+        report = reconcile_workspace_handoffs(self.paths, self.workspace)
+        self.assertEqual([x["reason"] for x in report["unresolved"]], ["codex_candidate_thread_found_without_id"])
+        self.assertEqual([x["reason"] for x in report["cleared"]], ["codex_target_never_allocated"])
+        self.assertTrue(match_file.is_file())
+        self.assertFalse(absent_file.exists())
+
+        state_db.write_bytes(b"corrupt-sqlite-header")
+        match_file.unlink(missing_ok=True)
+        r_unknown = state_dir / "corrupt-unknown-id.json"
+        r_known = state_dir / "corrupt-known-id.json"
+        r_unknown.write_text(json.dumps({
+            "workspace": str(self.workspace), "source_host": "antigravity", "source_id": src_cid,
+            "source_digest": "d3", "target_host": "codex", "target_id": None,
+            "title": "Corrupt Unknown", "status": "pending",
+            "staging_path": str(state_dir / "staging" / "c1"), "error": "err",
+        }), encoding="utf-8")
+        r_known.write_text(json.dumps({
+            "workspace": str(self.workspace), "source_host": "antigravity", "source_id": src_cid,
+            "source_digest": "d4", "target_host": "codex", "target_id": "01970000-0000-7000-8000-000000000902",
+            "title": "Corrupt Known", "status": "pending",
+            "staging_path": str(state_dir / "staging" / "c2"), "error": "err",
+        }), encoding="utf-8")
+
+        corrupt_report = reconcile_workspace_handoffs(self.paths, self.workspace)
+        self.assertEqual(corrupt_report["cleared"], [])
+        self.assertEqual(
+            [x["reason"] for x in corrupt_report["unresolved"]],
+            ["codex_state_db_unreadable", "codex_state_db_unreadable"],
+        )
+        self.assertTrue(r_unknown.is_file() and r_known.is_file())
+
+        outside_receipt = self.root / "escaped-promoted.json"
+        rec_obj = HandoffReceipt(
+            str(self.workspace), "antigravity", src_cid, "d5", "codex",
+            "01970000-0000-7000-8000-000000000903", "Escaped", "pending",
+            str(state_dir / "staging" / "esc"), error="err",
+        )
+        bucket, entry = handoff_reconcile._apply_reconcile_decision(
+            state_dir, state_dir / "staging", outside_receipt, rec_obj,
+            "promoted", "codex_rpc_verified", dry_run=False,
+        )
+        self.assertEqual((bucket, entry["reason"]), ("unresolved", "invalid_receipt_path"))
+        self.assertFalse(outside_receipt.exists())
+
+    def test_p1_p2_unmocked_missing_target_daemon_corrupt_blob_and_binding_passthrough(self) -> None:
+        from codex_agy_sync.bridge import handoff_store
+
+        binding = self.bridge.registry.ensure_workspace_binding(self.workspace)
+        tid = self._seed_codex(
+            binding, "01970000-0000-7000-8000-000000000911",
+            _turn_pair(HostKind.CODEX, "t1", "2026-11-14T00:00:00Z", "Unmocked missing daemon", "Done"),
+            title="Missing Target Daemon",
+        )
+
+        rc_cli, _, err_cli = self._run_cli(["handoff", "-w", str(self.workspace), "--source-id", str(tid), "--direction", "codex_to_agy"])
+        self.assertEqual(rc_cli, 2)
+        self.assertEqual(json.loads(err_cli)["error"], "online_rpc_unavailable")
+
+        svc = WorkbenchService(self.paths)
+        server = WorkbenchServer(svc, ui_path=self.root / "missing-ui.html", port=0, idle_timeout_sec=120, max_lifetime_sec=300)
+        server.start()
+        try:
+            hdr = {"Host": f"127.0.0.1:{server.port}", "X-Workbench-Token": server.token}
+            st_503, d_503 = _http_post(
+                server.port, "/api/handoff", hdr,
+                {"workspace": str(self.workspace), "source_id": str(tid), "direction": "codex_to_agy"},
+            )
+            self.assertEqual((st_503, d_503["error"]), (503, "online_rpc_unavailable"))
+        finally:
+            server.stop()
+
+        cid = self._seed_agy(
+            binding, "55555555-5555-4555-8555-555555550912",
+            _turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-14T00:01:00Z", "Corrupt meta", "Reply"),
+            title="Corrupt Meta Ownership",
+        )
+        conv_db = self.paths.agy_data_dir / "conversations" / f"{cid}.db"
+        import sqlite3
+        with contextlib.closing(sqlite3.connect(str(conv_db))) as conn:
+            conn.execute("UPDATE trajectory_metadata_blob SET data = ? WHERE id = 'main'", (b"\xff\xff\x80",))
+            conn.commit()
+        exists, ownership = handoff_store._probe_agy_ownership(self.paths, str(cid), binding)
+        self.assertTrue(exists)
+        self.assertEqual(ownership, "match")
+        self.assertEqual(handoff_store.infer_direction_from_source_id(self.paths, str(cid), binding), SyncDirection.AGY_TO_CODEX)
+
+        with mock.patch("codex_agy_sync.bridge.handoff._require_binding", side_effect=AssertionError("unexpected disk binding lookup")):
+            with self._mock_daemons(), mock.patch(
+                "codex_agy_sync.bridge.rpc.fetch_codex_thread_via_rpc",
+                return_value=CodexRpcReadResult(thread={"id": str(tid), "name": "Missing Target Daemon", "turns": []}, is_active=False),
+            ):
+                receipt, mutated = execute_handoff(
+                    self.paths, self.workspace, direction=SyncDirection.CODEX_TO_AGY, source_id=str(tid),
+                )
+        self.assertTrue(mutated)
+        self.assertEqual(receipt.status, "ready")
+
 
 if __name__ == "__main__":
     unittest.main()

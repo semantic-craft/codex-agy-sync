@@ -29,6 +29,7 @@ from .paths_and_locks import (
     open_readonly_sqlite,
     validated_child_path,
 )
+from .store_catalog import optional_select_columns_sql, table_column_names
 from .transport import DefaultHostTransport
 
 __all__ = [
@@ -206,36 +207,45 @@ def _verify_agy_pending_receipt(
     return ("cleared", "agy_target_absent")
 
 
-def _codex_state_row_exists(state_db: Path, target_id: str) -> bool:
+def _codex_state_row_exists(state_db: Path, target_id: str) -> bool | None:
     if not state_db.is_file():
         return False
-    with contextlib.suppress(sqlite3.Error, OSError):
+    try:
         with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
             return conn.execute("SELECT 1 FROM threads WHERE id = ?", (target_id,)).fetchone() is not None
-    return False
+    except (sqlite3.Error, OSError):
+        return None
 
 
 def _codex_orphan_matches_receipt(
     codex_home_dir: Path, ws_path: WorkspacePath, receipt: HandoffReceipt,
-) -> bool:
+) -> bool | None:
     state_db = codex_home_dir / "state_5.sqlite"
     if not state_db.is_file():
         return False
     receipt_epoch, _ = parse_ts_epoch_iso(receipt.created_at_iso)
-    with contextlib.suppress(sqlite3.Error, OSError):
+    try:
         with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
+            cols = table_column_names(conn, "threads")
+            if "id" not in cols or "title" not in cols:
+                return None
+            select_sql = optional_select_columns_sql(cols, ("id", "cwd", "title", "created_at", "created_at_ms"))
             rows = conn.execute(
-                "SELECT id, cwd, title, created_at, created_at_ms FROM threads WHERE id != ? AND title = ?",
+                f"SELECT {select_sql} FROM threads WHERE id != ? AND title = ?",
                 (receipt.source_id, receipt.title),
             ).fetchall()
-        for _, cwd, _, c_sec, c_ms in rows:
-            if cwd:
-                with contextlib.suppress(ValueError):
-                    if parse_workspace_identity(str(cwd))[0] != ws_path:
-                        continue
-            row_epoch, _ = parse_ts_epoch_iso(c_ms or c_sec)
-            if receipt_epoch <= 0.0 or row_epoch >= receipt_epoch - 5.0:
-                return True
+    except (sqlite3.Error, OSError):
+        return None
+    for _, cwd, _, c_sec, c_ms in rows:
+        if cwd:
+            with contextlib.suppress(ValueError):
+                if parse_workspace_identity(str(cwd))[0] != ws_path:
+                    continue
+        if c_ms is None and c_sec is None:
+            return True
+        row_epoch, _ = parse_ts_epoch_iso(c_ms or c_sec)
+        if receipt_epoch <= 0.0 or row_epoch >= receipt_epoch - 5.0:
+            return True
     return False
 
 
@@ -246,7 +256,10 @@ def _verify_codex_pending_receipt(
     receipt: HandoffReceipt,
 ) -> tuple[str, str]:
     if not receipt.target_id:
-        if _codex_orphan_matches_receipt(paths.codex_home_dir, ws_path, receipt):
+        orphan = _codex_orphan_matches_receipt(paths.codex_home_dir, ws_path, receipt)
+        if orphan is None:
+            return ("unresolved", "codex_state_db_unreadable")
+        if orphan:
             return ("unresolved", "codex_candidate_thread_found_without_id")
         return ("cleared", "codex_target_never_allocated")
     try:
@@ -275,6 +288,8 @@ def _verify_codex_pending_receipt(
         with contextlib.suppress(FileNotFoundError):
             rollout_path, explicit_title = transport.find_codex_rollout_and_title(target_tid)
     in_catalog = _codex_state_row_exists(paths.codex_home_dir / "state_5.sqlite", target_id)
+    if in_catalog is None:
+        return ("unresolved", "codex_state_db_unreadable")
     if rollout_path is not None and rollout_path.is_file() and in_catalog:
         try:
             decoded = decode_codex_rollout(ws_path, ws_uri, read_codex_rollout_lines(rollout_path), explicit_title_override=explicit_title)
@@ -314,8 +329,11 @@ def _apply_reconcile_decision(
     if dry_run:
         return decision, entry
     if decision == "promoted":
+        safe_receipt = _validated_receipt_file(handoffs_root, receipt_path)
+        if safe_receipt is None:
+            return ("unresolved", {**entry, "reason": "invalid_receipt_path"})
         updated = dataclasses.replace(receipt, status="ready", error=None)
-        save_handoff_receipt(receipt_path, updated)
+        save_handoff_receipt(safe_receipt, updated)
         entry["staging_cleaned"] = _cleanup_staging_dir(staging_root, receipt.staging_path)
     elif decision == "cleared":
         entry["staging_cleaned"] = _cleanup_staging_dir(staging_root, receipt.staging_path)

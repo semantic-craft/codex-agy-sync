@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 from dataclasses import dataclass
+import importlib.resources
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,11 @@ from ..bridge.paths_and_locks import HostEnvironmentPaths, atomic_write_text, is
 
 
 def default_workbench_ui_path() -> Path:
+    with contextlib.suppress(Exception):
+        ui_res = importlib.resources.files("codex_agy_sync.workbench").joinpath("ui/index.html")
+        cand = Path(os.fspath(ui_res))  # type: ignore[arg-type]
+        if cand.is_file():
+            return cand
     base = Path(__file__).resolve().parent
     candidates = (base / "ui" / "index.html", base / "workbench.html")
     for candidate in candidates:

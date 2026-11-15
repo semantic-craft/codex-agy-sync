@@ -351,7 +351,7 @@ def _probe_agy_ownership(
     exists = conv_db.is_file()
     has_meta = matches = False
     if exists and binding is not None:
-        with contextlib.suppress(sqlite3.OperationalError):
+        with contextlib.suppress(sqlite3.DatabaseError, OSError, ValueError):
             with contextlib.closing(open_readonly_sqlite(conv_db)) as conn:
                 tblob = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()
             if tblob and tblob[0]:
@@ -361,7 +361,7 @@ def _probe_agy_ownership(
                 has_meta = has_meta or bool(pid or uris)
                 matches = matches or pid == str(binding.agy_project_id) or uris_match_workspace(uris, binding.workspace_uri)
     if (sum_db := paths.agy_data_dir / "conversation_summaries.db").is_file():
-        with contextlib.suppress(sqlite3.OperationalError):
+        with contextlib.suppress(sqlite3.DatabaseError, OSError, ValueError):
             with contextlib.closing(open_readonly_sqlite(sum_db)) as conn:
                 row = conn.execute("SELECT project_id, workspace_uris FROM conversation_summaries WHERE conversation_id = ?", (source_id,)).fetchone()
             if row is not None:
@@ -387,7 +387,7 @@ def _probe_codex_ownership(
 ) -> tuple[bool, Literal["match", "foreign", "unknown"]]:
     exists = has_meta = matches = False
     if (state_db := paths.codex_home_dir / "state_5.sqlite").is_file():
-        with contextlib.suppress(sqlite3.OperationalError):
+        with contextlib.suppress(sqlite3.DatabaseError, OSError, ValueError):
             with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
                 row = conn.execute("SELECT project_id, cwd FROM threads WHERE id = ?", (source_id,)).fetchone()
             if row is not None:

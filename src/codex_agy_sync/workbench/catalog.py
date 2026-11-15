@@ -26,9 +26,10 @@ from ..workspace import (
     FORBIDDEN_AGY_PROJECT_IDS, AgyProjectId, CascadeId, CodexLegacyProjectId, CodexProjectId,
     HostKind, WorkspacePath, WorkspaceRootUri, parse_workspace_identity,
 )
-from .discovery import PreloadedHostTables, load_preloaded_host_tables
+from .discovery import PreloadedHostTables, load_preloaded_host_tables, stat_with_wal_fingerprint
 
 NormCache = dict[str, tuple[WorkspacePath, WorkspaceRootUri] | None]
+AgyMetaCache = dict[str, tuple[tuple[int, int, int, int], dict[str, Any], int]]
 
 
 @dataclass
@@ -52,6 +53,7 @@ class _CatalogLookup:
     by_uri: dict[WorkspaceRootUri, WorkspaceCatalogBucket]
     by_agy_pid: dict[str, list[WorkspaceCatalogBucket]]
     by_codex_pid: dict[str, list[WorkspaceCatalogBucket]]
+    known_agy_pids: frozenset[str]
     norm_cache: NormCache
 
 
@@ -70,21 +72,28 @@ def _normalize_ident(raw: str, norm_cache: NormCache) -> tuple[WorkspacePath, Wo
     return resolved
 
 
-def _scan_agy_project_ids(paths: HostEnvironmentPaths, norm_cache: NormCache) -> dict[WorkspaceRootUri, AgyProjectId]:
+def _scan_agy_project_ids(
+    paths: HostEnvironmentPaths, norm_cache: NormCache,
+) -> tuple[dict[WorkspaceRootUri, AgyProjectId], frozenset[str]]:
     agy_pid_by_uri: dict[WorkspaceRootUri, AgyProjectId] = {}
+    known_project_pids: set[str] = set()
     projects_dir = paths.gemini_config_dir / "projects"
     if not projects_dir.is_dir():
-        return agy_pid_by_uri
+        return agy_pid_by_uri, frozenset()
     for pfile in sorted(projects_dir.glob("*.json")):
+        if pfile.stem:
+            known_project_pids.add(pfile.stem)
         with contextlib.suppress(Exception):
             data = json.loads(pfile.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 cand_id = str(data.get("id") or pfile.stem).strip()
+                if cand_id:
+                    known_project_pids.add(cand_id)
                 if cand_id and cand_id not in FORBIDDEN_AGY_PROJECT_IDS:
                     for raw_u in extract_agy_project_folder_uris(data):
                         if ident := _normalize_ident(str(raw_u), norm_cache):
                             agy_pid_by_uri.setdefault(ident[1], AgyProjectId(cand_id))
-    return agy_pid_by_uri
+    return agy_pid_by_uri, frozenset(known_project_pids)
 
 
 def _scan_codex_project_ids(paths: HostEnvironmentPaths, norm_cache: NormCache, preloaded: PreloadedHostTables) -> tuple[dict[WorkspacePath, str], dict[WorkspacePath, str]]:
@@ -114,7 +123,7 @@ def _init_workspace_buckets(
 ) -> _CatalogLookup:
     guard = PresenceWalGuard(paths)
     agy_active, codex_active = guard.discover_agy_daemon() is not None, guard.discover_codex_daemon() is not None
-    agy_pids = _scan_agy_project_ids(paths, norm_cache)
+    agy_pids, known_agy_pids = _scan_agy_project_ids(paths, norm_cache)
     codex_pids, legacy_pids = _scan_codex_project_ids(paths, norm_cache, preloaded)
     buckets: dict[WorkspacePath, WorkspaceCatalogBucket] = {}
     by_uri: dict[WorkspaceRootUri, WorkspaceCatalogBucket] = {}
@@ -132,7 +141,10 @@ def _init_workspace_buckets(
         buckets[ws_path] = by_uri[ws_uri] = bucket
         by_agy_pid.setdefault(str(agy_pid), []).append(bucket)
         by_codex_pid.setdefault(str(codex_pid), []).append(bucket)
-    return _CatalogLookup(buckets=buckets, by_uri=by_uri, by_agy_pid=by_agy_pid, by_codex_pid=by_codex_pid, norm_cache=norm_cache)
+    return _CatalogLookup(
+        buckets=buckets, by_uri=by_uri, by_agy_pid=by_agy_pid, by_codex_pid=by_codex_pid,
+        known_agy_pids=known_agy_pids, norm_cache=norm_cache,
+    )
 
 
 def _collect_cursors_and_handoffs(paths: HostEnvironmentPaths, lookup: _CatalogLookup) -> None:
@@ -146,8 +158,7 @@ def _collect_cursors_and_handoffs(paths: HostEnvironmentPaths, lookup: _CatalogL
                 raw_uri = str(raw.get("workspace_uri") or "")
                 bucket = lookup.by_uri.get(WorkspaceRootUri(raw_uri))
                 if bucket is None and raw_uri and (ident := _normalize_ident(raw_uri, lookup.norm_cache)):
-                    b_cand = lookup.buckets.get(ident[0])
-                    bucket = b_cand if (b_cand is not None and str(b_cand.ws_uri) == raw_uri) else None
+                    bucket = lookup.buckets.get(ident[0])
                 cid_str = safe_valid_session_id(raw.get("cascade_id"), "cascade_id") if bucket is not None else ""
                 tid_str = safe_valid_session_id(raw.get("codex_thread_id"), "codex_thread_id") if cid_str else ""
                 if bucket is not None and cid_str and tid_str:
@@ -195,18 +206,17 @@ def _resolve_agy_title(paths: HostEnvironmentPaths, cid_str: str, sum_title: str
 
 
 def _read_agy_conv_meta_cached(
-    db_file: Path, cid_str: str, *, need_step_count: bool, in_summary: bool, agy_meta_cache: dict[str, tuple[int, int, dict[str, Any], int]],
+    db_file: Path, cid_str: str, *, need_step_count: bool, in_summary: bool, agy_meta_cache: AgyMetaCache,
 ) -> tuple[dict[str, Any], int, float] | None:
     try:
-        st = db_file.stat()
+        fp, mtime = stat_with_wal_fingerprint(db_file, include_wal=True)
     except OSError:
         return None
-    mtime_ns, size, mtime = st.st_mtime_ns, st.st_size, st.st_mtime
     cached = agy_meta_cache.get(cid_str)
-    if cached is not None and cached[0] == mtime_ns and cached[1] == size and (not need_step_count or cached[3] >= 0):
-        return cached[2], cached[3], mtime
+    if cached is not None and cached[0] == fp and (not need_step_count or cached[2] >= 0):
+        return cached[1], cached[2], mtime
     meta = _empty_meta_lineage()
-    step_count = cached[3] if (cached is not None and cached[0] == mtime_ns and cached[1] == size) else -1
+    step_count = cached[2] if (cached is not None and cached[0] == fp) else -1
     try:
         with contextlib.closing(open_readonly_sqlite(db_file)) as conn:
             tblob = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()
@@ -215,9 +225,9 @@ def _read_agy_conv_meta_cached(
             if need_step_count and step_count < 0:
                 sc_row = conn.execute("SELECT COUNT(*) FROM steps").fetchone()
                 step_count = int(sc_row[0]) if sc_row else 0
-    except sqlite3.DatabaseError:
+    except (sqlite3.DatabaseError, OSError, ValueError):
         return (_empty_meta_lineage(), -1, mtime) if in_summary else None
-    agy_meta_cache[cid_str] = (mtime_ns, size, meta, step_count)
+    agy_meta_cache[cid_str] = (fp, meta, step_count)
     return meta, step_count, mtime
 
 
@@ -250,13 +260,13 @@ def _classify_agy_summary_rows(
         if buckets:
             root_candidates[cid_str] = rec
             summary_order.append(cid_str)
-        elif not pid_str and not cand_uris:
+        elif not cand_uris and pid_str not in lookup.known_agy_pids:
             unscoped_candidates[cid_str] = rec
             summary_order.append(cid_str)
     return summary_cids, root_candidates, unscoped_candidates, summary_order
 
 
-def _collect_agy_sessions(paths: HostEnvironmentPaths, lookup: _CatalogLookup, agy_meta_cache: dict[str, tuple[int, int, dict[str, Any], int]], preloaded: PreloadedHostTables) -> None:
+def _collect_agy_sessions(paths: HostEnvironmentPaths, lookup: _CatalogLookup, agy_meta_cache: AgyMetaCache, preloaded: PreloadedHostTables) -> None:
     sidecars = discover_agy_subagent_sidecars(paths)
     summary_cids, root_candidates, unscoped_candidates, summary_order = _classify_agy_summary_rows(preloaded.agy_summary_rows, sidecars, lookup)
     if not (conv_dir := paths.agy_data_dir / "conversations").is_dir():
@@ -428,7 +438,7 @@ def scan_host_catalog(
     paths: HostEnvironmentPaths,
     workspaces: Sequence[tuple[WorkspacePath, WorkspaceRootUri]],
     transport: DefaultHostTransport,
-    agy_meta_cache: dict[str, tuple[int, int, dict[str, Any], int]],
+    agy_meta_cache: AgyMetaCache,
     *,
     preloaded: PreloadedHostTables | None = None,
 ) -> dict[WorkspacePath, WorkspaceCatalogBucket]:

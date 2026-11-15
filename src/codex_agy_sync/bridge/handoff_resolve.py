@@ -486,5 +486,6 @@ def execute_handoff(
         paths, resolved.binding.workspace_path, direction=resolved.direction, source_id=resolved.source_id,
         title=resolved.title, chain_id=resolved.chain_id, chained_from_source_id=resolved.chained_from_source_id,
         chain_depth=resolved.chain_depth, include_interrupted=include_interrupted,
+        binding=resolved.binding,
     )
     return dataclasses.replace(receipt, pairing_mode=resolved.pairing_mode), True

@@ -1094,6 +1094,7 @@ function createLiveController() {
   let searchTimer = null;
   let searchAbort = null;
   let searchEpoch = 0;
+  let snapshotEpoch = 0;
 
   async function apiFetch(path, options = {}) {
     const headers = {
@@ -1569,6 +1570,7 @@ function createLiveController() {
   }
 
   async function refreshSnapshot({ refresh = false, showNotice = false, preserveDraftState = false } = {}) {
+    const epoch = ++snapshotEpoch;
     if (!live.works.length) {
       live.status = 'loading';
       live.snapshotError = null;
@@ -1576,6 +1578,7 @@ function createLiveController() {
     }
     try {
       const snap = await apiFetch(`/api/snapshot${refresh ? '?refresh=1' : ''}`);
+      if (epoch !== snapshotEpoch) return;
       live.status = 'ready';
       live.snapshotError = null;
       live.workspaces = snap.workspaces || [];
@@ -1598,6 +1601,7 @@ function createLiveController() {
       }
       if (showNotice) showToast('已刷新工作区与真实会话');
     } catch (err) {
+      if (epoch !== snapshotEpoch) return;
       live.status = 'error';
       live.snapshotError = err.message;
       render();
@@ -1726,11 +1730,13 @@ function createLiveController() {
 
   async function addCitationFromHit(hit) {
     if (!hit || live.busy) return;
-    if (!live.activeWork) {
+    if (!live.activeWork || (hit.work_id && live.activeWork.work_id !== hit.work_id)) {
       await loadWorkDetail(hit.work_id);
+      if (!live.activeWork || (hit.work_id && live.activeWork.work_id !== hit.work_id)) return;
     }
     const work = live.activeWork;
     if (!work) return;
+    resetDraftForWork(work);
     const citeWorkId = hit.work_id || work.work_id;
     const citeTurnId = hit.turn_id || '';
     const citeRole = hit.role || '';
@@ -1845,13 +1851,17 @@ function createLiveController() {
         await refreshSnapshot({ refresh: true, preserveDraftState: true });
       }
     } catch (err) {
+      const errCode = err.code || err.payload?.error || err.payload?.code || '';
       live.lastError = {
         message: err.message,
         status: err.status || 0,
-        code: err.code || err.payload?.error || err.payload?.code || '',
+        code: errCode,
         payload: err.payload || null,
       };
       showToast(live.draft.mode === 'ask' ? `生成草稿失败：${err.message}` : `交接失败：${err.message}`);
+      if (live.draft.mode === 'handoff' && (live.draft.pairIfOffline || errCode === 'handoff_pending')) {
+        void refreshSnapshot({ refresh: true, preserveDraftState: true });
+      }
     } finally {
       live.busy = false;
       render();

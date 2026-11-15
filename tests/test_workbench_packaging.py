@@ -43,6 +43,8 @@ class WorkbenchPackagingTest(unittest.TestCase):
             "auto_pair",
             "include_interrupted",
             "/api/handoff/reconcile",
+            "await loadWorkDetail(hit.work_id);",
+            "preserveDraftState: true",
         ):
             self.assertIn(token, html_text)
 
@@ -70,10 +72,14 @@ class WorkbenchPackagingTest(unittest.TestCase):
                     resp = conn.getresponse()
                     body = resp.read().decode("utf-8", errors="replace")
                     content_type = resp.getheader("Content-Type", "")
+                    x_frame = resp.getheader("X-Frame-Options")
+                    csp = resp.getheader("Content-Security-Policy")
                 finally:
                     conn.close()
                 self.assertEqual(resp.status, 200)
                 self.assertIn("text/html", content_type)
+                self.assertEqual(x_frame, "DENY")
+                self.assertEqual(csp, "frame-ancestors 'none'")
                 self.assertIn(f'<meta name="workbench-token" content="{server.token}">', body)
                 self.assertIn('<meta name="workbench-mode" content="stage1-live">', body)
                 self.assertIn("handoffIncludeInterrupted", body)
@@ -96,6 +102,63 @@ class WorkbenchPackagingTest(unittest.TestCase):
 
         custom_args = parser.parse_args(["serve", "--ui", "custom-workbench.html"])
         self.assertEqual(custom_args.ui, Path("custom-workbench.html"))
+
+    def test_p2_missing_ui_early_cli_rejection_importlib_fallback_and_service_invalidation(self) -> None:
+        import json
+        from unittest import mock
+        from codex_agy_sync import HandoffPendingError, HandoffReceipt
+
+        artifacts = Path.home() / "Projects" / "_artifacts" / "codex-agy-sync"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="wb-p2-", dir=artifacts) as tmpdir:
+            root = Path(tmpdir)
+            paths = HostEnvironmentPaths(
+                gemini_config_dir=root / "gemini-config",
+                agy_data_dir=root / "agy-data",
+                codex_home_dir=root / "codex-home",
+                sync_state_dir=root / "sync-state",
+            )
+            missing_ui = root / "does-not-exist.html"
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf), mock.patch("webbrowser.open") as mock_open:
+                rc = cli_main([
+                    "--gemini-config-dir", str(paths.gemini_config_dir),
+                    "--agy-data-dir", str(paths.agy_data_dir),
+                    "--codex-home-dir", str(paths.codex_home_dir),
+                    "--sync-state-dir", str(paths.sync_state_dir),
+                    "serve", "--ui", str(missing_ui), "--open",
+                ])
+            self.assertEqual(rc, 2)
+            self.assertEqual(json.loads(err_buf.getvalue())["error"], "file_not_found")
+            mock_open.assert_not_called()
+            self.assertFalse((paths.sync_state_dir / "workbench.json").exists())
+
+            with mock.patch("codex_agy_sync.workbench.lease.importlib.resources.files", side_effect=ModuleNotFoundError("no pkg")):
+                fallback_ui = default_workbench_ui_path()
+            self.assertTrue(fallback_ui.is_file())
+            self.assertEqual(fallback_ui.name, "index.html")
+
+            ws = root / "ws-inval"
+            ws.mkdir(parents=True, exist_ok=True)
+            svc = WorkbenchService(paths, ttl_seconds=60.0)
+            from codex_agy_sync import WorkbenchIndexer
+
+            with mock.patch.object(WorkbenchIndexer, "invalidate") as mock_inv:
+                with mock.patch("codex_agy_sync.workbench.service.execute_handoff", side_effect=RuntimeError("boom")):
+                    with self.assertRaises(RuntimeError):
+                        svc.trigger_handoff(workspace=str(ws), latest=True, auto_pair=True)
+                self.assertEqual(mock_inv.call_count, 1)
+
+                rec = HandoffReceipt(str(ws), "codex", "01970000-0000-7000-8000-000000000001", "d", "antigravity", None, "T", "pending", str(root / "s"), "e")
+                with mock.patch("codex_agy_sync.workbench.service.execute_handoff", side_effect=HandoffPendingError(rec, root / "r.json")):
+                    with self.assertRaises(HandoffPendingError):
+                        svc.trigger_handoff(workspace=str(ws), latest=True, pair_if_offline=True)
+                self.assertEqual(mock_inv.call_count, 2)
+
+                with mock.patch("codex_agy_sync.workbench.service.execute_handoff", side_effect=RuntimeError("boom2")):
+                    with self.assertRaises(RuntimeError):
+                        svc.trigger_handoff(workspace=str(ws), latest=True, auto_pair=False, pair_if_offline=False)
+                self.assertEqual(mock_inv.call_count, 2)
 
 
 if __name__ == "__main__":
