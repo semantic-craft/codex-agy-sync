@@ -1,5 +1,25 @@
 import Foundation
 
+public enum CLIResolutionSource: String, Codable, Equatable, Sendable {
+    case envOverride = "env_override"
+    case customPath = "custom_path"
+    case autoDiscovered = "auto_discovered"
+    case missing = "missing"
+
+    public var displayName: String {
+        switch self {
+        case .envOverride:
+            return "环境变量"
+        case .customPath:
+            return "手动指定"
+        case .autoDiscovered:
+            return "自动发现"
+        case .missing:
+            return "未找到"
+        }
+    }
+}
+
 public protocol CLIRunnerProtocol: Sendable {
     func fetchFeed(limit: Int) async throws -> MenubarFeedSnapshot
     func executeHandoff(workspacePath: String, sourceId: String) async throws -> HandoffReceiptPayload
@@ -92,45 +112,75 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         self.executableOverride = executableOverride
     }
 
-    public static func candidateExecutablePaths(
+    public static func candidateExecutableEntries(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         defaults: UserDefaults = .standard,
         fileManager: FileManager = .default
-    ) -> [String] {
-        var candidates: [String] = []
+    ) -> [(path: String, source: CLIResolutionSource)] {
+        var entries: [(path: String, source: CLIResolutionSource)] = []
         var seen = Set<String>()
 
-        func appendCandidate(_ raw: String?) {
+        func appendCandidate(_ raw: String?, source: CLIResolutionSource) {
             guard let raw else { return }
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             let expanded = (trimmed as NSString).expandingTildeInPath
             if seen.insert(expanded).inserted {
-                candidates.append(expanded)
+                entries.append((expanded, source))
             }
         }
 
-        appendCandidate(environment["CODEX_AGY_SYNC_BIN"])
-        appendCandidate(defaults.string(forKey: cliExecutableDefaultsKey))
+        appendCandidate(environment["CODEX_AGY_SYNC_BIN"], source: .envOverride)
+        appendCandidate(defaults.string(forKey: cliExecutableDefaultsKey), source: .customPath)
 
         if let pathEnv = environment["PATH"], !pathEnv.isEmpty {
             for dir in pathEnv.split(separator: ":") {
                 let path = URL(fileURLWithPath: String(dir))
                     .appendingPathComponent("codex-agy-sync")
                     .path
-                appendCandidate(path)
+                appendCandidate(path, source: .autoDiscovered)
             }
         }
 
         appendCandidate(
             fileManager.homeDirectoryForCurrentUser
                 .appendingPathComponent(".local/bin/codex-agy-sync")
-                .path
+                .path,
+            source: .autoDiscovered
         )
-        appendCandidate("/opt/homebrew/bin/codex-agy-sync")
-        appendCandidate("/usr/local/bin/codex-agy-sync")
+        appendCandidate("/opt/homebrew/bin/codex-agy-sync", source: .autoDiscovered)
+        appendCandidate("/usr/local/bin/codex-agy-sync", source: .autoDiscovered)
 
-        return candidates
+        return entries
+    }
+
+    public static func candidateExecutablePaths(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults = .standard,
+        fileManager: FileManager = .default
+    ) -> [String] {
+        candidateExecutableEntries(
+            environment: environment,
+            defaults: defaults,
+            fileManager: fileManager
+        ).map(\.path)
+    }
+
+    public static func resolveExecutableWithSource(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults = .standard,
+        fileManager: FileManager = .default
+    ) -> (url: URL?, source: CLIResolutionSource, searched: [String]) {
+        let entries = candidateExecutableEntries(
+            environment: environment,
+            defaults: defaults,
+            fileManager: fileManager
+        )
+        let searched = entries.map(\.path)
+        for entry in entries where fileManager.isExecutableFile(atPath: entry.path) {
+            return (URL(fileURLWithPath: entry.path), entry.source, searched)
+        }
+        return (nil, .missing, searched)
     }
 
     public static func resolveExecutableURL(
@@ -138,15 +188,26 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         defaults: UserDefaults = .standard,
         fileManager: FileManager = .default
     ) -> (url: URL?, searched: [String]) {
-        let candidates = candidateExecutablePaths(
+        let resolved = resolveExecutableWithSource(
             environment: environment,
             defaults: defaults,
             fileManager: fileManager
         )
-        for path in candidates where fileManager.isExecutableFile(atPath: path) {
-            return (URL(fileURLWithPath: path), candidates)
+        return (resolved.url, resolved.searched)
+    }
+
+    public static func mergedEnvironment(from environment: [String: String]) -> [String: String] {
+        var env = environment
+        let homeLocalBin = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin")
+            .path
+        let extraPathEntries = [homeLocalBin, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        var existing = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+        for entry in extraPathEntries where !existing.contains(entry) {
+            existing.append(entry)
         }
-        return (nil, candidates)
+        env["PATH"] = existing.joined(separator: ":")
+        return env
     }
 
     public func fetchFeed(limit: Int = 6) async throws -> MenubarFeedSnapshot {
@@ -187,24 +248,7 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         stateLock.lock()
         let suite = defaultsSuiteName
         stateLock.unlock()
-        if let suite, let custom = UserDefaults(suiteName: suite) {
-            return custom
-        }
-        return .standard
-    }
-
-    private func mergedProcessEnvironment() -> [String: String] {
-        var env = environment
-        let homeLocalBin = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin")
-            .path
-        let extraPathEntries = [homeLocalBin, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-        var existing = (env["PATH"] ?? "").split(separator: ":").map(String.init)
-        for entry in extraPathEntries where !existing.contains(entry) {
-            existing.append(entry)
-        }
-        env["PATH"] = existing.joined(separator: ":")
-        return env
+        return PreferencesStore.resolveDefaults(suiteName: suite, environment: environment)
     }
 
     private func runAndDecode<T: Decodable & Sendable>(
@@ -228,13 +272,13 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
             executableURL = url
         }
 
-        let childEnv = mergedProcessEnvironment()
+        let childEnv = Self.mergedEnvironment(from: environment)
         let timeout = timeoutSeconds
 
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    let output = try Self.executeProcessSync(
+                    let output = try Self.runProcessSync(
                         executableURL: executableURL,
                         arguments: arguments,
                         environment: childEnv,
@@ -268,7 +312,7 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         }
     }
 
-    private static func executeProcessSync(
+    public static func runProcessSync(
         executableURL: URL,
         arguments: [String],
         environment: [String: String],

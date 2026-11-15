@@ -14,24 +14,43 @@ public final class HandoffViewModel: ObservableObject {
     @Published public private(set) var banner: StatusBanner?
     @Published public private(set) var cliMissing: Bool = false
 
+    public let preferencesStore: PreferencesStore
     public var onDidHandoffAndActivate: (() -> Void)?
 
     private let cli: any CLIRunnerProtocol
     private let activator: any AppActivating
-    private let feedLimit: Int
-    private let defaults: UserDefaults
+    private let explicitFeedLimit: Int?
+
+    public var needsAttentionBadge: Bool {
+        guard let state = snapshot?.hero?.state else { return false }
+        return state == .interruptedStopped || state == .pendingReconcile
+    }
+
+    public var effectiveFeedLimit: Int {
+        explicitFeedLimit ?? preferencesStore.preferences.recentFeedLimit
+    }
 
     public init(
         cli: any CLIRunnerProtocol = SubprocessCLIClient(),
         activator: any AppActivating = WorkspaceAppActivator(),
-        feedLimit: Int = 6,
-        defaults: UserDefaults = .standard,
+        preferencesStore: PreferencesStore? = nil,
+        feedLimit: Int? = nil,
+        defaults: UserDefaults? = nil,
         onDidHandoffAndActivate: (() -> Void)? = nil
     ) {
         self.cli = cli
         self.activator = activator
-        self.feedLimit = feedLimit
-        self.defaults = defaults
+        if let preferencesStore {
+            self.preferencesStore = preferencesStore
+        } else if let defaults {
+            self.preferencesStore = PreferencesStore(
+                defaults: defaults,
+                loginItemManager: NoOpLoginItemManager()
+            )
+        } else {
+            self.preferencesStore = PreferencesStore()
+        }
+        self.explicitFeedLimit = feedLimit
         self.onDidHandoffAndActivate = onDidHandoffAndActivate
     }
 
@@ -77,8 +96,10 @@ public final class HandoffViewModel: ObservableObject {
                 let shortTarget = receipt.targetId.map { " (\($0.prefix(8)))" } ?? ""
                 let reusedNote = receipt.status == "no_op" ? "（no_op · 沿用已有会话）" : ""
                 banner = .success("已交接至 \(targetName)\(shortTarget)\(reusedNote) · \(item.title)")
-                _ = await activator.activateTarget(host: item.targetHost)
-                onDidHandoffAndActivate?()
+                if preferencesStore.preferences.activateTargetAppAfterHandoff {
+                    _ = await activator.activateTarget(host: item.targetHost)
+                    onDidHandoffAndActivate?()
+                }
             } else {
                 banner = .error(
                     receipt.error ?? "交接处于挂起状态（pending），请在 \(item.targetDisplayName) 打开或稍后核对。"
@@ -134,7 +155,7 @@ public final class HandoffViewModel: ObservableObject {
     public func setCustomCLIPath(_ path: String) {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        defaults.set(trimmed, forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
+        preferencesStore.setCustomCLIPath(trimmed)
         cliMissing = false
         banner = nil
         Task {
@@ -148,7 +169,7 @@ public final class HandoffViewModel: ObservableObject {
         defer { isLoading = false }
 
         do {
-            let nextSnapshot = try await cli.fetchFeed(limit: feedLimit)
+            let nextSnapshot = try await cli.fetchFeed(limit: effectiveFeedLimit)
             snapshot = nextSnapshot
             cliMissing = false
             if !preserveBanner {
