@@ -6,14 +6,29 @@ public enum MenubarCandidateState: String, Codable, Sendable, Equatable, CaseIte
     case pendingReconcile = "pending_reconcile"
     case alreadyHanded = "already_handed"
     case activeRunning = "active_running"
+
+    public var statusBadgeText: String {
+        switch self {
+        case .interruptedStopped:
+            return "未完成回复"
+        case .completedReady:
+            return "可继续"
+        case .pendingReconcile:
+            return "待确认"
+        case .alreadyHanded:
+            return "已同步"
+        case .activeRunning:
+            return "对话中"
+        }
+    }
 }
 
 public enum HostDisplayMeta {
     public static func displayName(for host: String) -> String {
-        switch host.lowercased() {
+        switch host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "codex":
             return "Codex"
-        case "antigravity":
+        case "antigravity", "agy":
             return "Antigravity"
         default:
             return host
@@ -21,18 +36,52 @@ public enum HostDisplayMeta {
     }
 
     public static func shortTag(for host: String) -> String {
-        switch host.lowercased() {
+        switch host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "codex":
             return "CDX"
-        case "antigravity":
+        case "antigravity", "agy":
             return "AGY"
         default:
             return host.uppercased()
         }
     }
 
+    public static func monogram(for host: String) -> String {
+        switch host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "antigravity", "agy":
+            return "A"
+        default:
+            return "C"
+        }
+    }
+
     public static func directionBadge(from sourceHost: String, to targetHost: String) -> String {
         "\(shortTag(for: sourceHost)) → \(shortTag(for: targetHost))"
+    }
+}
+
+public struct MenubarRowPresentation: Equatable, Sendable {
+    public let monogram: String
+    public let isActionable: Bool
+    public let subtitle: String
+    public let selectedActionTitle: String
+    public let unselectedTrailingTitle: String
+    public let accessibilityLabel: String
+
+    public init(
+        monogram: String,
+        isActionable: Bool,
+        subtitle: String,
+        selectedActionTitle: String,
+        unselectedTrailingTitle: String,
+        accessibilityLabel: String
+    ) {
+        self.monogram = monogram
+        self.isActionable = isActionable
+        self.subtitle = subtitle
+        self.selectedActionTitle = selectedActionTitle
+        self.unselectedTrailingTitle = unselectedTrailingTitle
+        self.accessibilityLabel = accessibilityLabel
     }
 }
 
@@ -56,6 +105,10 @@ public struct MenubarSessionItem: Codable, Sendable, Equatable, Identifiable {
 
     public var id: String { "\(host):\(sessionId)" }
 
+    public var sourceDisplayName: String {
+        HostDisplayMeta.displayName(for: host)
+    }
+
     public var targetDisplayName: String {
         HostDisplayMeta.displayName(for: targetHost)
     }
@@ -66,6 +119,89 @@ public struct MenubarSessionItem: Codable, Sendable, Equatable, Identifiable {
 
     public var directionBadge: String {
         HostDisplayMeta.directionBadge(from: host, to: targetHost)
+    }
+
+    public func presentation(nowEpoch: Double? = nil) -> MenubarRowPresentation {
+        let monogram = HostDisplayMeta.monogram(for: host)
+        let isActionable: Bool
+        let subtitle: String
+        let selectedActionTitle: String
+        let unselectedTrailingTitle: String
+
+        switch state {
+        case .interruptedStopped:
+            isActionable = true
+            subtitle = "\(workspaceName) · \(turnCount) 轮 · 未完成回复"
+            selectedActionTitle = "用 \(targetDisplayName) 继续"
+            unselectedTrailingTitle = "→ \(targetDisplayName)"
+        case .completedReady:
+            isActionable = true
+            var base = "\(workspaceName) · \(turnCount) 轮"
+            if let nowEpoch, sortEpoch > 0, nowEpoch >= sortEpoch {
+                base += Self.relativeAgeSuffix(elapsedSeconds: nowEpoch - sortEpoch)
+            }
+            subtitle = base
+            selectedActionTitle = "用 \(targetDisplayName) 继续"
+            unselectedTrailingTitle = "→ \(targetDisplayName)"
+        case .pendingReconcile:
+            isActionable = true
+            subtitle = "\(workspaceName) · 上次切换未完成确认"
+            selectedActionTitle = "重新同步状态"
+            unselectedTrailingTitle = "重试"
+        case .alreadyHanded:
+            isActionable = false
+            subtitle = "\(workspaceName) · \(turnCount) 轮 · 已同步"
+            selectedActionTitle = "已同步"
+            unselectedTrailingTitle = "已同步"
+        case .activeRunning:
+            isActionable = false
+            subtitle = "\(workspaceName) · 对话进行中"
+            selectedActionTitle = "对话中"
+            unselectedTrailingTitle = "对话中"
+        }
+
+        let accessibilityLabel = isActionable
+            ? "\(selectedActionTitle) · \(title)"
+            : "\(title) · \(unselectedTrailingTitle)"
+
+        return MenubarRowPresentation(
+            monogram: monogram,
+            isActionable: isActionable,
+            subtitle: subtitle,
+            selectedActionTitle: selectedActionTitle,
+            unselectedTrailingTitle: unselectedTrailingTitle,
+            accessibilityLabel: accessibilityLabel
+        )
+    }
+
+    public func matchesSearchQuery(_ rawQuery: String) -> Bool {
+        let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        let needle = trimmed.lowercased()
+        let haystacks = [
+            title,
+            workspaceName,
+            workspacePath,
+            host,
+            sourceDisplayName,
+            targetDisplayName,
+            presentation().subtitle,
+        ]
+        return haystacks.contains { $0.lowercased().contains(needle) }
+    }
+
+    private static func relativeAgeSuffix(elapsedSeconds: Double) -> String {
+        let seconds = max(0, Int(elapsedSeconds))
+        if seconds < 60 {
+            return " · 刚刚"
+        }
+        if seconds < 3600 {
+            return " · \(max(1, seconds / 60)) 分钟前"
+        }
+        if seconds < 86_400 {
+            return " · \(max(1, seconds / 3600)) 小时前"
+        }
+        return " · \(max(1, seconds / 86_400)) 天前"
     }
 
     public init(

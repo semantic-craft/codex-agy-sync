@@ -1,4 +1,5 @@
 import Carbon
+import CodexAgyHandoffCore
 import Foundation
 
 private final class HotKeyCallbackBox: @unchecked Sendable {
@@ -46,6 +47,7 @@ private func globalHotKeyEventCallback(
 final class GlobalHotKey {
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
+    private var activeShortcut: HotKeyShortcut?
     private let callbackBox: HotKeyCallbackBox
 
     init(onTrigger: @escaping @MainActor @Sendable () -> Void) {
@@ -53,25 +55,45 @@ final class GlobalHotKey {
     }
 
     @discardableResult
-    func register() -> Bool {
-        guard hotKeyRef == nil else { return true }
+    func register(shortcut: HotKeyShortcut = .defaultShortcut) -> Bool {
+        reconfigure(shortcut)
+    }
 
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
-        let userData = Unmanaged.passUnretained(callbackBox).toOpaque()
-        var installedHandler: EventHandlerRef?
-        let installStatus = InstallEventHandler(
-            GetApplicationEventTarget(),
-            globalHotKeyEventCallback,
-            1,
-            &eventType,
-            userData,
-            &installedHandler
-        )
-        guard installStatus == noErr, let installedHandler else {
-            return false
+    @discardableResult
+    func reconfigure(_ shortcut: HotKeyShortcut) -> Bool {
+        if !shortcut.isEnabled {
+            unregister()
+            activeShortcut = shortcut
+            return true
+        }
+        if activeShortcut == shortcut, hotKeyRef != nil {
+            return true
+        }
+
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
+
+        if handlerRef == nil {
+            var eventType = EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyPressed)
+            )
+            let userData = Unmanaged.passUnretained(callbackBox).toOpaque()
+            var installedHandler: EventHandlerRef?
+            let installStatus = InstallEventHandler(
+                GetApplicationEventTarget(),
+                globalHotKeyEventCallback,
+                1,
+                &eventType,
+                userData,
+                &installedHandler
+            )
+            guard installStatus == noErr, let installedHandler else {
+                return false
+            }
+            self.handlerRef = installedHandler
         }
 
         let hotKeyID = EventHotKeyID(
@@ -80,20 +102,19 @@ final class GlobalHotKey {
         )
         var registeredRef: EventHotKeyRef?
         let registerStatus = RegisterEventHotKey(
-            UInt32(kVK_ANSI_H),
-            UInt32(controlKey | optionKey),
+            shortcut.keyCode,
+            shortcut.carbonModifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
             &registeredRef
         )
         guard registerStatus == noErr, let registeredRef else {
-            RemoveEventHandler(installedHandler)
             return false
         }
 
-        self.handlerRef = installedHandler
         self.hotKeyRef = registeredRef
+        self.activeShortcut = shortcut
         return true
     }
 
@@ -106,5 +127,6 @@ final class GlobalHotKey {
             RemoveEventHandler(handlerRef)
             self.handlerRef = nil
         }
+        self.activeShortcut = nil
     }
 }

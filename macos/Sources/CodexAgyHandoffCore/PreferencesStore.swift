@@ -29,7 +29,7 @@ public enum MenuBarIconStyle: String, Codable, CaseIterable, Sendable, Identifia
         case .relayBridge:
             return "双竖轨与S弯接力桥"
         case .pulseBolt:
-            return "极速切端与中断抢救"
+            return "极速切端与无缝续接"
         case .twinArrows:
             return "双端互导对向箭头"
         case .syncOrbit:
@@ -38,7 +38,7 @@ public enum MenuBarIconStyle: String, Codable, CaseIterable, Sendable, Identifia
     }
 
     public var accessibilityDescription: String {
-        "会话接力（\(displayName)）"
+        "对话接力（\(displayName)）"
     }
 }
 

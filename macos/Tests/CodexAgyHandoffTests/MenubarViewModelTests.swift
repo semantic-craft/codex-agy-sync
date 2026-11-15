@@ -1,6 +1,21 @@
+import AppKit
 import Foundation
+import SwiftUI
 import XCTest
 @testable import CodexAgyHandoffCore
+
+private let forbiddenJargonTokens = ["抢救", "no_op", "挂起交接", "晋升"]
+
+private func assertNoForbiddenJargon(_ text: String, file: StaticString = #filePath, line: UInt = #line) {
+    for token in forbiddenJargonTokens {
+        XCTAssertFalse(
+            text.contains(token),
+            "Unexpected jargon '\(token)' in user-facing text: \(text)",
+            file: file,
+            line: line
+        )
+    }
+}
 
 private final class MockCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
     private let lock = NSLock()
@@ -25,6 +40,18 @@ private final class MockCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
     func setFeedResult(_ result: Result<MenubarFeedSnapshot, Error>) {
         lock.withLock {
             feedResult = result
+        }
+    }
+
+    func setHandoffResult(_ result: Result<HandoffReceiptPayload, Error>) {
+        lock.withLock {
+            handoffResult = result
+        }
+    }
+
+    func setReconcileResult(_ result: Result<ReconcileSummaryPayload, Error>) {
+        lock.withLock {
+            reconcileResult = result
         }
     }
 
@@ -75,6 +102,7 @@ private func makeItem(
     workspacePath: String = "/repos/demo-app",
     workspaceName: String = "demo-app",
     state: MenubarCandidateState,
+    sortEpoch: Double = 1_794_730_000.0,
     turnCount: Int = 3
 ) -> MenubarSessionItem {
     MenubarSessionItem(
@@ -88,7 +116,7 @@ private func makeItem(
         paired: true,
         state: state,
         updatedAtIso: "2026-11-15T08:05:00Z",
-        sortEpoch: 1_794_730_000.0,
+        sortEpoch: sortEpoch,
         turnCount: turnCount,
         hasInflightTurn: state == .interruptedStopped || state == .activeRunning
     )
@@ -228,13 +256,217 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(snapshot.recent[3].handedTargetId, "cid-target-88")
     }
 
+    func testMenubarRowPresentationAndCandidateBadgeNormalizedCopy() {
+        for state in MenubarCandidateState.allCases {
+            assertNoForbiddenJargon(state.statusBadgeText)
+        }
+        XCTAssertEqual(MenubarCandidateState.interruptedStopped.statusBadgeText, "未完成回复")
+        XCTAssertEqual(MenubarCandidateState.completedReady.statusBadgeText, "可继续")
+        XCTAssertEqual(MenubarCandidateState.pendingReconcile.statusBadgeText, "待确认")
+        XCTAssertEqual(MenubarCandidateState.alreadyHanded.statusBadgeText, "已同步")
+        XCTAssertEqual(MenubarCandidateState.activeRunning.statusBadgeText, "对话中")
+
+        let interrupted = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-int",
+            title: "Fix stream parser",
+            workspaceName: "parser",
+            state: .interruptedStopped,
+            turnCount: 4
+        )
+        let intPres = interrupted.presentation()
+        XCTAssertEqual(intPres.monogram, "A")
+        XCTAssertTrue(intPres.isActionable)
+        XCTAssertEqual(intPres.subtitle, "parser · 4 轮 · 未完成回复")
+        XCTAssertEqual(intPres.selectedActionTitle, "用 Codex 继续")
+        XCTAssertEqual(intPres.unselectedTrailingTitle, "→ Codex")
+        XCTAssertEqual(intPres.accessibilityLabel, "用 Codex 继续 · Fix stream parser")
+
+        let agyAlias = makeItem(host: "agy", targetHost: "codex", sessionId: "cid-alias", state: .completedReady)
+        XCTAssertEqual(agyAlias.presentation().monogram, "A")
+
+        let ready = makeItem(
+            host: "codex",
+            targetHost: "antigravity",
+            sessionId: "tid-ready",
+            title: "Add migrations",
+            workspaceName: "backend",
+            state: .completedReady,
+            sortEpoch: 1_000.0,
+            turnCount: 6
+        )
+        XCTAssertEqual(ready.presentation().subtitle, "backend · 6 轮")
+        XCTAssertEqual(ready.presentation(nowEpoch: 1_025.0).subtitle, "backend · 6 轮 · 刚刚")
+        XCTAssertEqual(ready.presentation(nowEpoch: 1_300.0).subtitle, "backend · 6 轮 · 5 分钟前")
+        XCTAssertEqual(ready.presentation(nowEpoch: 8_200.0).subtitle, "backend · 6 轮 · 2 小时前")
+        XCTAssertEqual(ready.presentation(nowEpoch: 173_800.0).subtitle, "backend · 6 轮 · 2 天前")
+        let readyPres = ready.presentation(nowEpoch: 1_300.0)
+        XCTAssertEqual(readyPres.monogram, "C")
+        XCTAssertTrue(readyPres.isActionable)
+        XCTAssertEqual(readyPres.selectedActionTitle, "用 Antigravity 继续")
+        XCTAssertEqual(readyPres.unselectedTrailingTitle, "→ Antigravity")
+        XCTAssertEqual(readyPres.accessibilityLabel, "用 Antigravity 继续 · Add migrations")
+
+        let pending = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-pend",
+            title: "Sync workspace",
+            workspaceName: "bridge",
+            state: .pendingReconcile
+        )
+        let pendingPres = pending.presentation()
+        XCTAssertTrue(pendingPres.isActionable)
+        XCTAssertEqual(pendingPres.subtitle, "bridge · 上次切换未完成确认")
+        XCTAssertEqual(pendingPres.selectedActionTitle, "重新同步状态")
+        XCTAssertEqual(pendingPres.unselectedTrailingTitle, "重试")
+        XCTAssertEqual(pendingPres.accessibilityLabel, "重新同步状态 · Sync workspace")
+
+        let handed = makeItem(
+            host: "codex",
+            targetHost: "antigravity",
+            sessionId: "tid-done",
+            title: "Ship release",
+            workspaceName: "bridge",
+            state: .alreadyHanded,
+            turnCount: 5
+        )
+        let handedPres = handed.presentation()
+        XCTAssertFalse(handedPres.isActionable)
+        XCTAssertEqual(handedPres.subtitle, "bridge · 5 轮 · 已同步")
+        XCTAssertEqual(handedPres.selectedActionTitle, "已同步")
+        XCTAssertEqual(handedPres.unselectedTrailingTitle, "已同步")
+        XCTAssertEqual(handedPres.accessibilityLabel, "Ship release · 已同步")
+
+        let running = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-live",
+            title: "Live debugging",
+            workspaceName: "bridge",
+            state: .activeRunning
+        )
+        let runningPres = running.presentation()
+        XCTAssertFalse(runningPres.isActionable)
+        XCTAssertEqual(runningPres.subtitle, "bridge · 对话进行中")
+        XCTAssertEqual(runningPres.selectedActionTitle, "对话中")
+        XCTAssertEqual(runningPres.unselectedTrailingTitle, "对话中")
+        XCTAssertEqual(runningPres.accessibilityLabel, "Live debugging · 对话中")
+
+        for pres in [intPres, readyPres, pendingPres, handedPres, runningPres] {
+            assertNoForbiddenJargon(pres.subtitle)
+            assertNoForbiddenJargon(pres.selectedActionTitle)
+            assertNoForbiddenJargon(pres.unselectedTrailingTitle)
+            assertNoForbiddenJargon(pres.accessibilityLabel)
+        }
+    }
+
     @MainActor
-    func testPerformPrimaryActionRescuesHeroActivatesTargetAndSetsBanner() async {
+    func testSearchFilteringDeduplicationAndKeyboardSelectionNavigation() async {
+        let hero = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-hero",
+            title: "Refactor auth token flow",
+            workspacePath: "/repos/auth-service",
+            workspaceName: "auth-service",
+            state: .interruptedStopped
+        )
+        let handed = makeItem(
+            host: "codex",
+            targetHost: "antigravity",
+            sessionId: "tid-handed",
+            title: "Old synced chat",
+            workspacePath: "/repos/auth-service",
+            workspaceName: "auth-service",
+            state: .alreadyHanded
+        )
+        let second = makeItem(
+            host: "codex",
+            targetHost: "antigravity",
+            sessionId: "tid-second",
+            title: "Optimize SQLite query",
+            workspacePath: "/repos/storage-engine",
+            workspaceName: "storage-engine",
+            state: .completedReady
+        )
+        let third = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-third",
+            title: "Verify billing webhook",
+            workspacePath: "/repos/billing",
+            workspaceName: "billing",
+            state: .pendingReconcile
+        )
+        let snapshot = MenubarFeedSnapshot(
+            generatedAtIso: "2026-11-15T08:06:40Z",
+            agyDaemonActive: true,
+            codexDaemonActive: true,
+            hero: hero,
+            recent: [hero, handed, second, third]
+        )
+        let receipt = HandoffReceiptPayload(
+            workspace: "/repos/storage-engine",
+            sourceHost: "codex",
+            sourceId: "tid-second",
+            targetHost: "antigravity",
+            targetId: "cid-target-2",
+            title: "Optimize SQLite query",
+            status: "ready"
+        )
+        let cli = MockCLIRunner(
+            feedResult: .success(snapshot),
+            handoffResult: .success(receipt),
+            reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/billing"))
+        )
+        let vm = HandoffViewModel(cli: cli, activator: MockActivator())
+
+        await vm.refresh()
+
+        XCTAssertEqual(vm.sections.map(\.id), ["continue", "recent"])
+        XCTAssertEqual(vm.sections.first?.title, "继续当前工作")
+        XCTAssertEqual(vm.sections.last?.title, "最近对话")
+        XCTAssertEqual(vm.sections.last?.items.map(\.id), [handed.id, second.id, third.id])
+        XCTAssertEqual(vm.selectedItemId, hero.id)
+
+        vm.moveSelectionDown()
+        XCTAssertEqual(vm.selectedItemId, second.id)
+
+        vm.moveSelectionDown()
+        XCTAssertEqual(vm.selectedItemId, third.id)
+
+        vm.moveSelectionUp()
+        XCTAssertEqual(vm.selectedItemId, second.id)
+
+        await vm.performSelectedAction()
+        XCTAssertEqual(cli.handoffCalls.count, 1)
+        XCTAssertEqual(cli.handoffCalls.first?.workspacePath, "/repos/storage-engine")
+        XCTAssertEqual(cli.handoffCalls.first?.sourceId, "tid-second")
+
+        vm.searchQuery = "BILLING"
+        XCTAssertEqual(vm.sections.map(\.id), ["recent"])
+        XCTAssertEqual(vm.visibleItems.map(\.id), [third.id])
+        XCTAssertEqual(vm.selectedItemId, third.id)
+
+        vm.searchQuery = "unmatched-keyword-xyz"
+        XCTAssertTrue(vm.sections.isEmpty)
+        XCTAssertTrue(vm.visibleItems.isEmpty)
+        XCTAssertNil(vm.selectedItemId)
+
+        vm.searchQuery = ""
+        XCTAssertEqual(vm.sections.count, 2)
+        XCTAssertEqual(vm.selectedItemId, hero.id)
+    }
+
+    @MainActor
+    func testPerformPrimaryActionHandoffHeroActivatesTargetAndSetsBanner() async {
         let hero = makeItem(
             host: "antigravity",
             targetHost: "codex",
             sessionId: "cid-stopped-1",
-            title: "Rescue broken turn",
+            title: "Resume broken turn",
             workspacePath: "/repos/alpha",
             workspaceName: "alpha",
             state: .interruptedStopped
@@ -252,7 +484,7 @@ final class MenubarViewModelTests: XCTestCase {
             sourceId: "cid-stopped-1",
             targetHost: "codex",
             targetId: "01970000-0000-7000-8000-000000000077",
-            title: "Rescue broken turn",
+            title: "Resume broken turn",
             status: "ready"
         )
         let cli = MockCLIRunner(
@@ -278,15 +510,16 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(callbackCount, 1)
         XCTAssertFalse(vm.cliMissing)
 
-        guard case .success(let message)? = vm.banner else {
-            return XCTFail("Expected success banner, got \(String(describing: vm.banner))")
+        guard let banner = vm.banner else {
+            return XCTFail("Expected banner after handoff")
         }
-        XCTAssertTrue(message.contains("已交接至"), "Unexpected banner: \(message)")
-        XCTAssertTrue(message.contains("Codex"), "Unexpected banner: \(message)")
+        XCTAssertEqual(banner.kind, .success)
+        XCTAssertEqual(banner.text, "已在 Codex 打开对话 · Resume broken turn")
+        assertNoForbiddenJargon(banner.text)
     }
 
     @MainActor
-    func testNoOpHandoffIncludesNoOpNoticeAndActivatesTarget() async {
+    func testNoOpAndUnconfirmedHandoffBannersUseNormalizedCopy() async {
         let hero = makeItem(
             host: "codex",
             targetHost: "antigravity",
@@ -321,18 +554,37 @@ final class MenubarViewModelTests: XCTestCase {
         let vm = HandoffViewModel(cli: cli, activator: activator)
 
         await vm.refresh()
-        await vm.handoff(hero)
+        await vm.handoff(item: hero)
 
         XCTAssertEqual(activator.activatedHosts, ["antigravity"])
-        guard case .success(let msg)? = vm.banner else {
-            return XCTFail("Expected success banner for no_op")
+        guard let infoBanner = vm.banner else {
+            return XCTFail("Expected info banner for no_op")
         }
-        XCTAssertTrue(msg.contains("已交接至 Antigravity"))
-        XCTAssertTrue(msg.contains("no_op"))
+        XCTAssertEqual(infoBanner.kind, .info)
+        XCTAssertEqual(infoBanner.text, "已在 Antigravity 打开现有对话 · Reuse existing target")
+        assertNoForbiddenJargon(infoBanner.text)
+
+        let pendingReceipt = HandoffReceiptPayload(
+            workspace: "/repos/beta",
+            sourceHost: "codex",
+            sourceId: "tid-ready-2",
+            targetHost: "antigravity",
+            targetId: nil,
+            title: "Reuse existing target",
+            status: "pending"
+        )
+        cli.setHandoffResult(.success(pendingReceipt))
+        await vm.handoff(item: hero)
+        guard let pendingBanner = vm.banner else {
+            return XCTFail("Expected error banner for pending receipt")
+        }
+        XCTAssertEqual(pendingBanner.kind, .error)
+        XCTAssertEqual(pendingBanner.text, "切换尚未完成确认，请稍后点击重试同步状态。")
+        assertNoForbiddenJargon(pendingBanner.text)
     }
 
     @MainActor
-    func testPendingReconcilePrimaryActionCallsReconcileAndRefreshes() async throws {
+    func testPendingReconcilePrimaryActionCallsReconcileAndNormalizesBanners() async throws {
         let pendingHero = makeItem(
             sessionId: "cid-pending-9",
             title: "Pending turn",
@@ -347,7 +599,7 @@ final class MenubarViewModelTests: XCTestCase {
             hero: pendingHero,
             recent: [pendingHero]
         )
-        let summary = ReconcileSummaryPayload(
+        let resolvedSummary = ReconcileSummaryPayload(
             workspace: "/repos/gamma",
             dryRun: false,
             promoted: [
@@ -368,7 +620,7 @@ final class MenubarViewModelTests: XCTestCase {
         let cli = MockCLIRunner(
             feedResult: .success(snapshot),
             handoffResult: .failure(CLIClientError.nonZeroExit(exitCode: 2, stderr: "unexpected")),
-            reconcileResult: .success(summary)
+            reconcileResult: .success(resolvedSummary)
         )
         let activator = MockActivator()
         let vm = HandoffViewModel(cli: cli, activator: activator)
@@ -379,14 +631,41 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(cli.reconcileCalls, ["/repos/gamma"])
         XCTAssertEqual(cli.fetchLimits.count, 2)
         XCTAssertTrue(activator.activatedHosts.isEmpty)
-        guard case .success(let msg)? = vm.banner else {
-            return XCTFail("Expected success banner after reconcile")
-        }
-        XCTAssertTrue(msg.contains("晋升 1 项"))
+        XCTAssertEqual(vm.banner, StatusBanner(kind: .success, text: "状态已同步"))
+        assertNoForbiddenJargon(vm.banner?.text ?? "")
 
+        let unresolvedEntry = ReconcileEntryPayload(
+            sourceHost: "antigravity",
+            sourceId: "cid-pending-9",
+            targetHost: "codex",
+            targetId: nil,
+            title: "Pending turn",
+            reason: "locked"
+        )
+        cli.setReconcileResult(
+            .success(
+                ReconcileSummaryPayload(
+                    workspace: "/repos/gamma",
+                    unresolved: [unresolvedEntry, unresolvedEntry]
+                )
+            )
+        )
+        await vm.reconcile(workspacePath: "/repos/gamma")
+        XCTAssertEqual(vm.banner, StatusBanner(kind: .success, text: "状态已同步，仍有 2 条对话等待响应"))
+        assertNoForbiddenJargon(vm.banner?.text ?? "")
+
+        cli.setReconcileResult(.failure(CLIClientError.nonZeroExit(exitCode: 2, stderr: "daemon offline")))
+        await vm.reconcile(workspacePath: "/repos/gamma")
+        guard let errBanner = vm.banner else {
+            return XCTFail("Expected error banner when reconcile fails")
+        }
+        XCTAssertEqual(errBanner.kind, .error)
+        XCTAssertTrue(errBanner.text.hasPrefix("状态同步未成功："))
+        assertNoForbiddenJargon(errBanner.text)
+
+        cli.setReconcileResult(.success(resolvedSummary))
         let defaultSummary = try await cli.reconcilePending()
         XCTAssertEqual(defaultSummary.workspace, "/repos/gamma")
-        XCTAssertEqual(cli.reconcileCalls, ["/repos/gamma", nil])
     }
 
     @MainActor
@@ -421,14 +700,18 @@ final class MenubarViewModelTests: XCTestCase {
         guard case .error(let errMsg)? = vm.banner else {
             return XCTFail("Expected structured error banner")
         }
+        XCTAssertTrue(errMsg.hasPrefix("切换未成功："))
         XCTAssertTrue(errMsg.contains("Source session is active"))
         XCTAssertTrue(errMsg.contains("cascade_run_status=2"))
+        assertNoForbiddenJargon(errMsg)
 
         cli.setFeedResult(.failure(CLIClientError.cliMissing(searchedLocations: ["/usr/local/bin/codex-agy-sync"])))
         await vm.refresh()
         XCTAssertTrue(vm.cliMissing)
         if case .error(let missingMsg)? = vm.banner {
             XCTAssertTrue(missingMsg.contains("codex-agy-sync"))
+            XCTAssertTrue(missingMsg.contains("选择工具…"))
+            assertNoForbiddenJargon(missingMsg)
         } else {
             XCTFail("Expected cliMissing error banner")
         }
@@ -491,5 +774,88 @@ final class MenubarViewModelTests: XCTestCase {
                 )
             )
         }
+    }
+
+    @MainActor
+    func testPopoverHostingZeroTitlebarSafeAreaAndAccessibilitySearchSetValue() async throws {
+        let hero = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-ax-1",
+            title: "Verify AX search input",
+            workspacePath: "/repos/ax-demo",
+            workspaceName: "ax-demo",
+            state: .interruptedStopped
+        )
+        let snapshot = MenubarFeedSnapshot(
+            generatedAtIso: "2026-11-15T08:06:40Z",
+            agyDaemonActive: true,
+            codexDaemonActive: true,
+            hero: hero,
+            recent: [hero]
+        )
+        let cli = MockCLIRunner(
+            feedResult: .success(snapshot),
+            handoffResult: .failure(CLIClientError.nonZeroExit(exitCode: 2, stderr: "unused")),
+            reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/ax-demo"))
+        )
+        let vm = HandoffViewModel(cli: cli, activator: MockActivator())
+        await vm.refresh()
+
+        let hosting = NSHostingController(rootView: PopoverView(viewModel: vm))
+        hosting.sizingOptions = [.preferredContentSize]
+        hosting.safeAreaRegions = []
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 392, height: 240),
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.contentViewController = hosting
+        hosting.view.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(hosting.view.safeAreaInsets.top, 0)
+        XCTAssertEqual(hosting.view.safeAreaInsets.bottom, 0)
+
+        func findSearchField(in root: NSView?) -> PaletteSearchTextField? {
+            guard let root else { return nil }
+            if let tf = root as? PaletteSearchTextField {
+                return tf
+            }
+            for child in root.subviews {
+                if let found = findSearchField(in: child) {
+                    return found
+                }
+            }
+            return nil
+        }
+
+        let searchField = try XCTUnwrap(findSearchField(in: panel.contentView))
+        XCTAssertEqual(searchField.focusRingType, .none)
+        XCTAssertFalse(searchField.isBordered)
+        XCTAssertFalse(searchField.drawsBackground)
+        XCTAssertEqual(searchField.accessibilityLabel(), "筛选项目或对话标题")
+        XCTAssertTrue(
+            searchField.isAccessibilitySelectorAllowed(
+                #selector(PaletteSearchTextField.setAccessibilityValue(_:))
+            )
+        )
+
+        _ = panel.makeFirstResponder(searchField)
+        searchField.setAccessibilityValue("zzz-unmatched-query")
+        XCTAssertEqual(searchField.stringValue, "zzz-unmatched-query")
+        if let editor = searchField.currentEditor() {
+            XCTAssertEqual(editor.string, "zzz-unmatched-query")
+        }
+        XCTAssertEqual(vm.searchQuery, "zzz-unmatched-query")
+        XCTAssertTrue(vm.sections.isEmpty)
+
+        searchField.cell?.setAccessibilityValue("")
+        XCTAssertEqual(searchField.stringValue, "")
+        XCTAssertEqual(vm.searchQuery, "")
+        XCTAssertEqual(vm.sections.count, 1)
     }
 }

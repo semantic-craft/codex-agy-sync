@@ -50,9 +50,9 @@ public enum CLIClientError: LocalizedError, Sendable, Equatable {
     public var errorDescription: String? {
         switch self {
         case .cliMissing:
-            return "未找到 codex-agy-sync CLI，请点击“选择 CLI…”指定可执行文件。"
+            return "未找到 codex-agy-sync 命令行工具，请点击“选择工具…”指定路径。"
         case .timedOut(_, let seconds):
-            return "CLI 执行超时（超过 \(Int(seconds)) 秒），请稍后重试。"
+            return "命令行工具响应超时（超过 \(Int(seconds)) 秒），请稍后重试。"
         case .structuredError(let payload, _):
             if let cause = payload.cause, !cause.isEmpty {
                 return "\(payload.message)（\(cause)）"
@@ -60,11 +60,11 @@ public enum CLIClientError: LocalizedError, Sendable, Equatable {
             return payload.message
         case .nonZeroExit(let code, let stderr):
             let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "CLI 返回错误码 \(code)" : "CLI 返回错误码 \(code)：\(trimmed)"
+            return trimmed.isEmpty ? "命令执行返回错误码 \(code)" : "命令执行返回错误码 \(code)：\(trimmed)"
         case .decodingFailed(let detail):
-            return "无法解析 CLI 输出：\(detail)"
+            return "无法解析工具输出：\(detail)"
         case .launchFailed(let detail):
-            return "无法启动 CLI：\(detail)"
+            return "无法启动命令行工具：\(detail)"
         }
     }
 }
