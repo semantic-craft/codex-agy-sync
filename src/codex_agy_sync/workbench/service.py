@@ -7,7 +7,9 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
+from ..bridge.handoff_reconcile import reconcile_workspace_handoffs
 from ..bridge.handoff_resolve import execute_handoff, validate_handoff_selector_flags
+from ..bridge.handoff_store import HandoffPendingError
 from ..bridge.paths_and_locks import HostEnvironmentPaths
 from ..bridge.state_machine import SyncDirection
 from ..workspace import (
@@ -191,9 +193,12 @@ class WorkbenchService:
         *,
         seed_workspaces: Sequence[str | Path] = (),
         ttl_seconds: float = 3.0,
+        eager_turn_budget: int = 24,
     ) -> None:
         self._paths = paths or HostEnvironmentPaths.discover()
-        self._indexer = WorkbenchIndexer(self._paths, seed_workspaces=seed_workspaces, ttl_seconds=ttl_seconds)
+        self._indexer = WorkbenchIndexer(
+            self._paths, seed_workspaces=seed_workspaces, ttl_seconds=ttl_seconds, eager_turn_budget=eager_turn_budget
+        )
 
     @property
     def paths(self) -> HostEnvironmentPaths:
@@ -206,13 +211,7 @@ class WorkbenchService:
         return self._indexer.get_snapshot(workspace_id=workspace_id, refresh=refresh)
 
     def get_work(self, work_id: str, refresh: bool = False) -> WorkCard:
-        cleaned = (work_id or "").strip()
-        if not cleaned:
-            raise ValueError("work_id is required.")
-        for work in self._indexer.get_snapshot(refresh=refresh).works:
-            if work.work_id == cleaned:
-                return work
-        raise KeyError(f"Work not found: {cleaned}")
+        return self._indexer.get_work(work_id, refresh=refresh)
 
     def search(
         self, query: str, *, workspace_id: str | None = None, scope: str = "all", limit: int = 50,
@@ -223,7 +222,7 @@ class WorkbenchService:
         if not q_norm:
             return []
         tokens = list(dict.fromkeys(tok for tok in re.split(r"\s+", q_norm) if tok))
-        snap = self._indexer.get_snapshot(workspace_id=workspace_id)
+        snap = self._indexer.get_snapshot_for_search(workspace_id=workspace_id, scope=norm_scope)
         ws_names = {ws.workspace_id: ws.name for ws in snap.workspaces}
         all_hits: list[SearchHit] = []
         for work in snap.works:
@@ -292,6 +291,8 @@ class WorkbenchService:
         chain: bool = False,
         title: str | None = None,
         pair_if_offline: bool = False,
+        auto_pair: bool = False,
+        include_interrupted: bool = False,
     ) -> dict[str, Any]:
         for field_name, field_val in (("source_id", source_id), ("direction", direction), ("title", title)):
             if field_val is not None and not isinstance(field_val, str):
@@ -305,17 +306,48 @@ class WorkbenchService:
             pick=False,
             require_selector=True,
         )
-        receipt, mutated = execute_handoff(
-            self._paths,
-            self._resolve_workspace_arg(workspace),
-            direction=SyncDirection(clean_dir) if clean_dir else None,
-            source_id=clean_source,
-            title=title,
-            latest=bool(latest),
-            chain=bool(chain),
-            pick=False,
-            pair_if_offline=bool(pair_if_offline),
-        )
+        try:
+            receipt, mutated = execute_handoff(
+                self._paths,
+                self._resolve_workspace_arg(workspace),
+                direction=SyncDirection(clean_dir) if clean_dir else None,
+                source_id=clean_source,
+                title=title,
+                latest=bool(latest),
+                chain=bool(chain),
+                pick=False,
+                pair_if_offline=bool(pair_if_offline),
+                auto_pair=bool(auto_pair),
+                include_interrupted=bool(include_interrupted),
+            )
+        except HandoffPendingError:
+            self._indexer.invalidate()
+            raise
+        except Exception:
+            if auto_pair or pair_if_offline:
+                self._indexer.invalidate()
+            raise
         if mutated:
             self._indexer.invalidate()
         return dataclasses.asdict(receipt)
+
+    def reconcile_handoffs(
+        self,
+        *,
+        workspace: str,
+        source_id: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Verify pending handoff receipts for a workspace and promote ready or clear absent entries."""
+        if source_id is not None and not isinstance(source_id, str):
+            raise ValueError("source_id must be a string.")
+        clean_source = (source_id or "").strip() or None
+        result = reconcile_workspace_handoffs(
+            self._paths,
+            self._resolve_workspace_arg(workspace),
+            source_id=clean_source,
+            dry_run=bool(dry_run),
+        )
+        if not dry_run and (result["promoted"] or result["cleared"]):
+            self._indexer.invalidate()
+        return result

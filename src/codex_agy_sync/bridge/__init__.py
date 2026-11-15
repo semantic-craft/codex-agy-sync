@@ -13,6 +13,10 @@ from .handoff import (
     publish_new_file,
     read_handoff_source,
 )
+from .handoff_reconcile import (
+    reconcile_workspace_handoffs,
+    summarize_workspace_handoffs,
+)
 from .handoff_resolve import (
     HandoffCancelledError,
     HandoffCandidate,
@@ -48,11 +52,17 @@ from .paths_and_locks import (
     open_readonly_sqlite,
     validated_child_path,
 )
+from .project_rpc import (
+    encode_agy_create_project_request,
+    register_agy_project_via_rpc,
+    register_codex_project_via_rpc,
+)
 from .registry import (
     PairedSessionDescriptor,
     ProjectRegistry,
     WorkspaceProjectBinding,
     guarded_pair_workspace,
+    pair_workspace_with_mode,
 )
 from .rpc import (
     AgyRpcReadResult,
@@ -136,6 +146,7 @@ __all__ = [
     "atomic_write_text",
     "deterministic_uuid",
     "diagnose_workspace_binding",
+    "encode_agy_create_project_request",
     "ensure_agy_conversation_db_schema",
     "ensure_agy_summaries_db_schema",
     "ensure_codex_state_db_schema",
@@ -158,9 +169,14 @@ __all__ = [
     "now_iso",
     "open_nonblocking_ex_flock",
     "open_readonly_sqlite",
+    "pair_workspace_with_mode",
     "publish_new_file",
     "read_handoff_source",
+    "reconcile_workspace_handoffs",
+    "register_agy_project_via_rpc",
+    "register_codex_project_via_rpc",
     "resolve_handoff_request",
+    "summarize_workspace_handoffs",
     "validate_handoff_selector_flags",
     "validated_child_path",
 ]

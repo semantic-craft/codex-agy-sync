@@ -11,14 +11,14 @@ Run the repository gate `./scripts/check` alongside this skill whenever source o
 
 ## Live Stage-1 workbench route
 
-For the live Stage-1 Local Workbench (`codex-agy-sync serve`) paired with the external prototype HTML, follow [Live Stage-1 workbench](./features/live-workbench.md). Supply the prototype artifact explicitly; it stays outside the repository.
+For the live Stage-1 Local Workbench (`codex-agy-sync serve`) using the packaged default UI (`src/codex_agy_sync/workbench/ui/index.html`, or an explicit external `--prototype <path>` override), follow [Live Stage-1 workbench](./features/live-workbench.md).
 
 ```bash
-python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py doctor --prototype "$PROTOTYPE"
-python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py suite --prototype "$PROTOTYPE"
+python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py doctor
+python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py suite
 ```
 
-This isolated suite runs `./bin/codex-agy-sync serve`, validates token/loopback security gates (`401`/`404` and `0o600` token-free lease), seeds paired/unpaired/excluded sandbox stores plus an ephemeral loopback AGY Connect-RPC stub (`target_daemon_mode: "sandbox_loopback_rpc_stub"`), and drives cross-host search, copy-only drafts, IME guards, and one-click handoff in `agent-browser` before `--stop` and sandbox cleanup. Visual semantics remain `REVIEW_REQUIRED` until screenshots are reviewed, and real Desktop apps remain `NOT_RUN`.
+Pass `--prototype "$PROTOTYPE"` only when verifying an external prototype HTML instead of the packaged UI. This isolated suite runs `./bin/codex-agy-sync serve`, validates token/loopback security gates (`401`/`404` and `0o600` token-free lease), seeds paired/unpaired/excluded sandbox stores plus an ephemeral loopback AGY Connect-RPC stub (`GetCascadeTrajectory` and `CreateProject`, `target_daemon_mode: "sandbox_loopback_rpc_stub"`), and drives cross-host search (with on-demand hydration), copy-only drafts, IME guards, and one-click handoff (including `422 unpaired_workspace` -> `auto_pair` `online_rpc` retry and `pair_if_offline` `409 sync_busy_lock` rejection) in `agent-browser` before `--stop` and sandbox cleanup. Visual semantics remain `REVIEW_REQUIRED` until screenshots are reviewed, and real Desktop apps remain `NOT_RUN` here (run a separate live-host pass when validating live Desktop apps).
 
 ## UI prototype route
 
@@ -135,5 +135,5 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py cleanup --ru
 - `suite --prototype <path> [--run-dir <dir>] [--timeout <seconds>]`
 
 `skills/verify-codex-agy-sync/scripts/workbench_verify.py` (with helper `_workbench_sandbox.py`) is an executable Python 3 script for live Stage-1 workbench verification (`codex-agy-sync serve`) supporting two subcommands:
-- `doctor --prototype <path>`
-- `suite --prototype <path> [--run-dir <dir>] [--timeout <seconds>]`
+- `doctor [--prototype <path>]`
+- `suite [--prototype <path>] [--run-dir <dir>] [--timeout <seconds>]`

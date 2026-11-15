@@ -9,10 +9,12 @@ import sys
 from typing import Any, Mapping, Sequence
 
 from .bridge import (
+    EmptySessionError,
     ForkResolutionPolicy,
     HandoffCancelledError,
     HandoffPendingError,
     HostEnvironmentPaths,
+    OnlineRpcUnavailableError,
     SyncBridge,
     SyncBusyLockError,
     SyncDirection,
@@ -20,7 +22,10 @@ from .bridge import (
     TransportMode,
     UnpairedWorkspaceError,
     WorkspaceProjectBinding,
+    diagnose_workspace_binding,
     execute_handoff,
+    reconcile_workspace_handoffs,
+    summarize_workspace_handoffs,
     validate_handoff_selector_flags,
 )
 from .events import (
@@ -139,12 +144,31 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect_p.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID to inspect.")
     inspect_p.add_argument("--mode", choices=[m.value for m in TransportMode], default=TransportMode.AUTO.value, help="Transport mode.")
 
-    sync_s = subparsers.add_parser("sync-session", help="Synchronize one paired or unpaired session.")
+    sync_s = subparsers.add_parser(
+        "sync-session",
+        help="[Advanced/Offline] Synchronize one paired or unpaired session.",
+        description="[Advanced/Offline] Synchronize one paired or unpaired session via offline/dual-mode reconciliation.",
+    )
     _add_sync_common_args(sync_s)
     sync_s.add_argument("--cascade-id", type=str, default=None, help="Antigravity cascade UUID.")
     sync_s.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID.")
     sync_s.add_argument("--source-tag", choices=[s.name.lower() for s in AgyGuiSafeSource], default="cascade_client", help="Antigravity GUI-safe trajectory source tag.")
 
+    _add_handoff_subparser(subparsers)
+
+    sync_w = subparsers.add_parser(
+        "sync-workspace",
+        help="[Advanced/Offline] Synchronize all sessions in a workspace.",
+        description="[Advanced/Offline] Synchronize all sessions in a workspace via offline/dual-mode reconciliation.",
+    )
+    _add_sync_common_args(sync_w)
+    sync_w.add_argument("--include-subagents", action="store_true", help="Synchronize spawned subagent sessions in addition to top-level sessions.")
+
+    _add_serve_subparser(subparsers)
+    return parser
+
+
+def _add_handoff_subparser(subparsers: Any) -> None:
     handoff = subparsers.add_parser("handoff", help="Hand completed history to a new Desktop session; does not append to an existing target.")
     handoff.add_argument("--workspace", "-w", default=None, help="Workspace path or file:// URI, already registered on both hosts.")
     handoff.add_argument("--direction", "-d", choices=["codex_to_agy", "agy_to_codex"], default=None, help="Optional explicit handoff direction; inferred automatically when omitted.")
@@ -154,19 +178,17 @@ def _build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("--chain", action="store_true", help="Advance or re-handoff along the workspace's active handoff chain.")
     handoff.add_argument("--pick", action="store_true", help="Interactively choose a candidate session via stderr menu (requires TTY).")
     handoff.add_argument("--pair-if-offline", action="store_true", help="Automatically pair missing offline host registrations before handoff.")
-
-    sync_w = subparsers.add_parser("sync-workspace", help="Synchronize all sessions in a workspace.")
-    _add_sync_common_args(sync_w)
-    sync_w.add_argument("--include-subagents", action="store_true", help="Synchronize spawned subagent sessions in addition to top-level sessions.")
-
-    _add_serve_subparser(subparsers)
-    return parser
+    handoff.add_argument("--auto-pair", action="store_true", help="Automatically pair missing host registrations via online RPC, falling back to locked offline pairing.")
+    handoff.add_argument("--include-interrupted", action="store_true", help="Rescue and hand off a stopped trailing interrupted turn (never active streaming turns).")
+    handoff.add_argument("--reconcile", action="store_true", help="Verify pending handoff receipts for the workspace and promote ready or clear absent entries.")
+    handoff.add_argument("--dry-run", action="store_true", help="Preview --reconcile changes without modifying handoff receipts or staging directories.")
+    handoff.add_argument("--json", action="store_true", help="Emit JSON output (stdout output is JSON by default).")
 
 
 def _add_serve_subparser(subparsers: Any) -> None:
     serve_p = subparsers.add_parser("serve", help="Start the Stage-1 read-only Local Workbench server.")
     serve_p.add_argument("--workspace", "-w", action="append", default=None, help="Seed workspace path or file:// URI (repeatable).")
-    serve_p.add_argument("--ui", type=Path, default=None, help="Path to standalone workbench HTML file.")
+    serve_p.add_argument("--ui", type=Path, default=None, help="Optional path to custom workbench HTML overriding the packaged default UI.")
     serve_p.add_argument("--port", type=int, default=8765, help="Loopback HTTP port (default: 8765; 0 picks an ephemeral port).")
     serve_p.add_argument("--idle-timeout", type=int, default=1800, help="Idle self-reclaim timeout in seconds (default: 1800; 0 disables).")
     serve_p.add_argument("--max-lifetime", type=int, default=14400, help="Maximum server lifetime in seconds (default: 14400; 0 disables).")
@@ -199,6 +221,8 @@ def _resolve_paths(args: argparse.Namespace, env: Mapping[str, str] | None = Non
 def _run_status_cmd(bridge: SyncBridge, workspace_arg: str, include_subagents: bool) -> dict[str, Any]:
     binding = bridge.registry.resolve_readonly_binding(workspace_arg)
     sessions = bridge.registry.list_workspace_sessions(binding, include_subagents=include_subagents)
+    diag = diagnose_workspace_binding(bridge.paths, binding.workspace_path)
+    handoff_summary = summarize_workspace_handoffs(bridge.paths, binding.workspace_path)
     return {
         "workspace": _binding_to_dict(binding),
         "sessions": [
@@ -217,6 +241,20 @@ def _run_status_cmd(bridge: SyncBridge, workspace_arg: str, include_subagents: b
             }
             for s in sessions
         ],
+        "pairing": {
+            "paired": diag.is_paired(),
+            "agy_registered": diag.agy_registered,
+            "codex_registered": diag.codex_registered,
+            "agy_pid": str(diag.agy_project_id) if diag.agy_project_id else None,
+            "codex_pid": str(diag.codex_project_id) if diag.codex_project_id else None,
+            "agy_project_id": str(diag.agy_project_id) if diag.agy_project_id else None,
+            "codex_project_id": str(diag.codex_project_id) if diag.codex_project_id else None,
+            "agy_daemon_active": diag.agy_daemon_active,
+            "codex_daemon_active": diag.codex_daemon_active,
+            "remediation_steps": list(diag.remediation_steps),
+        },
+        "handoff_chains": handoff_summary["handoff_chains"],
+        "pending_handoffs": handoff_summary["pending_handoffs"],
     }
 
 
@@ -267,6 +305,14 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         return
     if args.subcommand != "handoff":
         return
+    if args.dry_run and not args.reconcile:
+        parser.error("--dry-run requires --reconcile.")
+    if args.reconcile:
+        if any([args.latest, args.chain, args.pick, args.pair_if_offline, args.auto_pair]):
+            parser.error("--reconcile cannot be combined with --latest, --chain, --pick, --pair-if-offline, or --auto-pair.")
+        return
+    if args.auto_pair and args.pair_if_offline:
+        parser.error("--auto-pair cannot be combined with --pair-if-offline.")
     try:
         validate_handoff_selector_flags(
             source_id=args.source_id,
@@ -285,11 +331,16 @@ def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int
     if args.stop:
         print(json.dumps(stop_workbench_server(paths), ensure_ascii=False, indent=2))
         return 0
+    ui_path: Path | None = None
+    if args.ui is not None:
+        ui_path = Path(args.ui).expanduser()
+        if not ui_path.is_file():
+            raise FileNotFoundError(f"UI file not found: {args.ui}")
     seeds = [item for raw in (args.workspace or ()) if (item := normalize_workspace_spec(raw))]
     return run_serve_server(
         paths,
         seed_workspaces=seeds,
-        ui_path=args.ui,
+        ui_path=ui_path,
         port=int(args.port),
         idle_timeout_sec=int(args.idle_timeout),
         max_lifetime_sec=int(args.max_lifetime),
@@ -298,55 +349,64 @@ def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int
 
 
 def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
-    try:
-        receipt, _ = execute_handoff(
+    if args.reconcile:
+        result = reconcile_workspace_handoffs(
             bridge.paths,
             workspace_arg,
-            direction=SyncDirection(args.direction) if args.direction else None,
             source_id=args.source_id,
-            title=args.title,
-            latest=bool(args.latest),
-            chain=bool(args.chain),
-            pick=bool(args.pick),
-            pair_if_offline=bool(args.pair_if_offline),
+            dry_run=bool(args.dry_run),
         )
-    except (UnpairedWorkspaceError, SyncBusyLockError) as exc:
-        print(json.dumps(exc.to_error_payload(), ensure_ascii=False, indent=2), file=sys.stderr)
-        return 2
-    except HandoffPendingError as exc:
-        print(json.dumps(dataclasses.asdict(exc.receipt), ensure_ascii=False, indent=2), file=sys.stderr)
-        return 2
-    except HandoffCancelledError as exc:
-        print(json.dumps({"error": "handoff_cancelled", "message": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
-        return 2
-    except ValueError as exc:
-        print(json.dumps({"error": "invalid_handoff_request", "message": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
-        return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    receipt, _ = execute_handoff(
+        bridge.paths,
+        workspace_arg,
+        direction=SyncDirection(args.direction) if args.direction else None,
+        source_id=args.source_id,
+        title=args.title,
+        latest=bool(args.latest),
+        chain=bool(args.chain),
+        pick=bool(args.pick),
+        pair_if_offline=bool(args.pair_if_offline),
+        auto_pair=bool(args.auto_pair),
+        include_interrupted=bool(args.include_interrupted),
+    )
     print(json.dumps(dataclasses.asdict(receipt), ensure_ascii=False, indent=2))
     return 0
 
 
-def main(
-    argv: Sequence[str] | None = None,
-    *,
-    env: Mapping[str, str] | None = None,
-) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
-    _validate_cli_args(parser, args)
-    paths = _resolve_paths(args, env=env)
+def _exception_to_error_payload(exc: Exception, subcommand: str) -> dict[str, Any]:
+    if isinstance(exc, (UnpairedWorkspaceError, SyncBusyLockError)):
+        return exc.to_error_payload()
+    if isinstance(exc, HandoffPendingError):
+        return {
+            **dataclasses.asdict(exc.receipt),
+            "error": "handoff_pending",
+            "message": str(exc),
+            "cause": exc.receipt.error,
+            "receipt": dataclasses.asdict(exc.receipt),
+        }
+    if isinstance(exc, HandoffCancelledError):
+        return {"error": "handoff_cancelled", "message": str(exc)}
+    if isinstance(exc, EmptySessionError):
+        return {"error": "empty_session", "message": str(exc)}
+    if isinstance(exc, OnlineRpcUnavailableError):
+        return {"error": "online_rpc_unavailable", "message": str(exc)}
+    if isinstance(exc, FileNotFoundError):
+        return {"error": "file_not_found", "message": str(exc)}
+    if isinstance(exc, ValueError):
+        code = "invalid_handoff_request" if subcommand == "handoff" else "invalid_argument"
+        return {"error": code, "message": str(exc)}
+    return {"error": "runtime_error", "message": str(exc)}
+
+
+def _dispatch_subcommand(args: argparse.Namespace, paths: HostEnvironmentPaths) -> int:
     if args.subcommand == "serve":
         return _run_serve_cmd(paths, args)
     bridge = SyncBridge(paths=paths)
     workspace_arg = normalize_workspace_spec(args.workspace) if args.workspace is not None else os.getcwd()
-
     if args.subcommand == "pair":
-        try:
-            binding = bridge.pair_workspace(workspace_arg)
-        except SyncBusyLockError as exc:
-            print(json.dumps(exc.to_error_payload(), ensure_ascii=False, indent=2), file=sys.stderr)
-            return 2
-        print(json.dumps(_binding_to_dict(binding), ensure_ascii=False, indent=2))
+        print(json.dumps(_binding_to_dict(bridge.pair_workspace(workspace_arg)), ensure_ascii=False, indent=2))
         return 0
     if args.subcommand == "status":
         print(json.dumps(_run_status_cmd(bridge, workspace_arg, bool(args.include_subagents)), ensure_ascii=False, indent=2))
@@ -381,6 +441,22 @@ def main(
         print(json.dumps({"synced_count": len(receipts), "receipts": [_receipt_to_dict(r) for r in receipts]}, ensure_ascii=False, indent=2))
         return 0
     return 1
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    _validate_cli_args(parser, args)
+    try:
+        paths = _resolve_paths(args, env=env)
+        return _dispatch_subcommand(args, paths)
+    except Exception as exc:
+        print(json.dumps(_exception_to_error_payload(exc, str(args.subcommand)), ensure_ascii=False, indent=2), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -6,11 +6,12 @@ import contextlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Mapping, Sequence
+from typing import AbstractSet, Any, Mapping, Sequence
 
 from ..codecs import decode_trajectory_metadata_proto, iter_codex_rollout_lines
 from ..events import CascadeId, CodexThreadId, StepIndex, SubagentLineage
 from ..workspace import (
+    FORBIDDEN_AGY_PROJECT_IDS,
     AgyProjectId,
     CodexProjectId,
     WorkspacePath,
@@ -176,6 +177,26 @@ def uris_match_workspace(raw_uris: Sequence[str], target_uri: WorkspaceRootUri) 
     return False
 
 
+def find_readonly_agy_project_id(paths: HostEnvironmentPaths, ws_uri: WorkspaceRootUri) -> AgyProjectId | None:
+    """Return an existing non-forbidden Antigravity project UUID registered for `ws_uri`, or `None`."""
+    projects_dir = paths.gemini_config_dir / "projects"
+    if not projects_dir.is_dir():
+        return None
+    for pfile in sorted(projects_dir.glob("*.json")):
+        try:
+            data = json.loads(pfile.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        cand_id = str(data.get("id") or pfile.stem).strip()
+        if not cand_id or cand_id in FORBIDDEN_AGY_PROJECT_IDS:
+            continue
+        if uris_match_workspace(extract_agy_project_folder_uris(data), ws_uri):
+            return AgyProjectId(cand_id)
+    return None
+
+
 def compute_codex_nesting_depth(
     raw_source: str | None,
     src_is_sub: bool,
@@ -291,37 +312,92 @@ def discover_agy_subagent_sidecars(paths: HostEnvironmentPaths) -> dict[str, dic
     return sidecars
 
 
-def scan_agy_summaries_db(
+_AGY_SUMMARY_COLS = (
+    "conversation_id",
+    "title",
+    "step_count",
+    "workspace_uris",
+    "project_id",
+    "agent_name",
+    "parent_conversation_id",
+    "nesting_depth",
+)
+_CODEX_STATE_COLS = (
+    "id",
+    "title",
+    "preview",
+    "cwd",
+    "project_id",
+    "attached_thread_parent_id",
+    "rollout_path",
+    "agent_nickname",
+    "agent_role",
+    "source",
+)
+
+
+def table_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    """Return existing column names for `table_name` via `PRAGMA table_info`."""
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def optional_select_columns_sql(cols: AbstractSet[str], desired: Sequence[str]) -> str:
+    """Build a SELECT projection emitting `NULL AS <col>` for absent optional columns."""
+    return ", ".join(col if col in cols else f"NULL AS {col}" for col in desired)
+
+
+def extract_rollout_filename_uuid(filename: str) -> str:
+    """Extract trailing UUID session ID from a Codex rollout filename if present."""
+    stem = filename.removesuffix(".zst").removesuffix(".jsonl")
+    if len(stem) > 37 and stem[-37] == "-":
+        return safe_valid_session_id(stem[-36:], "codex_thread_id")
+    return ""
+
+
+def scan_agy_summaries_with_foreign_ids(
     paths: HostEnvironmentPaths,
     agy_project_id: AgyProjectId,
     workspace_uri: WorkspaceRootUri,
     sidecars: Mapping[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, Any]]:
     agy_sessions: dict[str, dict[str, Any]] = {}
+    foreign_cids: set[str] = set()
+    sum_mtimes: dict[str, Any] = {}
     sum_db = paths.agy_data_dir / "conversation_summaries.db"
     if not sum_db.is_file():
-        return agy_sessions
+        return agy_sessions, foreign_cids, sum_mtimes
     try:
         with contextlib.closing(open_readonly_sqlite(sum_db)) as conn:
-            rows = conn.execute(
-                "SELECT conversation_id, title, step_count, workspace_uris, project_id, agent_name, "
-                "parent_conversation_id, nesting_depth FROM conversation_summaries ORDER BY last_modified_time DESC"
-            ).fetchall()
-    except sqlite3.OperationalError:
-        return agy_sessions
+            cols = table_column_names(conn, "conversation_summaries")
+            if "conversation_id" not in cols:
+                return agy_sessions, foreign_cids, sum_mtimes
+            has_lm = "last_modified_time" in cols
+            select_cols = (*_AGY_SUMMARY_COLS, "last_modified_time") if has_lm else _AGY_SUMMARY_COLS
+            order_sql = " ORDER BY last_modified_time DESC" if has_lm else ""
+            sql = f"SELECT {optional_select_columns_sql(cols, select_cols)} FROM conversation_summaries{order_sql}"
+            rows = conn.execute(sql).fetchall()
+    except (sqlite3.DatabaseError, OSError, ValueError):
+        return agy_sessions, foreign_cids, sum_mtimes
 
-    for cid, title, scount, uris_raw, pid, agent_name, parent_cid, nesting_depth in rows:
+    summary_has_scope: dict[str, bool] = {}
+    unmatched: list[tuple[str, str, list[str], str]] = []
+    for row in rows:
+        cid, title, scount, uris_raw, pid, agent_name, parent_cid, nesting_depth = row[:8]
         cid_str = safe_valid_session_id(cid, "cascade_id")
         if not cid_str:
             continue
+        if has_lm:
+            sum_mtimes[cid_str] = row[8]
         sc_info = sidecars.get(cid_str, {})
-        matches_ws = str(pid or "") == str(agy_project_id)
-        if not matches_ws:
-            cand_uris = list(sc_info.get("workspace_uris", [])) + parse_summary_workspace_uris(uris_raw)
-            matches_ws = uris_match_workspace(cand_uris, workspace_uri)
-        if not matches_ws:
-            continue
+        pid_str = str(pid or "").strip()
+        sum_uris = parse_summary_workspace_uris(uris_raw)
+        cand_uris = list(sc_info.get("workspace_uris", [])) + sum_uris
+        summary_has_scope[cid_str] = bool(pid_str or sum_uris)
         eff_parent = safe_valid_session_id(parent_cid or sc_info.get("parent_cascade_id"), "parent_cascade_id")
+        matches_ws = (str(pid or "") == str(agy_project_id)) or uris_match_workspace(cand_uris, workspace_uri)
+        if not matches_ws:
+            unmatched.append((cid_str, pid_str, cand_uris, eff_parent))
+            continue
         agy_sessions[cid_str] = {
             "cascade_id": CascadeId(cid_str),
             "title": str(title or "").strip() or "Untitled Session",
@@ -333,7 +409,22 @@ def scan_agy_summaries_db(
             "agent_role": str(sc_info.get("agent_role") or agent_name or "").strip(),
             "spawn_step_index": sc_info.get("spawn_step_index"),
         }
-    return agy_sessions
+
+    for cid_str, pid_str, cand_uris, eff_parent in unmatched:
+        if eff_parent and eff_parent in agy_sessions:
+            continue
+        if pid_str or cand_uris or (eff_parent and summary_has_scope.get(eff_parent, False)):
+            foreign_cids.add(cid_str)
+    return agy_sessions, foreign_cids, sum_mtimes
+
+
+def scan_agy_summaries_db(
+    paths: HostEnvironmentPaths,
+    agy_project_id: AgyProjectId,
+    workspace_uri: WorkspaceRootUri,
+    sidecars: Mapping[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return scan_agy_summaries_with_foreign_ids(paths, agy_project_id, workspace_uri, sidecars)[0]
 
 
 def enrich_agy_session_from_conv_db(
@@ -387,7 +478,7 @@ def enrich_agy_session_from_conv_db(
                 "agent_role": eff_role,
                 "spawn_step_index": sc_info.get("spawn_step_index"),
             }
-    except sqlite3.OperationalError:
+    except (sqlite3.DatabaseError, OSError, ValueError):
         return
 
 
@@ -402,11 +493,15 @@ def scan_codex_state_sessions(
         return codex_sessions
     try:
         with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
-            rows = conn.execute(
-                "SELECT id, title, preview, cwd, project_id, attached_thread_parent_id, rollout_path, "
-                "agent_nickname, agent_role, source FROM threads WHERE archived = 0 ORDER BY recency_at_ms DESC, updated_at DESC"
-            ).fetchall()
-    except sqlite3.OperationalError:
+            cols = table_column_names(conn, "threads")
+            if "id" not in cols:
+                return codex_sessions
+            where_sql = " WHERE archived = 0" if "archived" in cols else ""
+            order_parts = [c for c in ("recency_at_ms", "updated_at") if c in cols]
+            order_sql = f" ORDER BY {', '.join(f'{c} DESC' for c in order_parts)}" if order_parts else ""
+            sql = f"SELECT {optional_select_columns_sql(cols, _CODEX_STATE_COLS)} FROM threads{where_sql}{order_sql}"
+            rows = conn.execute(sql).fetchall()
+    except (sqlite3.DatabaseError, OSError, ValueError):
         return codex_sessions
 
     for tid, title, preview, cwd, pid, parent_tid, rpath, agent_nickname, agent_role, raw_source in rows:

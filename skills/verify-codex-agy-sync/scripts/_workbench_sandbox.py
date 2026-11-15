@@ -29,6 +29,7 @@ from codex_agy_sync.bridge.handoff import HandoffReceipt, ledger_seed_fingerprin
 from codex_agy_sync.bridge.paths_and_locks import HostEnvironmentPaths, TransportMode
 from codex_agy_sync.bridge.state_machine import generate_uuid7
 from codex_agy_sync.bridge.transport import DefaultHostTransport
+from codex_agy_sync.workbench.lease import default_workbench_ui_path
 from codex_agy_sync.ledger import (
     AssistantTextEvent,
     CascadeId,
@@ -145,6 +146,7 @@ REQUIRED_IDS = (
     "liveHandoffChain",
     "liveHandoffControls",
     "handoffPairIfOffline",
+    "handoffIncludeInterrupted",
 )
 
 
@@ -176,8 +178,9 @@ def check_prototype(raw_path: str) -> dict[str, Any]:
     return {"ok": True, "path": str(path.resolve()), "size": path.stat().st_size, "sha256": sha256_file(path), "has_live_controller": True}
 
 
-def run_doctor_checks(raw_prototype: str) -> tuple[bool, dict[str, Any]]:
-    proto = check_prototype(raw_prototype)
+def run_doctor_checks(raw_prototype: str | None = None) -> tuple[bool, dict[str, Any]]:
+    proto_target = str(raw_prototype) if raw_prototype else str(default_workbench_ui_path())
+    proto = check_prototype(proto_target)
     cli_ok = CLI_BIN.is_file()
     cli_help: dict[str, Any] = {"ok": False}
     if cli_ok:
@@ -472,9 +475,58 @@ def _read_agy_rpc_trajectory(agy_data_dir: Path, cascade_id: str) -> bytes | Non
     return encode_bytes_field(1, traj_blob) + encode_varint_field(2, 1)
 
 
+def _decode_create_project_request(body: bytes) -> tuple[str, str, list[str]]:
+    project_blob = b""
+    for fn, wt, _, raw in iter_wire_fields(body):
+        if fn == 1 and wt == 2:
+            project_blob = raw
+    pid, name, uris = "", "", []
+    resources_blobs: list[bytes] = []
+    for fn, wt, _, raw in iter_wire_fields(project_blob):
+        if fn == 1 and wt == 2:
+            pid = raw.decode("utf-8", errors="replace").strip()
+        elif fn == 2 and wt == 2:
+            name = raw.decode("utf-8", errors="replace").strip()
+        elif fn == 6 and wt == 2:
+            resources_blobs.append(raw)
+    for res_container in resources_blobs:
+        for fn, wt, _, raw in iter_wire_fields(res_container):
+            if fn != 1 or wt != 2:
+                continue
+            for rfn, rwt, _, rraw in iter_wire_fields(raw):
+                if rfn == 1 and rwt == 2:
+                    uris.append(rraw.decode("utf-8", errors="replace").strip())
+                elif rfn == 3 and rwt == 2:
+                    for gfn, gwt, _, graw in iter_wire_fields(rraw):
+                        if gfn == 1 and gwt == 2:
+                            uris.append(graw.decode("utf-8", errors="replace").strip())
+    return pid, name, [u for u in uris if u]
+
+
+def _write_stub_agy_project(gemini_config_dir: Path, pid: str, name: str, folder_uris: list[str]) -> bool:
+    if not folder_uris:
+        return False
+    pid_clean = pid or f"proj-{secrets.token_hex(8)}"
+    projects_dir = gemini_config_dir / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    write_json(
+        projects_dir / f"{pid_clean}.json",
+        {
+            "id": pid_clean,
+            "name": name or pid_clean,
+            "projectResources": {"resources": [{"folderUri": uri} for uri in folder_uris]},
+            "permissionGrants": {"v2Migrated": True},
+            "settings": {},
+            "isWorkspaceOnly": False,
+        },
+    )
+    return True
+
+
 class AgyLoopbackRpcStub:
-    def __init__(self, agy_data_dir: Path) -> None:
+    def __init__(self, agy_data_dir: Path, gemini_config_dir: Path | None = None) -> None:
         self._agy_data_dir = agy_data_dir
+        self._gemini_config_dir = gemini_config_dir or (agy_data_dir.parent / "gemini-config")
         self._csrf_token = secrets.token_urlsafe(18)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -483,37 +535,50 @@ class AgyLoopbackRpcStub:
 
     def start(self) -> int:
         agy_data_dir = self._agy_data_dir
+        gemini_config_dir = self._gemini_config_dir
         expected_token = self._csrf_token
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: Any) -> None:
                 return None
 
+            def _send_proto(self, status: int, payload: bytes) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/proto")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if payload:
+                    self.wfile.write(payload)
+
             def do_POST(self) -> None:
-                if self.path != "/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory":
-                    self.send_response(404)
-                    self.end_headers()
-                    return
                 if self.headers.get("x-codeium-csrf-token") != expected_token:
                     self.send_response(403)
                     self.end_headers()
                     return
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length > 0 else b""
-                cascade_id = ""
-                for fn, wt, _, raw in iter_wire_fields(body):
-                    if fn == 1 and wt == 2:
-                        cascade_id = raw.decode("utf-8", errors="replace").strip()
-                payload = _read_agy_rpc_trajectory(agy_data_dir, cascade_id) if cascade_id else None
-                if payload is None:
-                    self.send_response(404)
-                    self.end_headers()
+                if self.path == "/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory":
+                    cascade_id = ""
+                    for fn, wt, _, raw in iter_wire_fields(body):
+                        if fn == 1 and wt == 2:
+                            cascade_id = raw.decode("utf-8", errors="replace").strip()
+                    payload = _read_agy_rpc_trajectory(agy_data_dir, cascade_id) if cascade_id else None
+                    if payload is None:
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+                    self._send_proto(200, payload)
                     return
-                self.send_response(200)
-                self.send_header("Content-Type", "application/proto")
-                self.send_header("Content-Length", str(len(payload)))
+                if self.path == "/exa.language_server_pb.LanguageServerService/CreateProject":
+                    pid, name, folder_uris = _decode_create_project_request(body)
+                    if not _write_stub_agy_project(gemini_config_dir, pid, name, folder_uris):
+                        self.send_response(400)
+                        self.end_headers()
+                        return
+                    self._send_proto(200, b"")
+                    return
+                self.send_response(404)
                 self.end_headers()
-                self.wfile.write(payload)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = int(self._server.server_address[1])

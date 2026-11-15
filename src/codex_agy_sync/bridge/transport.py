@@ -148,7 +148,7 @@ class DefaultHostTransport:
         state_db = self._paths.codex_home_dir / "state_5.sqlite"
         rollout_path = db_title = None
         if state_db.is_file():
-            with contextlib.suppress(sqlite3.OperationalError):
+            with contextlib.suppress(sqlite3.DatabaseError, OSError):
                 with contextlib.closing(open_readonly_sqlite(state_db)) as conn:
                     row = conn.execute("SELECT rollout_path, title, name FROM threads WHERE id = ?", (str(thread_id),)).fetchone()
                 if row:

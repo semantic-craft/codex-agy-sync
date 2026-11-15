@@ -48,3 +48,6 @@ codex-agy-sync = "codex_agy_sync.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+codex_agy_sync = ["workbench/ui/*.html"]
