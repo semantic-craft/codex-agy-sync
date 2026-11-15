@@ -117,3 +117,8 @@
 - 正确做法（Done right）：全局扫描逻辑集中在 `catalog.py` 与 `discovery.py` 的单次 `O(1)` 表预加载 + `O(N)` 分桶中，列表冷启动只解码预算内最新回合，详情/单工作区/全文搜索再按需水合，禁止把工作区循环写回全量表读或全量 rollout 解码路径。
 - 验证点：运行 `python3 -m unittest tests.test_indexer_scalability -v` 及 `./scripts/check`，并可在真实宿主执行只读 `WorkbenchIndexer(HostEnvironmentPaths.discover()).get_snapshot()` 核对秒级冷启动。
 - 复发记录：Seen 1x (2026-11-15)，在真实宿主机大规模工作区工作台冷启动实测中发现并重构根治。
+
+### 桌面守护进程运行期间必须以在线 RPC 空闲态覆写全局 WAL 误判
+
+**`menubar-feed` 与 `handoff --include-interrupted` 在 Antigravity / Codex 守护进程在线时必须以 `GetCascadeTrajectory`（`cascade_run_status == 1`）与 `thread/read`（非活跃且无 `in_progress` 边界）作为空闲态依据，严禁因宿主级 `conversation_summaries.db-wal` / `state_5.sqlite-wal` 非空、历史 `presence/<cid>.lock` 或残余 `steps.status = 2` 将已停止会话误判为 `ACTIVE_RUNNING`。**
+离线 `sync-session` / `sync-workspace` 仍保留 `is_source_actively_running` 的 WAL 锁避让规则以防裸写冲突；该边界由 `tests/test_menubar_feed.py` 的 `test_online_rpc_idle_overrides_host_wal_for_feed_and_handoff` 回归锁定。

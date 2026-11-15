@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing, redirect_stdout
+import fcntl
 import io
 import json
 import os
@@ -424,6 +425,125 @@ class MenubarFeedTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx_high:
             cli_main(["menubar-feed", "--limit", "51"], env=env)
         self.assertEqual(ctx_high.exception.code, 2)
+
+    def test_online_rpc_idle_overrides_host_wal_for_feed_and_handoff(self) -> None:
+        cid_completed = "f0000000-0000-4000-8000-000000000001"
+        cid_stopped = "f0000000-0000-4000-8000-000000000002"
+        cid_running = "f0000000-0000-4000-8000-000000000003"
+
+        self._write_agy_session(
+            self.binding_a,
+            cid_completed,
+            "Completed AGY under WAL",
+            _turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-15T07:55:00Z", "Done q", "Done a"),
+            mtime=_NOW_EPOCH - 180.0,
+        )
+        stopped_events = [
+            *_turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-15T07:58:00Z", "First q", "First a"),
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("t2"), "2026-11-15T08:02:00Z"),
+                query_text="Stopped mid-turn",
+            ),
+        ]
+        db_stopped = self._write_agy_session(self.binding_a, cid_stopped, "Stopped AGY", stopped_events, mtime=_NOW_EPOCH - 120.0)
+        with closing(sqlite3.connect(db_stopped)) as conn, conn:
+            conn.execute("UPDATE steps SET status = 2 WHERE idx = (SELECT MAX(idx) FROM steps)")
+        os.utime(db_stopped, (_NOW_EPOCH - 120.0, _NOW_EPOCH - 120.0))
+
+        running_events = [
+            *_turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-15T08:04:00Z", "Live q", "Live a"),
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("t2"), "2026-11-15T08:06:00Z"),
+                query_text="Active stream",
+            ),
+        ]
+        db_running = self._write_agy_session(self.binding_a, cid_running, "Running AGY", running_events, mtime=_NOW_EPOCH - 10.0)
+        with closing(sqlite3.connect(db_running)) as conn, conn:
+            conn.execute("UPDATE steps SET status = 2 WHERE idx = (SELECT MAX(idx) FROM steps)")
+        os.utime(db_running, (_NOW_EPOCH - 10.0, _NOW_EPOCH - 10.0))
+
+        sum_db = self.paths.agy_data_dir / "conversation_summaries.db"
+        state_db = self.paths.codex_home_dir / "state_5.sqlite"
+        live_sum = sqlite3.connect(sum_db)
+        live_state = sqlite3.connect(state_db)
+        presence_dir = self.paths.agy_data_dir / "presence"
+        presence_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = presence_dir / f"{cid_stopped}.lock"
+        lock_file.write_text("held-by-desktop", encoding="utf-8")
+        lock_fd = os.open(str(lock_file), os.O_RDWR)
+        try:
+            live_sum.execute("PRAGMA journal_mode=WAL")
+            live_sum.execute("PRAGMA wal_autocheckpoint=0")
+            live_sum.execute("CREATE TABLE IF NOT EXISTS _wal_probe (id INTEGER PRIMARY KEY)")
+            live_sum.execute("INSERT OR REPLACE INTO _wal_probe (id) VALUES (1)")
+            live_sum.commit()
+            live_state.execute("PRAGMA journal_mode=WAL")
+            live_state.execute("PRAGMA wal_autocheckpoint=0")
+            ensure_codex_state_db_schema(live_state)
+            live_state.execute("CREATE TABLE IF NOT EXISTS _wal_probe (id INTEGER PRIMARY KEY)")
+            live_state.execute("INSERT OR REPLACE INTO _wal_probe (id) VALUES (1)")
+            live_state.commit()
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertGreater((self.paths.agy_data_dir / "conversation_summaries.db-wal").stat().st_size, 0)
+            self.assertGreater((self.paths.codex_home_dir / "state_5.sqlite-wal").stat().st_size, 0)
+
+            agy_ep = AgyDaemonEndpoint(os.getpid(), 41233, 41234, "1.0", CsrfSecret("tok"))
+            codex_ep = CodexDaemonEndpoint(self.root / "codex.sock", os.getpid())
+
+            def _fake_agy_rpc(_ep, cid, **_kwargs):
+                status = 2 if str(cid) == cid_running else 1
+                return AgyRpcReadResult(raw_steps=(), cascade_run_status=status)
+
+            with (
+                patch.object(PresenceWalGuard, "discover_agy_daemon", return_value=agy_ep),
+                patch.object(PresenceWalGuard, "discover_codex_daemon", return_value=codex_ep),
+                patch("codex_agy_sync.workbench.menubar_feed.fetch_agy_trajectory_via_rpc", side_effect=_fake_agy_rpc),
+                patch("codex_agy_sync.bridge.rpc.fetch_agy_trajectory_via_rpc", side_effect=_fake_agy_rpc),
+                patch(
+                    "codex_agy_sync.bridge.handoff.import_codex_rollout_via_rpc",
+                    return_value="01970000-0000-7000-8000-000000000099",
+                ),
+            ):
+                locks = self.guard.probe_locks(CascadeId(cid_stopped), None)
+                self.assertTrue(locks.agy_wal_active)
+                self.assertTrue(locks.codex_wal_active)
+                self.assertTrue(locks.agy_presence_locked)
+
+                snap = build_menubar_feed(self.paths, now_epoch=_NOW_EPOCH)
+                assert snap.hero is not None
+                self.assertEqual(snap.hero.session_id, cid_stopped)
+                self.assertEqual(snap.hero.state, MenubarCandidateState.INTERRUPTED_STOPPED)
+                by_id = {it.session_id: it for it in snap.recent}
+                self.assertEqual(by_id[cid_running].state, MenubarCandidateState.ACTIVE_RUNNING)
+                self.assertEqual(by_id[cid_completed].state, MenubarCandidateState.COMPLETED_READY)
+
+                receipt = handoff_session(
+                    self.paths,
+                    self.ws_a,
+                    direction=SyncDirection.AGY_TO_CODEX,
+                    source_id=cid_stopped,
+                    include_interrupted=True,
+                    binding=self.binding_a,
+                )
+                self.assertEqual(receipt.status, "ready")
+                self.assertEqual(receipt.target_id, "01970000-0000-7000-8000-000000000099")
+
+                with self.assertRaisesRegex(ValueError, "Source session is active"):
+                    handoff_session(
+                        self.paths,
+                        self.ws_a,
+                        direction=SyncDirection.AGY_TO_CODEX,
+                        source_id=cid_running,
+                        include_interrupted=True,
+                        binding=self.binding_a,
+                    )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            live_sum.close()
+            live_state.close()
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from ..bridge.store_catalog import (
     parse_summary_workspace_uris, safe_valid_session_id,
 )
 from ..codecs import decode_trajectory_metadata_proto, iter_codex_rollout_lines
+from ..events import TaskBoundaryEvent
 from ..ledger import TrajectoryLedger, rescue_interrupted_ledger
 from ..payloads import safe_json_dict
 from ..workspace import (
@@ -318,28 +319,47 @@ def _collect_codex_candidates(paths: HostEnvironmentPaths, preloaded: PreloadedH
     return out + _scan_orphan_codex_rollouts(codex_home, lookup, known, seen, pool_size, cutoff)
 
 
+def _probe_host_ledger(
+    cand: _RawCand, binding: WorkspaceProjectBinding, guard: PresenceWalGuard, transport: DefaultHostTransport, agy_daemon: Any, codex_daemon: Any,
+) -> tuple[TrajectoryLedger, bool]:
+    if cand.host == "antigravity":
+        cid, rpc_active, rpc_verified_inactive = CascadeId(cand.session_id), False, False
+        locks = guard.probe_locks(cid, None)
+        if agy_daemon is not None and agy_daemon.http_port > 0:
+            with contextlib.suppress(FileNotFoundError, OnlineRpcUnavailableError, ValueError, OSError):
+                rpc_res = fetch_agy_trajectory_via_rpc(agy_daemon, cid)
+                rpc_active = bool(rpc_res.is_active)
+                rpc_verified_inactive = rpc_res.cascade_run_status == 1
+        ledger, _, _ = transport.read_agy_ledger_with_meta(binding, cid, locks, TransportMode.OFFLINE_STORAGE)
+        is_active = rpc_active or (agy_daemon is None and locks.agy_presence_locked) or (
+            ledger.has_inflight_turn and not rpc_verified_inactive and is_source_actively_running(HostKind.ANTIGRAVITY, ledger, locks, rpc_active=False)
+        )
+        return ledger, is_active
+    tid = CodexThreadId(cand.session_id)
+    locks = guard.probe_locks(None, tid)
+    try:
+        ledger, read_mode, rpc_active = transport.read_codex_ledger_with_meta(
+            binding, tid, locks, TransportMode.ONLINE_RPC if codex_daemon is not None else TransportMode.OFFLINE_STORAGE,
+        )
+    except (OnlineRpcUnavailableError, FileNotFoundError, OSError):
+        ledger, read_mode, rpc_active = transport.read_codex_ledger_with_meta(binding, tid, locks, TransportMode.OFFLINE_STORAGE)
+    has_in_progress_boundary = any(isinstance(ev, TaskBoundaryEvent) and ev.task_status.lower() == "in_progress" for ev in ledger.events)
+    rpc_verified_inactive = read_mode == TransportMode.ONLINE_RPC and not rpc_active and not has_in_progress_boundary
+    is_active = rpc_active or (has_in_progress_boundary and codex_daemon is not None) or (
+        ledger.has_inflight_turn and not rpc_verified_inactive and is_source_actively_running(HostKind.CODEX, ledger, locks, rpc_active=False)
+    )
+    return ledger, is_active
+
+
 def _read_and_classify(cand: _RawCand, guard: PresenceWalGuard, transport: DefaultHostTransport, agy_daemon: Any, codex_daemon: Any, receipts: _ReceiptIdx) -> MenubarSessionItem | None:
     binding = cand.workspace.binding
-    if cand.host == "antigravity":
-        cid, rpc_active, host_kind = CascadeId(cand.session_id), False, HostKind.ANTIGRAVITY
-        locks = guard.probe_locks(cid, None)
-        if agy_daemon is not None and not (locks.agy_presence_locked or locks.agy_wal_active):
-            with contextlib.suppress(FileNotFoundError, OnlineRpcUnavailableError, ValueError, OSError):
-                rpc_active = bool(fetch_agy_trajectory_via_rpc(agy_daemon, cid).is_active)
-        ledger, _, _ = transport.read_agy_ledger_with_meta(binding, cid, locks, TransportMode.OFFLINE_STORAGE)
-    else:
-        tid, host_kind = CodexThreadId(cand.session_id), HostKind.CODEX
-        locks = guard.probe_locks(None, tid)
-        try:
-            ledger, _, rpc_active = transport.read_codex_ledger_with_meta(binding, tid, locks, TransportMode.ONLINE_RPC if codex_daemon is not None else TransportMode.OFFLINE_STORAGE)
-        except (OnlineRpcUnavailableError, FileNotFoundError, OSError):
-            ledger, _, rpc_active = transport.read_codex_ledger_with_meta(binding, tid, locks, TransportMode.OFFLINE_STORAGE)
+    ledger, is_active = _probe_host_ledger(cand, binding, guard, transport, agy_daemon, codex_daemon)
     ws_str = str(binding.workspace_path)
     key, title = (ws_str, cand.host, cand.session_id), cand.title or str(ledger.title or "").strip() or "Untitled Session"
     handed_id, pending_err, chain_depth, inflight, turn_count = None, None, 0, ledger.has_inflight_turn, len(ledger.completed_turn_watermarks)
     if (pending_rec := receipts.pending.get(key)) is not None:
         state, pending_err = MenubarCandidateState.PENDING_RECONCILE, pending_rec.error
-    elif is_source_actively_running(host_kind, ledger, locks, rpc_active=rpc_active):
+    elif is_active:
         state = MenubarCandidateState.ACTIVE_RUNNING
     else:
         eff = rescue_interrupted_ledger(ledger)[0] if inflight else ledger
