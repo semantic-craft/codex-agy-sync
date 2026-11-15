@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 from ..codecs import decode_trajectory_metadata_proto, iter_codex_rollout_lines
 from ..events import CascadeId, CodexThreadId, StepIndex, SubagentLineage
 from ..workspace import (
+    FORBIDDEN_AGY_PROJECT_IDS,
     AgyProjectId,
     CodexProjectId,
     WorkspacePath,
@@ -174,6 +175,26 @@ def uris_match_workspace(raw_uris: Sequence[str], target_uri: WorkspaceRootUri) 
         except ValueError:
             continue
     return False
+
+
+def find_readonly_agy_project_id(paths: HostEnvironmentPaths, ws_uri: WorkspaceRootUri) -> AgyProjectId | None:
+    """Return an existing non-forbidden Antigravity project UUID registered for `ws_uri`, or `None`."""
+    projects_dir = paths.gemini_config_dir / "projects"
+    if not projects_dir.is_dir():
+        return None
+    for pfile in sorted(projects_dir.glob("*.json")):
+        try:
+            data = json.loads(pfile.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        cand_id = str(data.get("id") or pfile.stem).strip()
+        if not cand_id or cand_id in FORBIDDEN_AGY_PROJECT_IDS:
+            continue
+        if uris_match_workspace(extract_agy_project_folder_uris(data), ws_uri):
+            return AgyProjectId(cand_id)
+    return None
 
 
 def compute_codex_nesting_depth(

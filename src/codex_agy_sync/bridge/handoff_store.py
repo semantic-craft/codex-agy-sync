@@ -63,6 +63,7 @@ class HandoffReceipt:
     chain_depth: int = 0
     target_seed_turn_count: int | None = None
     target_seed_text_digest: str | None = None
+    pairing_mode: str | None = None
 
 
 _RECEIPT_FIELDS = frozenset(field.name for field in dataclasses.fields(HandoffReceipt))

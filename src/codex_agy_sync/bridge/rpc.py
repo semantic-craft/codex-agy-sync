@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import dataclasses
 from dataclasses import dataclass
-import json
-import os
 from pathlib import Path
-import socket
-import struct
 from typing import Any, Callable, Mapping, Tuple
 import urllib.error
 import urllib.request
@@ -23,20 +18,17 @@ from ..codecs import (
 )
 from ..events import CascadeId, CodexThreadId, HostKind, StepIndex
 from ..ledger import TrajectoryLedger
-from ..workspace import PACKAGE_VERSION, validate_session_id
+from ..workspace import validate_session_id
 from .paths_and_locks import (
     AgyDaemonEndpoint, CodexDaemonEndpoint, HostLockSnapshot, PresenceWalGuard,
-    TransportMode, has_live_unix_socket, unix_socket_connect_path,
+    TransportMode, has_live_unix_socket,
 )
+from .project_rpc import OnlineRpcUnavailableError, UnixWebSocketClient, open_codex_ws_rpc
 from .registry import WorkspaceProjectBinding
 from .state_machine import HostTransportPort, SessionSyncCursor, SyncDirection
 
 _ACTIVE_TURN_STATUSES = frozenset({"active", "running", "inprogress", "in_progress"})
 _NOT_FOUND_MARKERS = ("not found", "no rollout", "unknown thread", "does not exist")
-
-
-class OnlineRpcUnavailableError(RuntimeError):
-    """Raised when an online loopback RPC endpoint is unreachable or fails transport."""
 
 
 @dataclass(frozen=True)
@@ -133,97 +125,6 @@ def fetch_agy_trajectory_via_rpc(
         raise OnlineRpcUnavailableError("Invalid protobuf payload from Antigravity GetCascadeTrajectory RPC.") from None
 
 
-def _xor_websocket_mask(payload: bytes, mask_key: bytes) -> bytes:
-    if not (plen := len(payload)):
-        return b""
-    repeated = (mask_key * ((plen // 4) + 1))[:plen]
-    return (int.from_bytes(payload, "big") ^ int.from_bytes(repeated, "big")).to_bytes(plen, "big")
-
-
-class UnixWebSocketClient:
-    """Minimal stdlib RFC 6455 client over an `AF_UNIX` stream socket."""
-
-    def __init__(self, sock: socket.socket) -> None:
-        self._sock = sock
-        self._buf = bytearray()
-
-    def handshake(self) -> None:
-        ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
-        upgrade_req = (
-            f"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
-            f"Connection: Upgrade\r\nSec-WebSocket-Key: {ws_key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
-        ).encode("ascii")
-        self._sock.sendall(upgrade_req)
-        while b"\r\n\r\n" not in self._buf:
-            if len(self._buf) > 65536 or not (chunk := self._sock.recv(4096)):
-                raise OnlineRpcUnavailableError("Codex WebSocket HTTP upgrade failed.")
-            self._buf.extend(chunk)
-        header_raw, remainder = bytes(self._buf).split(b"\r\n\r\n", 1)
-        self._buf = bytearray(remainder)
-        status_line = header_raw.splitlines()[0].decode("latin1", errors="replace") if header_raw else ""
-        if not status_line.startswith("HTTP/1.1 101"):
-            raise OnlineRpcUnavailableError("Codex socket rejected WebSocket 101 upgrade.")
-
-    def _read_exact(self, size: int) -> bytes:
-        while len(self._buf) < size:
-            if not (chunk := self._sock.recv(max(4096, size - len(self._buf)))):
-                raise OnlineRpcUnavailableError("Unexpected EOF reading Codex WebSocket frame.")
-            self._buf.extend(chunk)
-        out = bytes(self._buf[:size])
-        del self._buf[:size]
-        return out
-
-    def send_frame(self, opcode: int, payload: bytes = b"") -> None:
-        plen, first = len(payload), (0x80 | (opcode & 0x0F))
-        if plen < 126:
-            hdr = struct.pack("!BB", first, 0x80 | plen)
-        elif plen < 65536:
-            hdr = struct.pack("!BBH", first, 0x80 | 126, plen)
-        else:
-            hdr = struct.pack("!BBQ", first, 0x80 | 127, plen)
-        mask_key = os.urandom(4)
-        self._sock.sendall(hdr + mask_key + _xor_websocket_mask(payload, mask_key))
-
-    def send_json(self, obj: Mapping[str, Any]) -> None:
-        self.send_frame(0x1, json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-
-    def recv_json(self) -> dict[str, Any]:
-        fragments = bytearray()
-        while True:
-            b0, b1 = self._read_exact(2)
-            fin, opcode, masked, plen = bool(b0 & 0x80), (b0 & 0x0F), bool(b1 & 0x80), (b1 & 0x7F)
-            if plen == 126:
-                (plen,) = struct.unpack("!H", self._read_exact(2))
-            elif plen == 127:
-                (plen,) = struct.unpack("!Q", self._read_exact(8))
-            mask_key = self._read_exact(4) if masked else b""
-            payload = self._read_exact(plen) if plen > 0 else b""
-            if masked and plen > 0:
-                payload = _xor_websocket_mask(payload, mask_key)
-            if opcode == 0x9:
-                self.send_frame(0xA, payload)
-                continue
-            if opcode == 0xA:
-                continue
-            if opcode == 0x8:
-                raise OnlineRpcUnavailableError("Codex WebSocket closed by server.")
-            fragments.extend(payload)
-            if fin:
-                try:
-                    parsed = json.loads(fragments.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    raise OnlineRpcUnavailableError("Malformed JSON frame from Codex app-server.") from None
-                if not isinstance(parsed, dict):
-                    raise OnlineRpcUnavailableError("Non-object JSON-RPC message from Codex app-server.")
-                return parsed
-
-    def wait_for_id(self, target_id: int, *, max_messages: int = 128) -> dict[str, Any]:
-        for _ in range(max_messages):
-            if (msg := self.recv_json()).get("id") == target_id:
-                return msg
-        raise OnlineRpcUnavailableError(f"Timed out awaiting Codex RPC response id={target_id}.")
-
-
 def extract_codex_rpc_thread(resp_msg: Mapping[str, Any], thread_id: CodexThreadId) -> CodexRpcReadResult:
     if "error" in resp_msg:
         err_obj = resp_msg["error"]
@@ -253,29 +154,9 @@ def fetch_codex_thread_via_rpc(
 ) -> CodexRpcReadResult:
     """Read a Codex thread lock-free via `codex app-server` Unix-socket WebSocket (`thread/read`)."""
     validate_session_id(str(thread_id), label="codex_thread_id")
-    if endpoint is None or not has_live_unix_socket(endpoint.socket_path):
-        raise OnlineRpcUnavailableError("No live Codex app-server Unix socket available.")
-
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout_s)
-    ws = UnixWebSocketClient(sock)
-    try:
-        sock.connect(unix_socket_connect_path(endpoint.socket_path))
-        ws.handshake()
-        ws.send_json({"id": 1, "method": "initialize", "params": {
-            "clientInfo": {"name": "codex-agy-sync", "version": PACKAGE_VERSION}, "capabilities": {"experimentalApi": True},
-        }})
-        if "error" in ws.wait_for_id(1):
-            raise OnlineRpcUnavailableError("Codex app-server initialize RPC failed.")
-        ws.send_json({"method": "initialized", "params": {}})
+    with open_codex_ws_rpc(endpoint, timeout_s=timeout_s) as ws:
         ws.send_json({"id": 2, "method": "thread/read", "params": {"threadId": str(thread_id), "includeTurns": True}})
         return extract_codex_rpc_thread(ws.wait_for_id(2), thread_id)
-    except (TimeoutError, OSError):
-        raise OnlineRpcUnavailableError("Codex app-server Unix socket connection failed.") from None
-    finally:
-        with contextlib.suppress(OSError):
-            ws.send_frame(0x8, b"")
-        sock.close()
 
 
 def read_agy_ledger_dual_mode(

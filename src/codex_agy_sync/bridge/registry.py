@@ -12,7 +12,6 @@ from typing import Any, Mapping, Sequence, Tuple
 
 from ..events import SubagentLineage
 from ..workspace import (
-    FORBIDDEN_AGY_PROJECT_IDS,
     AgyProjectId,
     CascadeId,
     CodexLegacyProjectId,
@@ -32,6 +31,11 @@ from .paths_and_locks import (
     expand_existing_with_sidecars,
     open_readonly_sqlite,
 )
+from .project_rpc import (
+    OnlineRpcUnavailableError,
+    register_agy_project_via_rpc,
+    register_codex_project_via_rpc,
+)
 from .store_catalog import (
     build_combined_lineage,
     discover_agy_subagent_sidecars,
@@ -40,6 +44,7 @@ from .store_catalog import (
     ensure_agy_summaries_db_schema,
     ensure_codex_state_db_schema,
     extract_agy_project_folder_uris as _extract_agy_project_folder_uris,
+    find_readonly_agy_project_id as _find_readonly_agy_project_id,
     safe_valid_session_id,
     scan_agy_summaries_db,
     scan_codex_state_sessions,
@@ -147,22 +152,7 @@ class ProjectRegistry:
         return _uris_match_workspace(raw_uris, target_uri)
 
     def find_readonly_agy_project_id(self, ws_uri: WorkspaceRootUri) -> AgyProjectId | None:
-        projects_dir = self._paths.gemini_config_dir / "projects"
-        if not projects_dir.is_dir():
-            return None
-        for pfile in sorted(projects_dir.glob("*.json")):
-            try:
-                data = json.loads(pfile.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
-            cand_id = str(data.get("id") or pfile.stem).strip()
-            if not cand_id or cand_id in FORBIDDEN_AGY_PROJECT_IDS:
-                continue
-            if _uris_match_workspace(_extract_agy_project_folder_uris(data), ws_uri):
-                return AgyProjectId(cand_id)
-        return None
+        return _find_readonly_agy_project_id(self._paths, ws_uri)
 
     def _ensure_agy_project(self, ws_path: WorkspacePath, ws_uri: WorkspaceRootUri, ws_name: str) -> AgyProjectId:
         _ = ws_path
@@ -426,8 +416,9 @@ def diagnose_workspace_binding(paths: HostEnvironmentPaths, workspace: str | Pat
     if codex_pid is None and codex_active:
         steps.append(f'Open "{ws_path}" in Codex Desktop so it registers natively, or quit Codex Desktop before offline pairing.')
     if agy_pid is None or codex_pid is None:
-        steps.append(f'Retry handoff with auto-pairing when missing host is offline: codex-agy-sync handoff -w "{ws_path}" --pair-if-offline')
-        steps.append(f'Or pair explicitly offline: codex-agy-sync pair -w "{ws_path}"')
+        steps.append(f'Retry handoff with automatic online/offline pairing: codex-agy-sync handoff -w "{ws_path}" --auto-pair')
+        steps.append(f'Or retry with offline-only pairing: codex-agy-sync handoff -w "{ws_path}" --pair-if-offline')
+        steps.append(f'Or pair explicitly: codex-agy-sync pair -w "{ws_path}"')
     return WorkspaceBindingDiagnosis(
         ws_path, ws_uri, ws_path.name or "workspace",
         agy_pid is not None, codex_pid is not None,
@@ -492,6 +483,128 @@ def _pair_agy_only_offline(
         raise _classify_busy_pair_error(guard, ws_str, need_agy=True, need_codex=False) from exc
 
 
+def _apply_rpc_project_ids(
+    binding: WorkspaceProjectBinding,
+    agy_rpc_id: str | None,
+    codex_rpc_id: str | None,
+) -> WorkspaceProjectBinding:
+    if agy_rpc_id is None and codex_rpc_id is None:
+        return binding
+    return dataclasses.replace(
+        binding,
+        agy_project_id=AgyProjectId(agy_rpc_id) if agy_rpc_id is not None else binding.agy_project_id,
+        codex_project_id=CodexProjectId(codex_rpc_id) if codex_rpc_id is not None else binding.codex_project_id,
+    )
+
+
+def _try_online_project_registrations(
+    paths: HostEnvironmentPaths,
+    registry: ProjectRegistry,
+    workspace: str | Path,
+    *,
+    need_agy: bool,
+    need_codex: bool,
+) -> tuple[bool, bool, str | None, str | None, int]:
+    still_agy, still_codex = need_agy, need_codex
+    agy_rpc_id: str | None = None
+    codex_rpc_id: str | None = None
+    online_count = 0
+    if still_agy:
+        try:
+            agy_rpc_id = register_agy_project_via_rpc(paths, workspace, registry=registry)
+            still_agy = False
+            online_count += 1
+        except OnlineRpcUnavailableError:
+            pass
+    if still_codex:
+        try:
+            codex_rpc_id = register_codex_project_via_rpc(paths, workspace)
+            still_codex = False
+            online_count += 1
+        except OnlineRpcUnavailableError:
+            pass
+    return still_agy, still_codex, agy_rpc_id, codex_rpc_id, online_count
+
+
+def _pair_codex_involved_offline(
+    paths: HostEnvironmentPaths,
+    guard: PresenceWalGuard,
+    registry: ProjectRegistry,
+    ro_binding: WorkspaceProjectBinding,
+    workspace: str | Path,
+    *,
+    need_agy: bool,
+    prefer_online_rpc: bool,
+) -> WorkspaceProjectBinding:
+    ws_str = str(ro_binding.workspace_path)
+    try:
+        with guard.acquire_offline_write_locks(HostKind.CODEX, None, None) as locks:
+            if need_agy and not locks.can_write_agy_offline():
+                raise _busy_pair_error("antigravity", ws_str)
+            codex_files = [
+                paths.codex_home_dir / "state_5.sqlite",
+                paths.codex_home_dir / ".codex-global-state.json",
+            ]
+            candidates = (
+                [paths.gemini_config_dir / "projects" / f"{ro_binding.agy_project_id}.json", *codex_files]
+                if need_agy
+                else codex_files
+            )
+            backup = guard.create_offline_backup(
+                HostKind.CODEX,
+                str(ro_binding.codex_project_id),
+                expand_existing_with_sidecars(candidates),
+                expected_new_files=candidates,
+            )
+            try:
+                if need_agy:
+                    return registry.ensure_workspace_binding(workspace, prefer_online_rpc=prefer_online_rpc)
+                return registry.ensure_codex_binding(workspace)
+            except Exception:
+                backup.restore()
+                raise
+    except BlockingIOError as exc:
+        raise _classify_busy_pair_error(guard, ws_str, need_agy=need_agy, need_codex=True) from exc
+
+
+def pair_workspace_with_mode(
+    paths: HostEnvironmentPaths,
+    guard: PresenceWalGuard,
+    registry: ProjectRegistry,
+    workspace: str | Path,
+    *,
+    prefer_online_rpc: bool = True,
+) -> tuple[WorkspaceProjectBinding, str]:
+    """Pair missing host registrations via online RPC (when preferred) or locked offline backup."""
+    ro_binding = registry.resolve_readonly_binding(workspace)
+    need_agy = registry.find_readonly_agy_project_id(ro_binding.workspace_uri) is None
+    need_codex = registry.find_readonly_codex_project_id(ro_binding.workspace_path) is None
+    if not need_agy and not need_codex:
+        return ro_binding, "already_paired"
+
+    agy_rpc_id: str | None = None
+    codex_rpc_id: str | None = None
+    online_count = 0
+    if prefer_online_rpc:
+        need_agy, need_codex, agy_rpc_id, codex_rpc_id, online_count = _try_online_project_registrations(
+            paths, registry, workspace, need_agy=need_agy, need_codex=need_codex,
+        )
+
+    if not need_agy and not need_codex:
+        fresh = registry.resolve_readonly_binding(workspace)
+        return _apply_rpc_project_ids(fresh, agy_rpc_id, codex_rpc_id), "online_rpc"
+
+    if need_agy and not need_codex:
+        offline_binding = _pair_agy_only_offline(paths, guard, registry, ro_binding, workspace)
+    else:
+        offline_binding = _pair_codex_involved_offline(
+            paths, guard, registry, ro_binding, workspace,
+            need_agy=need_agy, prefer_online_rpc=prefer_online_rpc,
+        )
+    mode = "hybrid" if online_count > 0 else "offline_locked"
+    return _apply_rpc_project_ids(offline_binding, agy_rpc_id, codex_rpc_id), mode
+
+
 def guarded_pair_workspace(
     paths: HostEnvironmentPaths,
     guard: PresenceWalGuard,
@@ -500,39 +613,7 @@ def guarded_pair_workspace(
     *,
     prefer_online_rpc: bool = True,
 ) -> WorkspaceProjectBinding:
-    ro_binding = registry.resolve_readonly_binding(workspace)
-    agy_registered = registry.find_readonly_agy_project_id(ro_binding.workspace_uri) is not None
-    codex_registered = registry.find_readonly_codex_project_id(ro_binding.workspace_path) is not None
-    if agy_registered and codex_registered:
-        return ro_binding
-    if codex_registered and not agy_registered:
-        return _pair_agy_only_offline(paths, guard, registry, ro_binding, workspace)
-
-    ws_str = str(ro_binding.workspace_path)
-    try:
-        with guard.acquire_offline_write_locks(HostKind.CODEX, None, None) as locks:
-            if not agy_registered and not locks.can_write_agy_offline():
-                raise _busy_pair_error("antigravity", ws_str)
-            codex_files = [
-                paths.codex_home_dir / "state_5.sqlite",
-                paths.codex_home_dir / ".codex-global-state.json",
-            ]
-            candidates = codex_files if agy_registered else [
-                paths.gemini_config_dir / "projects" / f"{ro_binding.agy_project_id}.json",
-                *codex_files,
-            ]
-            backup = guard.create_offline_backup(
-                HostKind.CODEX,
-                str(ro_binding.codex_project_id),
-                expand_existing_with_sidecars(candidates),
-                expected_new_files=candidates,
-            )
-            try:
-                if agy_registered:
-                    return registry.ensure_codex_binding(workspace)
-                return registry.ensure_workspace_binding(workspace, prefer_online_rpc=prefer_online_rpc)
-            except Exception:
-                backup.restore()
-                raise
-    except BlockingIOError as exc:
-        raise _classify_busy_pair_error(guard, ws_str, need_agy=not agy_registered, need_codex=True) from exc
+    binding, _ = pair_workspace_with_mode(
+        paths, guard, registry, workspace, prefer_online_rpc=prefer_online_rpc,
+    )
+    return binding

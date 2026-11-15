@@ -31,7 +31,7 @@ from .registry import (
     WorkspaceBindingDiagnosis,
     WorkspaceProjectBinding,
     diagnose_workspace_binding,
-    guarded_pair_workspace,
+    pair_workspace_with_mode,
 )
 from .state_machine import SyncDirection, generate_uuid7
 from .transport import DefaultHostTransport
@@ -83,6 +83,7 @@ class ResolvedHandoffRequest:
     chain_depth: int = 0
     already_ready_receipt: HandoffReceipt | None = None
     paired_now: bool = False
+    pairing_mode: str = "already_paired"
 
 
 def validate_handoff_selector_flags(
@@ -273,6 +274,7 @@ def _resolve_chain_request(
     source_id: str | None,
     title: str | None,
     paired_now: bool,
+    pairing_mode: str,
 ) -> ResolvedHandoffRequest:
     if source_id is not None:
         validate_session_id(source_id, label="source_id")
@@ -281,9 +283,15 @@ def _resolve_chain_request(
         if source_id is not None:
             eff_dir = direction or infer_direction_from_source_id(paths, source_id, binding=binding)
             assert_source_belongs_to_binding(paths, binding, eff_dir, source_id)
-            return ResolvedHandoffRequest(binding, eff_dir, source_id, title, "chain", chain_id=generate_uuid7(), chain_depth=0, paired_now=paired_now)
+            return ResolvedHandoffRequest(
+                binding, eff_dir, source_id, title, "chain",
+                chain_id=generate_uuid7(), chain_depth=0, paired_now=paired_now, pairing_mode=pairing_mode,
+            )
         chosen = _select_latest_candidate(paths, binding, list_handoff_candidates(paths, binding, direction=direction))
-        return ResolvedHandoffRequest(binding, chosen.direction, chosen.session_id, title, "chain", chain_id=generate_uuid7(), chain_depth=0, paired_now=paired_now)
+        return ResolvedHandoffRequest(
+            binding, chosen.direction, chosen.session_id, title, "chain",
+            chain_id=generate_uuid7(), chain_depth=0, paired_now=paired_now, pairing_mode=pairing_mode,
+        )
 
     if tip.target_id and _did_target_advance_beyond_seed(paths, binding, tip, propagate_active=True) is True:
         next_dir = SyncDirection.AGY_TO_CODEX if tip.target_host == HostKind.ANTIGRAVITY.value else SyncDirection.CODEX_TO_AGY
@@ -291,7 +299,8 @@ def _resolve_chain_request(
             raise ValueError(f"--direction {direction.value} contradicts --chain next hop {next_dir.value} from baton {tip.target_id}.")
         return ResolvedHandoffRequest(
             binding, next_dir, tip.target_id, title, "chain",
-            chain_id=tip.chain_id or generate_uuid7(), chained_from_source_id=tip.source_id, chain_depth=tip.chain_depth + 1, paired_now=paired_now,
+            chain_id=tip.chain_id or generate_uuid7(), chained_from_source_id=tip.source_id, chain_depth=tip.chain_depth + 1,
+            paired_now=paired_now, pairing_mode=pairing_mode,
         )
 
     s_dir = SyncDirection.CODEX_TO_AGY if tip.source_host == HostKind.CODEX.value else SyncDirection.AGY_TO_CODEX
@@ -302,7 +311,8 @@ def _resolve_chain_request(
             raise ValueError(f"--direction {direction.value} contradicts --chain source re-handoff {s_dir.value} from {tip.source_id}.")
         return ResolvedHandoffRequest(
             binding, s_dir, tip.source_id, title, "chain",
-            chain_id=tip.chain_id or generate_uuid7(), chained_from_source_id=tip.chained_from_source_id, chain_depth=tip.chain_depth + 1, paired_now=paired_now,
+            chain_id=tip.chain_id or generate_uuid7(), chained_from_source_id=tip.chained_from_source_id, chain_depth=tip.chain_depth + 1,
+            paired_now=paired_now, pairing_mode=pairing_mode,
         )
 
     if direction is not None and direction != s_dir:
@@ -310,7 +320,7 @@ def _resolve_chain_request(
     return ResolvedHandoffRequest(
         binding, s_dir, tip.source_id, title, "chain",
         chain_id=tip.chain_id, chained_from_source_id=tip.chained_from_source_id, chain_depth=tip.chain_depth,
-        already_ready_receipt=dataclasses.replace(tip, status="no_op"), paired_now=paired_now,
+        already_ready_receipt=dataclasses.replace(tip, status="no_op"), paired_now=paired_now, pairing_mode=pairing_mode,
     )
 
 
@@ -325,6 +335,7 @@ def resolve_handoff_request(
     chain: bool = False,
     pick: bool = False,
     pair_if_offline: bool = False,
+    auto_pair: bool = False,
     interactive_chooser: Callable[[Sequence[HandoffCandidate]], HandoffCandidate] | None = None,
     stdin_isatty: bool | None = None,
     stderr_isatty: bool | None = None,
@@ -335,25 +346,38 @@ def resolve_handoff_request(
         raise ValueError("Handoff direction must be codex_to_agy or agy_to_codex.")
 
     paired_now = False
+    pairing_mode = "already_paired"
     diagnosis = diagnose_workspace_binding(paths, workspace)
     if not diagnosis.is_paired():
-        if not pair_if_offline:
+        if auto_pair:
+            binding, pairing_mode = pair_workspace_with_mode(
+                paths, PresenceWalGuard(paths), ProjectRegistry(paths), workspace, prefer_online_rpc=True,
+            )
+            paired_now = True
+        elif pair_if_offline:
+            binding, pairing_mode = pair_workspace_with_mode(
+                paths, PresenceWalGuard(paths), ProjectRegistry(paths), workspace, prefer_online_rpc=False,
+            )
+            paired_now = True
+        else:
             raise UnpairedWorkspaceError(diagnosis)
-        binding = guarded_pair_workspace(paths, PresenceWalGuard(paths), ProjectRegistry(paths), workspace)
-        paired_now = True
     else:
         binding = ProjectRegistry(paths).resolve_readonly_binding(workspace)
 
     if chain:
-        return _resolve_chain_request(paths, binding, direction, source_id, title, paired_now)
+        return _resolve_chain_request(paths, binding, direction, source_id, title, paired_now, pairing_mode)
     if source_id is not None:
         validate_session_id(source_id, label="source_id")
         eff_dir = direction if direction is not None else infer_direction_from_source_id(paths, source_id, binding=binding)
         assert_source_belongs_to_binding(paths, binding, eff_dir, source_id)
-        return ResolvedHandoffRequest(binding, eff_dir, source_id, title, "source_id", paired_now=paired_now)
+        return ResolvedHandoffRequest(
+            binding, eff_dir, source_id, title, "source_id", paired_now=paired_now, pairing_mode=pairing_mode,
+        )
     if latest:
         chosen = _select_latest_candidate(paths, binding, list_handoff_candidates(paths, binding, direction=direction))
-        return ResolvedHandoffRequest(binding, chosen.direction, chosen.session_id, title, "latest", paired_now=paired_now)
+        return ResolvedHandoffRequest(
+            binding, chosen.direction, chosen.session_id, title, "latest", paired_now=paired_now, pairing_mode=pairing_mode,
+        )
     if interactive_chooser is None:
         in_tty = bool(sys.stdin.isatty()) if stdin_isatty is None else stdin_isatty
         err_tty = bool(sys.stderr.isatty()) if stderr_isatty is None else stderr_isatty
@@ -363,7 +387,9 @@ def resolve_handoff_request(
         list_handoff_candidates(paths, binding, direction=direction),
         chooser=interactive_chooser, stdin_isatty=stdin_isatty, stderr_isatty=stderr_isatty,
     )
-    return ResolvedHandoffRequest(binding, chosen.direction, chosen.session_id, title, "pick", paired_now=paired_now)
+    return ResolvedHandoffRequest(
+        binding, chosen.direction, chosen.session_id, title, "pick", paired_now=paired_now, pairing_mode=pairing_mode,
+    )
 
 
 def execute_handoff(
@@ -377,6 +403,7 @@ def execute_handoff(
     chain: bool = False,
     pick: bool = False,
     pair_if_offline: bool = False,
+    auto_pair: bool = False,
     interactive_chooser: Callable[[Sequence[HandoffCandidate]], HandoffCandidate] | None = None,
     stdin_isatty: bool | None = None,
     stderr_isatty: bool | None = None,
@@ -384,14 +411,14 @@ def execute_handoff(
     """Resolve a handoff request and execute it, returning `(receipt, mutated_state)`."""
     resolved = resolve_handoff_request(
         paths, workspace, direction=direction, source_id=source_id, title=title,
-        latest=latest, chain=chain, pick=pick, pair_if_offline=pair_if_offline,
+        latest=latest, chain=chain, pick=pick, pair_if_offline=pair_if_offline, auto_pair=auto_pair,
         interactive_chooser=interactive_chooser, stdin_isatty=stdin_isatty, stderr_isatty=stderr_isatty,
     )
     if resolved.already_ready_receipt is not None:
-        return resolved.already_ready_receipt, resolved.paired_now
+        return dataclasses.replace(resolved.already_ready_receipt, pairing_mode=resolved.pairing_mode), resolved.paired_now
     receipt = handoff_session(
         paths, resolved.binding.workspace_path, direction=resolved.direction, source_id=resolved.source_id,
         title=resolved.title, chain_id=resolved.chain_id, chained_from_source_id=resolved.chained_from_source_id,
         chain_depth=resolved.chain_depth,
     )
-    return receipt, True
+    return dataclasses.replace(receipt, pairing_mode=resolved.pairing_mode), True
