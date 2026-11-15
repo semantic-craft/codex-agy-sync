@@ -20,6 +20,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private var settingsController: SettingsWindowController?
     private var hotKey: GlobalHotKey?
     private var keyMonitor: Any?
+    private var layoutRefreshScheduled = false
     private var cancellables = Set<AnyCancellable>()
 
     private var pinPanel: Bool {
@@ -75,32 +76,53 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             self?.hidePanel(force: false)
         }
 
-        viewModel.objectWillChange
-            .sink { [weak self] _ in
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.updateStatusButtonAppearance()
-                    if self.panel.isVisible {
-                        self.positionPanel()
-                    }
-                }
-            }
-            .store(in: &cancellables)
+        Publishers.MergeMany(
+            viewModel.$snapshot.map { _ in () }.eraseToAnyPublisher(),
+            viewModel.$isLoading.map { _ in () }.eraseToAnyPublisher(),
+            viewModel.$banner.map { _ in () }.eraseToAnyPublisher(),
+            viewModel.$cliMissing.map { _ in () }.eraseToAnyPublisher(),
+            viewModel.$searchQuery.map { _ in () }.eraseToAnyPublisher()
+        )
+        .sink { [weak self] _ in
+            self?.scheduleChromeRefresh()
+        }
+        .store(in: &cancellables)
 
-        viewModel.preferencesStore.$preferences
-            .sink { [weak self] prefs in
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.updateStatusButtonAppearance()
-                    if self.environment["MENUBAR_DISABLE_GLOBAL_HOTKEY"] != "1" {
-                        _ = self.hotKey?.reconfigure(prefs.hotKey)
-                    }
-                    if self.panel.isVisible {
-                        self.positionPanel()
+        Publishers.CombineLatest(
+            viewModel.preferencesStore.$preferences,
+            viewModel.preferencesStore.$isRecordingShortcut
+        )
+        .sink { [weak self] prefs, isRecording in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.updateStatusButtonAppearance()
+                if self.environment["MENUBAR_DISABLE_GLOBAL_HOTKEY"] != "1", let hk = self.hotKey {
+                    if isRecording {
+                        hk.suspend()
+                    } else {
+                        let ok = hk.reconfigure(prefs.hotKey)
+                        self.viewModel.preferencesStore.setHotKeyRegistrationFailed(!ok)
                     }
                 }
+                if self.panel.isVisible {
+                    self.positionPanel()
+                }
             }
-            .store(in: &cancellables)
+        }
+        .store(in: &cancellables)
+    }
+
+    private func scheduleChromeRefresh() {
+        guard !layoutRefreshScheduled else { return }
+        layoutRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.layoutRefreshScheduled = false
+            self.updateStatusButtonAppearance()
+            if self.panel.isVisible {
+                self.positionPanel()
+            }
+        }
     }
 
     func start() {
@@ -113,13 +135,14 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 case .togglePanelOnly:
                     self.togglePanel(nil)
                 case .instantPrimaryRescue:
-                    self.showPanel()
+                    self.showPanel(refreshIfNeeded: false)
                     Task { @MainActor in
-                        await self.viewModel.performPrimaryAction()
+                        await self.viewModel.refreshAndPerformPrimaryAction()
                     }
                 }
             }
-            _ = hk.register(shortcut: viewModel.preferencesStore.preferences.hotKey)
+            let ok = hk.register(shortcut: viewModel.preferencesStore.preferences.hotKey)
+            viewModel.preferencesStore.setHotKeyRegistrationFailed(!ok)
             self.hotKey = hk
         }
 
@@ -146,6 +169,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     func openSettings() {
         if pinPanel {
+            panel.isFloatingPanel = false
             panel.level = .normal
         } else {
             hidePanel(force: false)
@@ -177,11 +201,12 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         }
     }
 
-    func showPanel() {
+    func showPanel(refreshIfNeeded: Bool = true) {
+        panel.isFloatingPanel = true
         panel.level = .floating
         positionPanel()
         NSRunningApplication.current.activate(options: [.activateAllWindows])
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         panel.makeKeyAndOrderFront(nil)
         DispatchQueue.main.async { [weak self] in
             guard let self, self.panel.isVisible else { return }
@@ -196,8 +221,10 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 )
             }
         }
-        Task { @MainActor in
-            await viewModel.refresh()
+        if refreshIfNeeded {
+            Task { @MainActor in
+                await viewModel.refresh()
+            }
         }
     }
 
@@ -229,7 +256,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let eventWindowNumber = event.windowNumber
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = HotKeyShortcut.normalizedEventFlags(event.modifierFlags)
             let keyChar = event.charactersIgnoringModifiers?.lowercased()
             let keyCode = event.keyCode
             let consumed = MainActor.assumeIsolated {
@@ -354,9 +381,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             }
         }
 
-        panel.setFrame(
-            NSRect(x: originX, y: originY, width: panelWidth, height: panelHeight),
-            display: true
-        )
+        let targetFrame = NSRect(x: originX, y: originY, width: panelWidth, height: panelHeight)
+        if panel.frame != targetFrame {
+            panel.setFrame(targetFrame, display: true)
+        }
     }
 }

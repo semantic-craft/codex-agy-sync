@@ -331,17 +331,23 @@ def _make_sandbox_env(run_dir: Path, release_api_url: str) -> tuple[dict[str, Pa
 
 
 def _verify_app_bundle_assets(app_bundle: Path) -> dict[str, Any]:
-    """Assert AppIcon.icns exists and Info.plist matches pyproject.toml version."""
+    """Assert AppIcon.icns exists and Info.plist matches bundle ID and pyproject.toml version."""
     icon_path = app_bundle / "Contents" / "Resources" / "AppIcon.icns"
     plist_path = app_bundle / "Contents" / "Info.plist"
     if not icon_path.is_file() or icon_path.stat().st_size <= 10_000:
         raise AssertionError(f"Expected non-trivial AppIcon.icns at {icon_path}")
     info = plistlib.loads(plist_path.read_bytes())
+    if info.get("CFBundleIdentifier") != QA_BUNDLE_ID:
+        raise AssertionError(f"Expected CFBundleIdentifier={QA_BUNDLE_ID!r}, got {info.get('CFBundleIdentifier')!r}")
     if info.get("CFBundleIconFile") != "AppIcon":
         raise AssertionError(f"Expected CFBundleIconFile='AppIcon', got {info.get('CFBundleIconFile')!r}")
     if info.get("CFBundleShortVersionString") != PACKAGE_VERSION:
         raise AssertionError(f"Bundle version {info.get('CFBundleShortVersionString')!r} != pyproject {PACKAGE_VERSION!r}")
-    return {"app_icon_bytes": icon_path.stat().st_size, "bundle_version": str(info["CFBundleShortVersionString"])}
+    return {
+        "bundle_id": str(info["CFBundleIdentifier"]),
+        "app_icon_bytes": icon_path.stat().st_size,
+        "bundle_version": str(info["CFBundleShortVersionString"]),
+    }
 
 
 def _seed_interrupted_agy(dirs: dict[str, Path], paths: HostEnvironmentPaths) -> tuple[sqlite3.Connection, int]:
@@ -499,6 +505,7 @@ def _drive_settings_gui(
         lambda: any(w.get("title") == SETTINGS_TITLE for w in _cua_call("list_windows", {"pid": pid, "session": session_name}).get("windows", [])),
     )
     swid = _wait_for_window(pid, SETTINGS_TITLE, session_name, 8.0)
+    _cua_call("bring_to_front", {"pid": pid, "window_id": swid, "session": session_name})
 
     def _has_settings_el(needle: str) -> bool:
         st = _cua_call("get_window_state", {"pid": pid, "window_id": swid, "tree_format": "both", "include_screenshot": False, "session": session_name})
@@ -506,6 +513,7 @@ def _drive_settings_gui(
 
     _click_until(pid, swid, "设置分栏：图标与外观", session_name, lambda: _has_settings_el("菜单栏图标：切端闪电"))
     _click_until(pid, swid, "菜单栏图标：切端闪电", session_name, lambda: _read_persisted_icon_style(prefs_suite) == "pulse_bolt")
+    _cua_call("bring_to_front", {"pid": pid, "window_id": swid, "session": session_name})
     icons_shot = shots_dir / "03-settings-icons.png"
     _cua_call("get_window_state", {"pid": pid, "window_id": swid, "tree_format": "elements", "session": session_name}, screenshot_out=icons_shot)
     if not icons_shot.is_file() or icons_shot.stat().st_size <= 0:
@@ -525,6 +533,7 @@ def _drive_settings_gui(
         lambda: bool(release_stub.requests) and _has_settings_el(release_stub.tag_name),
         wait_s=4.0,
     )
+    _cua_call("bring_to_front", {"pid": pid, "window_id": swid, "session": session_name})
     update_shot = shots_dir / "04-settings-update.png"
     _cua_call("get_window_state", {"pid": pid, "window_id": swid, "tree_format": "elements", "session": session_name}, screenshot_out=update_shot)
     if not update_shot.is_file() or update_shot.stat().st_size <= 0:

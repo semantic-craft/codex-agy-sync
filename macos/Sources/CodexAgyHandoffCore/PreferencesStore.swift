@@ -88,6 +88,12 @@ public struct HotKeyShortcut: Codable, Equatable, Sendable {
         self.displayString = displayString
     }
 
+    public static func normalizedEventFlags(_ flags: NSEvent.ModifierFlags) -> NSEvent.ModifierFlags {
+        flags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.capsLock, .numericPad, .function])
+    }
+
     public static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
         var mask: UInt32 = 0
         if flags.contains(.control) { mask |= carbonControlKey }
@@ -298,6 +304,8 @@ public final class PreferencesStore: ObservableObject {
     @Published public private(set) var preferences: AppPreferences
     @Published public private(set) var launchAtLogin: Bool
     @Published public private(set) var loginItemError: String?
+    @Published public private(set) var isRecordingShortcut: Bool = false
+    @Published public private(set) var hotKeyRegistrationFailed: Bool = false
 
     public let defaults: UserDefaults
     private let loginItemManager: any LoginItemManaging
@@ -378,7 +386,21 @@ public final class PreferencesStore: ObservableObject {
     }
 
     public func setHotKey(_ shortcut: HotKeyShortcut) {
+        if !shortcut.isEnabled {
+            isRecordingShortcut = false
+            hotKeyRegistrationFailed = false
+        }
         update { $0.hotKey = shortcut }
+    }
+
+    public func setShortcutRecording(_ recording: Bool) {
+        guard isRecordingShortcut != recording else { return }
+        isRecordingShortcut = recording
+    }
+
+    public func setHotKeyRegistrationFailed(_ failed: Bool) {
+        guard hotKeyRegistrationFailed != failed else { return }
+        hotKeyRegistrationFailed = failed
     }
 
     public func resetHotKeyToDefault() {

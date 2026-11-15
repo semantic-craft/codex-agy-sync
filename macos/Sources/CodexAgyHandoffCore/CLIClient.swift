@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum CLIResolutionSource: String, Codable, Equatable, Sendable {
@@ -98,7 +99,6 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
     private let environment: [String: String]
     private let timeoutSeconds: TimeInterval
     private let executableOverride: URL?
-    private let stateLock = NSLock()
 
     public init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -112,13 +112,45 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         self.executableOverride = executableOverride
     }
 
+    public static func userPythonBinDirectories(
+        homeDirectory: URL? = nil,
+        fileManager: FileManager = .default
+    ) -> [String] {
+        let home = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
+        let pyRoot = home.appendingPathComponent("Library/Python", isDirectory: true)
+        guard let children = try? fileManager.contentsOfDirectory(
+            at: pyRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        let sortedDirs = children
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { lhs, rhs in
+                let lv = lhs.lastPathComponent.split(separator: ".").map { Int($0) ?? -1 }
+                let rv = rhs.lastPathComponent.split(separator: ".").map { Int($0) ?? -1 }
+                for idx in 0..<max(lv.count, rv.count) {
+                    let a = idx < lv.count ? lv[idx] : 0
+                    let b = idx < rv.count ? rv[idx] : 0
+                    if a != b { return a > b }
+                }
+                return lhs.lastPathComponent > rhs.lastPathComponent
+            }
+
+        return sortedDirs.map { $0.appendingPathComponent("bin", isDirectory: true).path }
+    }
+
     public static func candidateExecutableEntries(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         defaults: UserDefaults = .standard,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil
     ) -> [(path: String, source: CLIResolutionSource)] {
         var entries: [(path: String, source: CLIResolutionSource)] = []
         var seen = Set<String>()
+        let home = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
 
         func appendCandidate(_ raw: String?, source: CLIResolutionSource) {
             guard let raw else { return }
@@ -130,7 +162,13 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
             }
         }
 
-        appendCandidate(environment["CODEX_AGY_SYNC_BIN"], source: .envOverride)
+        if let rawOverride = environment["CODEX_AGY_SYNC_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !rawOverride.isEmpty
+        {
+            let expanded = (rawOverride as NSString).expandingTildeInPath
+            return [(expanded, .envOverride)]
+        }
+
         appendCandidate(defaults.string(forKey: cliExecutableDefaultsKey), source: .customPath)
 
         if let pathEnv = environment["PATH"], !pathEnv.isEmpty {
@@ -143,11 +181,15 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         }
 
         appendCandidate(
-            fileManager.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/bin/codex-agy-sync")
-                .path,
+            home.appendingPathComponent(".local/bin/codex-agy-sync").path,
             source: .autoDiscovered
         )
+        for pyBin in userPythonBinDirectories(homeDirectory: home, fileManager: fileManager) {
+            appendCandidate(
+                URL(fileURLWithPath: pyBin).appendingPathComponent("codex-agy-sync").path,
+                source: .autoDiscovered
+            )
+        }
         appendCandidate("/opt/homebrew/bin/codex-agy-sync", source: .autoDiscovered)
         appendCandidate("/usr/local/bin/codex-agy-sync", source: .autoDiscovered)
 
@@ -157,24 +199,28 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
     public static func candidateExecutablePaths(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         defaults: UserDefaults = .standard,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil
     ) -> [String] {
         candidateExecutableEntries(
             environment: environment,
             defaults: defaults,
-            fileManager: fileManager
+            fileManager: fileManager,
+            homeDirectory: homeDirectory
         ).map(\.path)
     }
 
     public static func resolveExecutableWithSource(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         defaults: UserDefaults = .standard,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil
     ) -> (url: URL?, source: CLIResolutionSource, searched: [String]) {
         let entries = candidateExecutableEntries(
             environment: environment,
             defaults: defaults,
-            fileManager: fileManager
+            fileManager: fileManager,
+            homeDirectory: homeDirectory
         )
         let searched = entries.map(\.path)
         for entry in entries where fileManager.isExecutableFile(atPath: entry.path) {
@@ -186,22 +232,28 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
     public static func resolveExecutableURL(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         defaults: UserDefaults = .standard,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil
     ) -> (url: URL?, searched: [String]) {
         let resolved = resolveExecutableWithSource(
             environment: environment,
             defaults: defaults,
-            fileManager: fileManager
+            fileManager: fileManager,
+            homeDirectory: homeDirectory
         )
         return (resolved.url, resolved.searched)
     }
 
-    public static func mergedEnvironment(from environment: [String: String]) -> [String: String] {
+    public static func mergedEnvironment(
+        from environment: [String: String],
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil
+    ) -> [String: String] {
         var env = environment
-        let homeLocalBin = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin")
-            .path
-        let extraPathEntries = [homeLocalBin, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        let home = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
+        let homeLocalBin = home.appendingPathComponent(".local/bin").path
+        let pyBins = userPythonBinDirectories(homeDirectory: home, fileManager: fileManager)
+        let extraPathEntries = [homeLocalBin] + pyBins + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         var existing = (env["PATH"] ?? "").split(separator: ":").map(String.init)
         for entry in extraPathEntries where !existing.contains(entry) {
             existing.append(entry)
@@ -245,10 +297,7 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
     }
 
     private func currentDefaults() -> UserDefaults {
-        stateLock.lock()
-        let suite = defaultsSuiteName
-        stateLock.unlock()
-        return PreferencesStore.resolveDefaults(suiteName: suite, environment: environment)
+        PreferencesStore.resolveDefaults(suiteName: defaultsSuiteName, environment: environment)
     }
 
     private func runAndDecode<T: Decodable & Sendable>(
@@ -358,7 +407,10 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
 
         if finished.wait(timeout: .now() + timeoutSeconds) == .timedOut {
             process.terminate()
-            _ = finished.wait(timeout: .now() + 2.0)
+            if finished.wait(timeout: .now() + 2.0) == .timedOut || process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                _ = finished.wait(timeout: .now() + 1.0)
+            }
             _ = ioGroup.wait(timeout: .now() + 1.0)
             throw CLIClientError.timedOut(command: arguments, seconds: timeoutSeconds)
         }

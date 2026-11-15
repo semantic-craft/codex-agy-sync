@@ -711,7 +711,7 @@ public struct PopoverView: View {
             if item.state == .pendingReconcile {
                 await viewModel.reconcile(workspacePath: item.workspacePath, itemId: item.id)
             } else {
-                await viewModel.handoff(item: item)
+                await viewModel.handoff(item)
             }
         }
     }

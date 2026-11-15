@@ -43,6 +43,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        let wasVisible = window.isVisible
+        if NSApp.activationPolicy() != .regular {
+            _ = NSApp.setActivationPolicy(.regular)
+        }
         preferencesStore.refreshLaunchAtLoginStatus()
         Task { @MainActor [weak updateViewModel = self.updateViewModel] in
             await updateViewModel?.probeEnvironment()
@@ -51,16 +55,28 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             window.center()
             hasCenteredOnce = true
         }
+        window.orderFrontRegardless()
         NSRunningApplication.current.activate(options: [.activateAllWindows])
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(nil)
-        DispatchQueue.main.async { [weak window = self.window] in
-            window?.makeFirstResponder(nil)
+        if !wasVisible {
+            window.makeFirstResponder(nil)
+            DispatchQueue.main.async { [weak window = self.window] in
+                NSApp.activate()
+                window?.makeKeyAndOrderFront(nil)
+                window?.makeFirstResponder(nil)
+            }
         }
     }
 
-    func windowDidBecomeKey(_ notification: Notification) {
-        window.makeFirstResponder(nil)
+    func windowWillClose(_ notification: Notification) {
+        preferencesStore.setShortcutRecording(false)
+        DispatchQueue.main.async {
+            _ = NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        preferencesStore.setShortcutRecording(false)
     }
 }

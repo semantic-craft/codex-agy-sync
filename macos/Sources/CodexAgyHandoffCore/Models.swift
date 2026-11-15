@@ -35,17 +35,6 @@ public enum HostDisplayMeta {
         }
     }
 
-    public static func shortTag(for host: String) -> String {
-        switch host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "codex":
-            return "CDX"
-        case "antigravity", "agy":
-            return "AGY"
-        default:
-            return host.uppercased()
-        }
-    }
-
     public static func monogram(for host: String) -> String {
         switch host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "antigravity", "agy":
@@ -53,10 +42,6 @@ public enum HostDisplayMeta {
         default:
             return "C"
         }
-    }
-
-    public static func directionBadge(from sourceHost: String, to targetHost: String) -> String {
-        "\(shortTag(for: sourceHost)) → \(shortTag(for: targetHost))"
     }
 }
 
@@ -111,14 +96,6 @@ public struct MenubarSessionItem: Codable, Sendable, Equatable, Identifiable {
 
     public var targetDisplayName: String {
         HostDisplayMeta.displayName(for: targetHost)
-    }
-
-    public var sourceShortTag: String {
-        HostDisplayMeta.shortTag(for: host)
-    }
-
-    public var directionBadge: String {
-        HostDisplayMeta.directionBadge(from: host, to: targetHost)
     }
 
     public func presentation(nowEpoch: Double? = nil) -> MenubarRowPresentation {

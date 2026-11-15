@@ -123,13 +123,20 @@ if [[ ! -x "$BIN_PATH" ]]; then
 fi
 
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
-CONTENTS_DIR="$APP_BUNDLE/Contents"
+STAGE_DIR="$(mktemp -d "$SCRATCH_PATH/bundle-stage.XXXXXX")"
+DEST_STAGE="$OUTPUT_DIR/.${APP_NAME}.app.stage.$$"
+cleanup_stage() {
+    rm -rf "$STAGE_DIR" "$DEST_STAGE"
+}
+trap cleanup_stage EXIT
+
+STAGE_APP="$STAGE_DIR/$APP_NAME.app"
+CONTENTS_DIR="$STAGE_APP/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 PLIST_PATH="$CONTENTS_DIR/Info.plist"
 ICNS_PATH="$RESOURCES_DIR/AppIcon.icns"
 
-rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 chmod 755 "$MACOS_DIR/$APP_NAME"
@@ -147,6 +154,7 @@ payload = {
     "CFBundleExecutable": app_name,
     "CFBundleIconFile": "AppIcon",
     "CFBundleIconName": "AppIcon",
+    "CFBundleIdentifier": bundle_id,
     "CFBundleInfoDictionaryVersion": "6.0",
     "CFBundleName": app_name,
     "CFBundlePackageType": "APPL",
@@ -160,17 +168,37 @@ with open(plist_path, "wb") as handle:
     plistlib.dump(payload, handle)
 PY
 
-codesign --force --deep --sign - "$APP_BUNDLE"
-codesign --verify --deep --strict "$APP_BUNDLE"
+codesign --force --deep --sign - "$STAGE_APP"
+codesign --verify --deep --strict "$STAGE_APP"
+
+rm -rf "$DEST_STAGE"
+/usr/bin/ditto "$STAGE_APP" "$DEST_STAGE"
+codesign --verify --deep --strict "$DEST_STAGE"
+
+swift -e '
+import Foundation
+let fm = FileManager.default
+let staged = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let target = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+if fm.fileExists(atPath: target.path) {
+    _ = try fm.replaceItemAt(target, withItemAt: staged)
+} else {
+    try fm.moveItem(at: staged, to: target)
+}
+' "$DEST_STAGE" "$APP_BUNDLE"
 
 if [[ -n "$ARCHIVE_ZIP" ]]; then
     ARCHIVE_ZIP_ABS="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$ARCHIVE_ZIP")"
-    mkdir -p "$(dirname "$ARCHIVE_ZIP_ABS")"
-    rm -f "$ARCHIVE_ZIP_ABS" "$ARCHIVE_ZIP_ABS.sha256"
-    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ARCHIVE_ZIP_ABS"
+    ARCHIVE_DIR="$(dirname "$ARCHIVE_ZIP_ABS")"
+    ARCHIVE_BASE="$(basename "$ARCHIVE_ZIP_ABS")"
+    ARCHIVE_TMP="$ARCHIVE_DIR/.${ARCHIVE_BASE}.tmp.$$"
+    mkdir -p "$ARCHIVE_DIR"
+    rm -f "$ARCHIVE_TMP"
+    /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ARCHIVE_TMP"
+    mv -f "$ARCHIVE_TMP" "$ARCHIVE_ZIP_ABS"
     (
-        cd "$(dirname "$ARCHIVE_ZIP_ABS")"
-        shasum -a 256 "$(basename "$ARCHIVE_ZIP_ABS")"
+        cd "$ARCHIVE_DIR"
+        shasum -a 256 "$ARCHIVE_BASE"
     ) > "$ARCHIVE_ZIP_ABS.sha256"
 fi
 
