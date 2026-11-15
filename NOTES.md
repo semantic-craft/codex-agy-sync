@@ -25,7 +25,7 @@
 
 ## 当前状态
 
-- `feat/menubar-settings-and-icons`（基于 `main` `v0.3.0`，菜单栏 Raycast 式命令流、独立设置面板、4 款状态栏图标与 App+CLI 双通道同频升级落地）：
+- `main`（`v0.3.0`，菜单栏 Raycast 式命令流、独立设置面板、4 款状态栏图标与 App+CLI 双通道同频升级落地）：
   - **原生 macOS 菜单栏应用（`CodexAgyHandoff.app`）、设置面板与图标体系**：`macos/` 提供 Swift 6（macOS 14+）原生状态栏应用，`./scripts/build_menubar_app.sh` 从 `pyproject.toml` 动态同步版本、调用 `scripts/generate_app_icon.swift` 生成 10 尺寸 Retina `AppIcon.icns`（“双轨接力桥”）并支持 `--install` 与 `--archive-zip <path>`（含 `.sha256`）；零后台轮询，仅在点击状态栏图标、触发全局快捷键（默认 `⌃⌥H`，支持自定义录制与“展开并立即接力首卡 / 仅展开面板”切换）或按 `⌘R` 刷新时调用一次只读 `./bin/codex-agy-sync menubar-feed --limit <N>`；采用 `392pt` 毛玻璃命令流面板、即时搜索过滤、全键盘导航（`↑`/`↓`/`↵`/`Esc`/`⌘R`/`⌘,`/`⌘Q`）与独立 `CodexAgyHandoff 设置` 窗口（含 `SMAppService.mainApp` 开机自启、`接力双轨 / 切端闪电 / 双向穿梭 / 同频双环` 4 款自适应模板状态栏图标与镂空圆点提示、App+CLI 版本对齐看板，以及本地源码仓编译同步 / GitHub Release `SHA256SUMS` 校验双通道按需升级）。
   - **在线回环 `IDLE` 状态覆盖宿主持续 `-wal`**：`workbench/menubar_feed.py` 与 `bridge/handoff.py` 在线确认 Antigravity `GetCascadeTrajectory.cascade_run_status == 1` 或 Codex `thread/read` 非活跃空闲时，允许抢救并交接已停止的中断会话，同时保持 `sync-session` / `sync-workspace` 原有离线锁保护不变。
   - **Stage 1 内置本地工作台（`serve`，冻结维护）**：默认随包分发 `src/codex_agy_sync/workbench/ui/index.html`（`codex-agy-sync serve --open` 开箱即用，保留 `--ui <path>` 覆盖），已移除 `createOfflineController` / `Atlas` / `Orbit` 离线占位原型并在缺少本地令牌时显式报错引导；支持 `127.0.0.1` 回环绑定的 `0o600` 无 token `server.json`、`X-Workbench-Token` 与 `Host`/`Origin`/`Sec-Fetch-Site` 鉴权、敏感路径隔离、跨端全文检索、只复制 Markdown 草稿（`POST /api/send` 返回 `404`）、一键桌面交接与 `POST /api/handoff/reconcile`。

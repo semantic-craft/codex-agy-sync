@@ -122,3 +122,14 @@
 
 **`menubar-feed` 与 `handoff --include-interrupted` 在 Antigravity / Codex 守护进程在线时必须以 `GetCascadeTrajectory`（`cascade_run_status == 1`）与 `thread/read`（非活跃且无 `in_progress` 边界）作为空闲态依据，严禁因宿主级 `conversation_summaries.db-wal` / `state_5.sqlite-wal` 非空、历史 `presence/<cid>.lock` 或残余 `steps.status = 2` 将已停止会话误判为 `ACTIVE_RUNNING`。**
 离线 `sync-session` / `sync-workspace` 仍保留 `is_source_actively_running` 的 WAL 锁避让规则以防裸写冲突；该边界由 `tests/test_menubar_feed.py` 的 `test_online_rpc_idle_overrides_host_wal_for_feed_and_handoff` 回归锁定。
+
+### macOS `LSUIElement` 附属窗口与双端原子更新必须在替换与聚焦边界做显式保护
+
+**菜单栏应用（`LSUIElement = true`）打开独立 `NSWindow`（`isReleasedWhenClosed = false`）时必须临时切换 `.regular` 激活策略并由窗口关闭/失焦通知回收本地 `NSEvent` 监听器，且 App+CLI 同频更新必须先在隔离暂存区完成签名校验与目标写权限检查后再安装 Python 包并原子替换 `.app`。**
+
+- 标签：#macOS原生 #原子更新 #生命周期
+- 起因与后果：在 `4a5a6a9` 对抗审查（`/interrogate`）中发现：（1）`build_menubar_app.sh` 重写 `Info.plist` 时漏掉 `CFBundleIdentifier` 且在编译前执行 `rm -rf "$APP_BUNDLE"`；（2）`SettingsView` 快捷键录制使用 `NSEvent.addLocalMonitorForEvents` 依赖 SwiftUI `.onDisappear` 释放，但复用窗口 `isReleasedWhenClosed = false` 关闭时不触发 `onDisappear` 造成监听残留，且 `.accessory` 激活策略下独立设置窗难以成为前台 Key Window；（3）`UpdateService` 先跑 `pip install` 后检查 `.app` 签名与目录写权限，目录只读或 `.app` 构建失败会导致双端版本撕裂。
+- 修复与证据：在 `scripts/build_menubar_app.sh` 恢复 `CFBundleIdentifier` 并在 `$SCRATCH_PATH/bundle-stage.*` 完成构建签名后再原子替换目标 `.app`；在 `SettingsWindowController` 窗口打开期间切换 `.regular` 并在 `windowWillClose` 恢复 `.accessory`，由 `NSWindow.willCloseNotification` / `didResignKeyNotification` 清理录制监听器并暂停全局热键；在 `UpdateService` 增加资源文件名路径逃逸防护、非临时源码仓校验、先校验目标目录可写与暂存 `.app` `codesign --verify` 再安装 CLI 包，并记录 `pendingRelaunchVersion` 防止重探测误报失配。由 `PreferencesAndUpdateTests.swift`、`MenubarViewModelTests.swift` 与 `menubar_verify.py suite` 验证通过。
+- 正确做法（Done right）：所有 `.app` 产物先在沙盒/暂存目录完成 `Info.plist` 键完整性与 `codesign` 校验再做原子交换；复用型 `NSWindow` 的事件监听器绑定 AppKit 窗口通知而非仅靠 SwiftUI `onDisappear`。
+- 验证点：运行 `./scripts/check` 与 `python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py suite`（核对 `bundle_id`、`AppIcon.icns` 及活跃 Key Window 设置页截图）。
+- 复发记录：Seen 1x (2026-11-16)，由三模型 `/interrogate` 对抗审查在 `4a5a6a9` 捕获并修复。
