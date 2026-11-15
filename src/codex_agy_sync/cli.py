@@ -36,7 +36,7 @@ from .events import (
     ToolResultEvent,
     UserInputEvent,
 )
-from .workbench import query_workbench_status, run_serve_server, stop_workbench_server
+from .workbench import build_menubar_feed, query_workbench_status, run_serve_server, stop_workbench_server
 from .workspace import AgyGuiSafeSource, CascadeId, CodexThreadId, PACKAGE_VERSION, normalize_workspace_spec
 
 
@@ -165,6 +165,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sync_w.add_argument("--include-subagents", action="store_true", help="Synchronize spawned subagent sessions in addition to top-level sessions.")
 
     _add_serve_subparser(subparsers)
+    _add_menubar_feed_subparser(subparsers)
     return parser
 
 
@@ -195,6 +196,12 @@ def _add_serve_subparser(subparsers: Any) -> None:
     serve_p.add_argument("--open", action="store_true", help="Open the workbench URL in the default browser after startup.")
     serve_p.add_argument("--status", action="store_true", help="Inspect running Local Workbench server status and exit.")
     serve_p.add_argument("--stop", action="store_true", help="Stop a running Local Workbench server via lease + loopback health check.")
+
+
+def _add_menubar_feed_subparser(subparsers: Any) -> None:
+    feed_p = subparsers.add_parser("menubar-feed", help="Emit a fast JSON snapshot of recent handoff candidates for the menubar app.")
+    feed_p.add_argument("--workspace", "-w", action="append", default=None, help="Optional workspace path or file:// URI filter (repeatable).")
+    feed_p.add_argument("--limit", type=int, default=6, help="Maximum recent items excluding hero (1..50, default: 6).")
 
 
 def _resolve_paths(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> HostEnvironmentPaths:
@@ -293,6 +300,10 @@ def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
 
 
 def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.subcommand == "menubar-feed":
+        if not (1 <= int(args.limit) <= 50):
+            parser.error("--limit must be between 1 and 50.")
+        return
     if args.subcommand == "serve":
         if args.status and args.stop:
             parser.error("--status cannot be combined with --stop.")
@@ -346,6 +357,13 @@ def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int
         max_lifetime_sec=int(args.max_lifetime),
         open_browser=bool(args.open),
     )
+
+
+def _run_menubar_feed_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
+    seeds = [item for raw in (args.workspace or ()) if (item := normalize_workspace_spec(raw))]
+    snapshot = build_menubar_feed(paths, limit=int(args.limit), seed_workspaces=seeds)
+    print(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2))
+    return 0
 
 
 def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
@@ -403,6 +421,8 @@ def _exception_to_error_payload(exc: Exception, subcommand: str) -> dict[str, An
 def _dispatch_subcommand(args: argparse.Namespace, paths: HostEnvironmentPaths) -> int:
     if args.subcommand == "serve":
         return _run_serve_cmd(paths, args)
+    if args.subcommand == "menubar-feed":
+        return _run_menubar_feed_cmd(paths, args)
     bridge = SyncBridge(paths=paths)
     workspace_arg = normalize_workspace_spec(args.workspace) if args.workspace is not None else os.getcwd()
     if args.subcommand == "pair":

@@ -28,6 +28,12 @@ from .server import (
     validate_host_header,
     validate_origin_header,
 )
+from .menubar_feed import (
+    MenubarCandidateState,
+    MenubarFeedSnapshot,
+    MenubarSessionItem,
+    build_menubar_feed,
+)
 from .service import WorkbenchService
 
 __all__ = [
@@ -52,6 +58,10 @@ __all__ = [
     "load_workbench_lease",
     "query_workbench_status",
     "run_serve_server",
+    "MenubarCandidateState",
+    "MenubarFeedSnapshot",
+    "MenubarSessionItem",
+    "build_menubar_feed",
     "stop_workbench_server",
     "validate_host_header",
     "validate_origin_header",
