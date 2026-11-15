@@ -104,6 +104,7 @@ assert pkg.__version__ == pyproject_ver == "0.3.0", f"Version mismatch: __versio
 build_sh_src = pathlib.Path("scripts/build_menubar_app.sh").read_text(encoding="utf-8")
 assert "\"CFBundleShortVersionString\": \"0.3.0\"" not in build_sh_src and "\"0.3.0\"" not in build_sh_src, "build_menubar_app.sh must not hardcode CFBundleShortVersionString"
 assert "pyproject.toml" in build_sh_src and "CFBundleIconFile" in build_sh_src, "build_menubar_app.sh must derive version from pyproject.toml and set CFBundleIconFile"
+assert "\"CFBundleIdentifier\": bundle_id" in build_sh_src, "build_menubar_app.sh must write CFBundleIdentifier from bundle_id"
 assert pathlib.Path("scripts/generate_app_icon.swift").is_file(), "Missing scripts/generate_app_icon.swift"
 for mod_path in sorted(pathlib.Path("src/codex_agy_sync").rglob("*.py")):
     mod_src = mod_path.read_text(encoding="utf-8")

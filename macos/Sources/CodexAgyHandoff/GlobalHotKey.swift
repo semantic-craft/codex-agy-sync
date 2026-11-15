@@ -7,8 +7,55 @@ private final class HotKeyCallbackBox: @unchecked Sendable {
     let identifier: UInt32 = 1
     let onTrigger: @MainActor @Sendable () -> Void
 
+    private let lock = NSLock()
+    private var hotKeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+
     init(onTrigger: @escaping @MainActor @Sendable () -> Void) {
         self.onTrigger = onTrigger
+    }
+
+    var hasRegisteredHotKey: Bool {
+        lock.withLock { hotKeyRef != nil }
+    }
+
+    var hasInstalledHandler: Bool {
+        lock.withLock { handlerRef != nil }
+    }
+
+    func setHandler(_ ref: EventHandlerRef) {
+        lock.withLock { handlerRef = ref }
+    }
+
+    func setHotKey(_ ref: EventHotKeyRef) {
+        lock.withLock { hotKeyRef = ref }
+    }
+
+    func unregisterHotKeyOnly() {
+        let existing: EventHotKeyRef? = lock.withLock {
+            let ref = hotKeyRef
+            hotKeyRef = nil
+            return ref
+        }
+        if let existing {
+            UnregisterEventHotKey(existing)
+        }
+    }
+
+    func unregisterAll() {
+        let (existingHotKey, existingHandler): (EventHotKeyRef?, EventHandlerRef?) = lock.withLock {
+            let hk = hotKeyRef
+            let eh = handlerRef
+            hotKeyRef = nil
+            handlerRef = nil
+            return (hk, eh)
+        }
+        if let existingHotKey {
+            UnregisterEventHotKey(existingHotKey)
+        }
+        if let existingHandler {
+            RemoveEventHandler(existingHandler)
+        }
     }
 }
 
@@ -45,13 +92,16 @@ private func globalHotKeyEventCallback(
 
 @MainActor
 final class GlobalHotKey {
-    private var hotKeyRef: EventHotKeyRef?
-    private var handlerRef: EventHandlerRef?
     private var activeShortcut: HotKeyShortcut?
-    private let callbackBox: HotKeyCallbackBox
+    private(set) var lastRegistrationFailed: Bool = false
+    private nonisolated let callbackBox: HotKeyCallbackBox
 
     init(onTrigger: @escaping @MainActor @Sendable () -> Void) {
         self.callbackBox = HotKeyCallbackBox(onTrigger: onTrigger)
+    }
+
+    deinit {
+        callbackBox.unregisterAll()
     }
 
     @discardableResult
@@ -64,18 +114,17 @@ final class GlobalHotKey {
         if !shortcut.isEnabled {
             unregister()
             activeShortcut = shortcut
+            lastRegistrationFailed = false
             return true
         }
-        if activeShortcut == shortcut, hotKeyRef != nil {
+        if activeShortcut == shortcut, callbackBox.hasRegisteredHotKey {
+            lastRegistrationFailed = false
             return true
         }
 
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-        }
+        callbackBox.unregisterHotKeyOnly()
 
-        if handlerRef == nil {
+        if !callbackBox.hasInstalledHandler {
             var eventType = EventTypeSpec(
                 eventClass: OSType(kEventClassKeyboard),
                 eventKind: UInt32(kEventHotKeyPressed)
@@ -91,9 +140,11 @@ final class GlobalHotKey {
                 &installedHandler
             )
             guard installStatus == noErr, let installedHandler else {
+                activeShortcut = nil
+                lastRegistrationFailed = true
                 return false
             }
-            self.handlerRef = installedHandler
+            callbackBox.setHandler(installedHandler)
         }
 
         let hotKeyID = EventHotKeyID(
@@ -110,23 +161,24 @@ final class GlobalHotKey {
             &registeredRef
         )
         guard registerStatus == noErr, let registeredRef else {
+            activeShortcut = nil
+            lastRegistrationFailed = true
             return false
         }
 
-        self.hotKeyRef = registeredRef
-        self.activeShortcut = shortcut
+        callbackBox.setHotKey(registeredRef)
+        activeShortcut = shortcut
+        lastRegistrationFailed = false
         return true
     }
 
+    func suspend() {
+        callbackBox.unregisterHotKeyOnly()
+        activeShortcut = nil
+    }
+
     func unregister() {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-        }
-        if let handlerRef {
-            RemoveEventHandler(handlerRef)
-            self.handlerRef = nil
-        }
-        self.activeShortcut = nil
+        callbackBox.unregisterAll()
+        activeShortcut = nil
     }
 }

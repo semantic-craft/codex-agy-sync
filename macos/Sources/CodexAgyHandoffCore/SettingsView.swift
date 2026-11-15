@@ -42,7 +42,6 @@ public struct SettingsView: View {
     private let onDidChangeCLI: (() -> Void)?
 
     @State private var selectedTab: SettingsTab = .general
-    @State private var isRecordingShortcut: Bool = false
     @State private var keyMonitor: Any?
 
     public init(
@@ -75,6 +74,11 @@ public struct SettingsView: View {
         .padding(18)
         .frame(width: 500)
         .background(Color(nsColor: .windowBackgroundColor))
+        .onChange(of: preferencesStore.isRecordingShortcut) { _, active in
+            if !active {
+                removeShortcutKeyMonitor()
+            }
+        }
         .onDisappear {
             stopShortcutRecording()
         }
@@ -166,6 +170,9 @@ public struct SettingsView: View {
                         isOn: Binding(
                             get: { preferencesStore.preferences.hotKey.isEnabled },
                             set: { enabled in
+                                if !enabled {
+                                    stopShortcutRecording()
+                                }
                                 var next = preferencesStore.preferences.hotKey
                                 next.isEnabled = enabled
                                 preferencesStore.setHotKey(next)
@@ -179,31 +186,32 @@ public struct SettingsView: View {
                 }
 
                 HStack(spacing: 8) {
+                    let recording = preferencesStore.isRecordingShortcut
                     Button {
                         toggleShortcutRecording()
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: isRecordingShortcut ? "record.circle.fill" : "keyboard")
+                            Image(systemName: recording ? "record.circle.fill" : "keyboard")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(isRecordingShortcut ? .orange : .secondary)
+                                .foregroundStyle(recording ? .orange : .secondary)
                             Text(
-                                isRecordingShortcut
+                                recording
                                     ? "按下新组合键… (Esc 取消)"
                                     : preferencesStore.preferences.hotKey.displayString
                             )
-                            .font(.system(size: 12, weight: .semibold, design: isRecordingShortcut ? .default : .monospaced))
+                            .font(.system(size: 12, weight: .semibold, design: recording ? .default : .monospaced))
                         }
                         .foregroundStyle(.primary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(
                             RoundedRectangle(cornerRadius: 7)
-                                .fill(isRecordingShortcut ? Color.orange.opacity(0.14) : Color.primary.opacity(0.07))
+                                .fill(recording ? Color.orange.opacity(0.14) : Color.primary.opacity(0.07))
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 7)
                                 .stroke(
-                                    isRecordingShortcut ? Color.orange.opacity(0.55) : Color.primary.opacity(0.14),
+                                    recording ? Color.orange.opacity(0.55) : Color.primary.opacity(0.14),
                                     lineWidth: 0.8
                                 )
                         )
@@ -213,7 +221,7 @@ public struct SettingsView: View {
                     .focusEffectDisabled()
                     .disabled(!preferencesStore.preferences.hotKey.isEnabled)
                     .accessibilityLabel(
-                        isRecordingShortcut
+                        recording
                             ? "正在录制快捷键，按 Esc 取消"
                             : "录制快捷键：\(preferencesStore.preferences.hotKey.displayString)"
                     )
@@ -247,6 +255,14 @@ public struct SettingsView: View {
                     }
 
                     Spacer()
+                }
+
+                if preferencesStore.hotKeyRegistrationFailed,
+                   preferencesStore.preferences.hotKey.isEnabled
+                {
+                    Text("快捷键 \(preferencesStore.preferences.hotKey.displayString) 已被系统或其他应用占用，请录制其他组合键。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -483,7 +499,12 @@ public struct SettingsView: View {
                 }
 
                 HStack(spacing: 12) {
-                    versionBox(title: "菜单栏应用 App", value: "v\(updateViewModel.appVersion)")
+                    versionBox(
+                        title: "菜单栏应用 App",
+                        value: updateViewModel.pendingRelaunchVersion != nil
+                            ? "v\(updateViewModel.effectiveAppVersion)（待重启）"
+                            : "v\(updateViewModel.effectiveAppVersion)"
+                    )
                     Image(systemName: "arrow.left.arrow.right")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
@@ -510,6 +531,11 @@ public struct SettingsView: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    if updateViewModel.cliSource == .envOverride {
+                        Text("当前由环境变量 CODEX_AGY_SYNC_BIN 优先指定")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 HStack(spacing: 8) {
@@ -561,8 +587,7 @@ public struct SettingsView: View {
                         }
                         if preferencesStore.preferences.localRepoPathForSync != nil {
                             smallInlineButton("清除") {
-                                preferencesStore.setLocalRepoPathForSync(nil)
-                                Task { await updateViewModel.probeEnvironment() }
+                                Task { await updateViewModel.clearLocalRepoPath() }
                             }
                         }
                     }
@@ -794,7 +819,7 @@ public struct SettingsView: View {
     }
 
     private func toggleShortcutRecording() {
-        if isRecordingShortcut {
+        if preferencesStore.isRecordingShortcut {
             stopShortcutRecording()
         } else {
             startShortcutRecording()
@@ -803,8 +828,13 @@ public struct SettingsView: View {
 
     private func startShortcutRecording() {
         stopShortcutRecording()
-        isRecordingShortcut = true
+        preferencesStore.setShortcutRecording(true)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard preferencesStore.isRecordingShortcut,
+                  NSApp.keyWindow?.title == "CodexAgyHandoff 设置"
+            else {
+                return event
+            }
             if Int(event.keyCode) == kVK_Escape {
                 stopShortcutRecording()
                 return nil
@@ -824,11 +854,15 @@ public struct SettingsView: View {
     }
 
     private func stopShortcutRecording() {
+        removeShortcutKeyMonitor()
+        preferencesStore.setShortcutRecording(false)
+    }
+
+    private func removeShortcutKeyMonitor() {
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
         }
-        isRecordingShortcut = false
     }
 
     private func chooseCustomCLI() {

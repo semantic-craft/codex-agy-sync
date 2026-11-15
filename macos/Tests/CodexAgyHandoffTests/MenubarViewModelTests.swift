@@ -554,7 +554,7 @@ final class MenubarViewModelTests: XCTestCase {
         let vm = HandoffViewModel(cli: cli, activator: activator)
 
         await vm.refresh()
-        await vm.handoff(item: hero)
+        await vm.handoff(hero)
 
         XCTAssertEqual(activator.activatedHosts, ["antigravity"])
         guard let infoBanner = vm.banner else {
@@ -574,7 +574,7 @@ final class MenubarViewModelTests: XCTestCase {
             status: "pending"
         )
         cli.setHandoffResult(.success(pendingReceipt))
-        await vm.handoff(item: hero)
+        await vm.handoff(hero)
         guard let pendingBanner = vm.banner else {
             return XCTFail("Expected error banner for pending receipt")
         }
@@ -857,5 +857,180 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(searchField.stringValue, "")
         XCTAssertEqual(vm.searchQuery, "")
         XCTAssertEqual(vm.sections.count, 1)
+    }
+
+    @MainActor
+    func testRefreshAndPerformPrimaryActionAwaitsFreshAndInflightFeed() async {
+        let staleHero = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-stale",
+            title: "Stale turn",
+            workspacePath: "/repos/stale",
+            workspaceName: "stale",
+            state: .completedReady
+        )
+        let freshHero = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-fresh",
+            title: "Fresh interrupted turn",
+            workspacePath: "/repos/fresh",
+            workspaceName: "fresh",
+            state: .interruptedStopped
+        )
+        let staleSnapshot = MenubarFeedSnapshot(
+            generatedAtIso: "2026-11-15T08:00:00Z",
+            agyDaemonActive: true,
+            codexDaemonActive: true,
+            hero: staleHero,
+            recent: [staleHero]
+        )
+        let freshSnapshot = MenubarFeedSnapshot(
+            generatedAtIso: "2026-11-15T08:06:40Z",
+            agyDaemonActive: true,
+            codexDaemonActive: true,
+            hero: freshHero,
+            recent: [freshHero]
+        )
+        let freshReceipt = HandoffReceiptPayload(
+            workspace: "/repos/fresh",
+            sourceHost: "antigravity",
+            sourceId: "cid-fresh",
+            targetHost: "codex",
+            targetId: "tid-fresh-1",
+            title: "Fresh interrupted turn",
+            status: "ready"
+        )
+        let cli = MockCLIRunner(
+            feedResult: .success(staleSnapshot),
+            handoffResult: .success(freshReceipt),
+            reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/fresh"))
+        )
+        let activator = MockActivator()
+        let vm = HandoffViewModel(cli: cli, activator: activator)
+
+        await vm.refresh()
+        XCTAssertEqual(vm.snapshot?.hero?.sessionId, "cid-stale")
+
+        cli.setFeedResult(.success(freshSnapshot))
+        await vm.refreshAndPerformPrimaryAction()
+
+        XCTAssertEqual(cli.handoffCalls.count, 1)
+        XCTAssertEqual(cli.handoffCalls.first?.sourceId, "cid-fresh")
+        XCTAssertEqual(activator.activatedHosts, ["codex"])
+        XCTAssertEqual(vm.banner, StatusBanner(kind: .success, text: "已在 Codex 打开对话 · Fresh interrupted turn"))
+
+        final class DelayedFeedCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
+            private let lock = NSLock()
+            private let snapshot: MenubarFeedSnapshot
+            private let receipt: HandoffReceiptPayload
+            private(set) var fetchCount = 0
+            private(set) var handedIds: [String] = []
+
+            init(snapshot: MenubarFeedSnapshot, receipt: HandoffReceiptPayload) {
+                self.snapshot = snapshot
+                self.receipt = receipt
+            }
+
+            func fetchFeed(limit: Int) async throws -> MenubarFeedSnapshot {
+                lock.withLock { fetchCount += 1 }
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                return snapshot
+            }
+
+            func executeHandoff(workspacePath: String, sourceId: String) async throws -> HandoffReceiptPayload {
+                lock.withLock { handedIds.append(sourceId) }
+                return receipt
+            }
+
+            func reconcilePending(workspacePath: String?) async throws -> ReconcileSummaryPayload {
+                ReconcileSummaryPayload(workspace: workspacePath ?? "")
+            }
+        }
+
+        let inflightCLI = DelayedFeedCLIRunner(snapshot: freshSnapshot, receipt: freshReceipt)
+        let inflightVM = HandoffViewModel(cli: inflightCLI, activator: MockActivator())
+        let backgroundRefresh = Task { await inflightVM.refresh() }
+        await Task.yield()
+        await inflightVM.refreshAndPerformPrimaryAction()
+        await backgroundRefresh.value
+
+        XCTAssertEqual(inflightCLI.fetchCount, 2)
+        XCTAssertEqual(inflightCLI.handedIds, ["cid-fresh"])
+        XCTAssertEqual(inflightVM.banner, StatusBanner(kind: .success, text: "已在 Codex 打开对话 · Fresh interrupted turn"))
+    }
+
+    func testNormalizedModifierFlagsAndUserPythonBinDiscovery() throws {
+        let noisyFlags: NSEvent.ModifierFlags = [.command, .capsLock, .numericPad, .function]
+        XCTAssertEqual(HotKeyShortcut.normalizedEventFlags(noisyFlags), .command)
+
+        let fakeHome = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("codex-agy-home-\(UUID().uuidString)", isDirectory: true)
+        let py39Bin = fakeHome.appendingPathComponent("Library/Python/3.9/bin", isDirectory: true)
+        let py312Bin = fakeHome.appendingPathComponent("Library/Python/3.12/bin", isDirectory: true)
+        let pathDir = fakeHome.appendingPathComponent("path-bin", isDirectory: true)
+        let customDir = fakeHome.appendingPathComponent("custom-bin", isDirectory: true)
+        let envDir = fakeHome.appendingPathComponent("env-bin", isDirectory: true)
+        for dir in [py39Bin, py312Bin, pathDir, customDir, envDir] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: fakeHome) }
+
+        func makeExec(in dir: URL) throws -> URL {
+            let file = dir.appendingPathComponent("codex-agy-sync")
+            try "#!/bin/sh\nexit 0\n".write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+            return file
+        }
+
+        _ = try makeExec(in: py39Bin)
+        let py312CLI = try makeExec(in: py312Bin)
+
+        let suiteName = "dev.semanticcraft.codex-agy-handoff.cli.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let pyBins = SubprocessCLIClient.userPythonBinDirectories(homeDirectory: fakeHome)
+        XCTAssertEqual(
+            pyBins.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+            [py312Bin.resolvingSymlinksInPath().path, py39Bin.resolvingSymlinksInPath().path]
+        )
+
+        let autoResolved = SubprocessCLIClient.resolveExecutableWithSource(
+            environment: ["PATH": "/nonexistent"],
+            defaults: defaults,
+            homeDirectory: fakeHome
+        )
+        XCTAssertEqual(
+            autoResolved.url?.resolvingSymlinksInPath().path,
+            py312CLI.resolvingSymlinksInPath().path
+        )
+        XCTAssertEqual(autoResolved.source, .autoDiscovered)
+
+        _ = try makeExec(in: pathDir)
+        let customCLI = try makeExec(in: customDir)
+        defaults.set(customCLI.path, forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
+
+        let customResolved = SubprocessCLIClient.resolveExecutableWithSource(
+            environment: ["PATH": pathDir.path],
+            defaults: defaults,
+            homeDirectory: fakeHome
+        )
+        XCTAssertEqual(customResolved.url?.path, customCLI.path)
+        XCTAssertEqual(customResolved.source, .customPath)
+
+        let envCLI = try makeExec(in: envDir)
+        let envResolved = SubprocessCLIClient.resolveExecutableWithSource(
+            environment: [
+                "CODEX_AGY_SYNC_BIN": envCLI.path,
+                "PATH": pathDir.path,
+            ],
+            defaults: defaults,
+            homeDirectory: fakeHome
+        )
+        XCTAssertEqual(envResolved.url?.path, envCLI.path)
+        XCTAssertEqual(envResolved.source, .envOverride)
     }
 }

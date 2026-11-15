@@ -76,6 +76,7 @@ public final class HandoffViewModel: ObservableObject {
     private let cli: any CLIRunnerProtocol
     private let activator: any AppActivating
     private let explicitFeedLimit: Int?
+    private var activeRefreshTask: Task<Bool, Never>?
 
     public var needsAttentionBadge: Bool {
         guard let state = snapshot?.hero?.state else { return false }
@@ -197,14 +198,7 @@ public final class HandoffViewModel: ObservableObject {
             await performPrimaryAction()
             return
         }
-        switch item.state {
-        case .interruptedStopped, .completedReady:
-            await handoff(item: item)
-        case .pendingReconcile:
-            await reconcile(workspacePath: item.workspacePath, itemId: item.id)
-        case .alreadyHanded, .activeRunning:
-            return
-        }
+        await executeItemAction(item)
     }
 
     public func performPrimaryAction() async {
@@ -212,18 +206,32 @@ public final class HandoffViewModel: ObservableObject {
             await refreshFeed(preserveBanner: false)
         }
         guard let hero = snapshot?.hero else { return }
-        switch hero.state {
+        await executeItemAction(hero)
+    }
+
+    public func refreshAndPerformPrimaryAction() async {
+        guard busyItemId == nil else { return }
+        if let existingTask = activeRefreshTask {
+            let succeeded = await existingTask.value
+            if succeeded {
+                banner = nil
+            }
+        } else {
+            await refreshFeed(preserveBanner: false)
+        }
+        guard let hero = snapshot?.hero else { return }
+        await executeItemAction(hero)
+    }
+
+    private func executeItemAction(_ item: MenubarSessionItem) async {
+        switch item.state {
         case .interruptedStopped, .completedReady:
-            await handoff(item: hero)
+            await handoff(item)
         case .pendingReconcile:
-            await reconcile(workspacePath: hero.workspacePath, itemId: hero.id)
+            await reconcile(workspacePath: item.workspacePath, itemId: item.id)
         case .alreadyHanded, .activeRunning:
             return
         }
-    }
-
-    public func handoff(item: MenubarSessionItem) async {
-        await handoff(item)
     }
 
     public func handoff(_ item: MenubarSessionItem) async {
@@ -310,20 +318,33 @@ public final class HandoffViewModel: ObservableObject {
     }
 
     private func refreshFeed(preserveBanner: Bool) async {
-        guard !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
-
-        do {
-            let nextSnapshot = try await cli.fetchFeed(limit: effectiveFeedLimit)
-            snapshot = nextSnapshot
-            reconcileSelection()
-            cliMissing = false
-            if !preserveBanner {
+        if let existingTask = activeRefreshTask {
+            let succeeded = await existingTask.value
+            if succeeded && !preserveBanner {
                 banner = nil
             }
-        } catch {
-            applyError(error)
+            return
+        }
+
+        isLoading = true
+        let task = Task<Bool, Never> { @MainActor in
+            do {
+                let nextSnapshot = try await cli.fetchFeed(limit: effectiveFeedLimit)
+                snapshot = nextSnapshot
+                reconcileSelection()
+                cliMissing = false
+                return true
+            } catch {
+                applyError(error)
+                return false
+            }
+        }
+        activeRefreshTask = task
+        let succeeded = await task.value
+        activeRefreshTask = nil
+        isLoading = false
+        if succeeded && !preserveBanner {
+            banner = nil
         }
     }
 
