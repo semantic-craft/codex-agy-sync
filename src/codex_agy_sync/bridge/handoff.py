@@ -36,6 +36,7 @@ from .handoff_store import (
     HandoffPendingError,
     HandoffReceipt,
     assert_source_belongs_to_binding,
+    cleanup_handoff_staging_dir,
     ledger_seed_fingerprint,
     load_handoff_receipt,
     open_handoff_lock,
@@ -343,6 +344,7 @@ def _handoff_locked(
         raise HandoffPendingError(receipt, receipt_path) from exc
     receipt = dataclasses.replace(receipt, target_id=target_id, status="ready")
     save_handoff_receipt(receipt_path, receipt)
+    cleanup_handoff_staging_dir(state / "staging", receipt.staging_path)
     return receipt
 
 

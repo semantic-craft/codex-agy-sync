@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 from pathlib import Path
-import shutil
 import sqlite3
 from typing import Any
 
@@ -15,12 +14,14 @@ from ..workspace import parse_workspace_identity, validate_session_id
 from . import rpc
 from .handoff_store import (
     HandoffReceipt,
+    cleanup_handoff_staging_dir,
     ledger_seed_fingerprint,
     load_handoff_receipt,
     load_workspace_receipts,
     open_handoff_lock,
     parse_ts_epoch_iso,
     save_handoff_receipt,
+    validated_handoff_staging_dir,
 )
 from .paths_and_locks import (
     HostEnvironmentPaths,
@@ -110,26 +111,6 @@ def summarize_workspace_handoffs(paths: HostEnvironmentPaths, workspace: str | P
     }
 
 
-def _validated_staging_dir(staging_root: Path, staging_path_str: str) -> Path | None:
-    if not staging_path_str:
-        return None
-    raw = Path(staging_path_str)
-    resolved_root = staging_root.resolve(strict=False)
-    resolved_stage = raw.resolve(strict=False)
-    if resolved_stage == resolved_root or not resolved_stage.is_relative_to(resolved_root):
-        return None
-    rel = resolved_stage.relative_to(resolved_root)
-    return validated_child_path(resolved_root, *rel.parts, label="staging_path")
-
-
-def _cleanup_staging_dir(staging_root: Path, staging_path_str: str) -> bool:
-    safe_stage = _validated_staging_dir(staging_root, staging_path_str)
-    if safe_stage is not None and safe_stage.exists():
-        shutil.rmtree(safe_stage)
-        return True
-    return False
-
-
 def _validated_receipt_file(handoffs_root: Path, receipt_path: Path) -> Path | None:
     resolved_root = handoffs_root.resolve(strict=False)
     resolved_file = receipt_path.resolve(strict=False)
@@ -139,7 +120,7 @@ def _validated_receipt_file(handoffs_root: Path, receipt_path: Path) -> Path | N
 
 
 def _staged_agy_step_count(paths: HostEnvironmentPaths, staging_root: Path, receipt: HandoffReceipt, target_id: str) -> int | None:
-    safe_stage = _validated_staging_dir(staging_root, receipt.staging_path)
+    safe_stage = validated_handoff_staging_dir(staging_root, receipt.staging_path)
     if safe_stage is None:
         return None
     staged_db = validated_child_path(safe_stage, "conversations", f"{target_id}.db", label="target_id")
@@ -334,9 +315,9 @@ def _apply_reconcile_decision(
             return ("unresolved", {**entry, "reason": "invalid_receipt_path"})
         updated = dataclasses.replace(receipt, status="ready", error=None)
         save_handoff_receipt(safe_receipt, updated)
-        entry["staging_cleaned"] = _cleanup_staging_dir(staging_root, receipt.staging_path)
+        entry["staging_cleaned"] = cleanup_handoff_staging_dir(staging_root, receipt.staging_path)
     elif decision == "cleared":
-        entry["staging_cleaned"] = _cleanup_staging_dir(staging_root, receipt.staging_path)
+        entry["staging_cleaned"] = cleanup_handoff_staging_dir(staging_root, receipt.staging_path)
         safe_receipt = _validated_receipt_file(handoffs_root, receipt_path)
         if safe_receipt is not None:
             safe_receipt.unlink(missing_ok=True)

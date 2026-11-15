@@ -53,6 +53,8 @@ from .paths_and_locks import (
     validated_child_path,
 )
 from .project_rpc import (
+    delete_agy_cascade_via_rpc,
+    delete_agy_project_via_rpc,
     encode_agy_create_project_request,
     register_agy_project_via_rpc,
     register_codex_project_via_rpc,
@@ -144,6 +146,8 @@ __all__ = [
     "atomic_write_bytes",
     "atomic_write_rollout",
     "atomic_write_text",
+    "delete_agy_cascade_via_rpc",
+    "delete_agy_project_via_rpc",
     "deterministic_uuid",
     "diagnose_workspace_binding",
     "encode_agy_create_project_request",

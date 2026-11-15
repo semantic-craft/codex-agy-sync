@@ -74,7 +74,7 @@ class DesktopHandoffTest(unittest.TestCase):
                 pointer = next(raw for n,w,v,raw in iter_wire_fields(meta) if n == 20)
                 fields = {n: (v if w == 0 else raw.decode()) for n,w,v,raw in iter_wire_fields(pointer)}
                 self.assertEqual(fields, {1: trajectory, 2: idx, 4: cid})
-        self.assertNotEqual(db.stat().st_ino, (Path(receipt.staging_path) / "conversations" / db.name).stat().st_ino)
+        self.assertFalse(Path(receipt.staging_path).exists())
         self.assertIn("CEDAR", (self.paths.agy_data_dir / "brain" / cid / ".system_generated/logs/transcript.jsonl").read_text())
 
     def test_pending_activation_does_not_allocate_a_second_target(self):
@@ -84,6 +84,7 @@ class DesktopHandoffTest(unittest.TestCase):
             with self.assertRaises(HandoffPendingError) as second:
                 self.handoff()
         self.assertEqual(first.exception.receipt.target_id, second.exception.receipt.target_id)
+        self.assertTrue(Path(first.exception.receipt.staging_path).exists())
         self.assertEqual(len(list((self.paths.agy_data_dir / "conversations").glob("*.db"))), 1)
         self.assertEqual(activate.call_count, 1)
 
@@ -117,6 +118,10 @@ class DesktopHandoffTest(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             publish_new_file(src, dst)
         self.assertEqual(dst.read_bytes(), b"existing")
+        fresh_dst = self.root / "fresh-target"
+        publish_new_file(src, fresh_dst)
+        self.assertEqual(fresh_dst.read_bytes(), b"new")
+        self.assertNotEqual(src.stat().st_ino, fresh_dst.stat().st_ino)
         self.assertEqual(list(self.root.glob(".handoff-*")), [])
 
     def test_source_advance_creates_a_new_target(self):
@@ -134,15 +139,22 @@ class DesktopHandoffTest(unittest.TestCase):
     def test_codex_rpc_receives_staged_history_and_records_real_target(self):
         cid = CascadeId("00000000-0000-4000-8000-000000000011")
         actual_tid = CodexThreadId("01960000-0000-7000-8000-000000000099")
-        with mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta", return_value=(self.ledger, TransportMode.ONLINE_RPC, False)), mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_codex_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.import_codex_rollout_via_rpc", return_value=actual_tid) as importer:
+        captured: list[tuple[Path, str]] = []
+
+        def _fake_import(_paths: object, staged: Path, *_args: object, **_kwargs: object) -> CodexThreadId:
+            captured.append((staged, staged.read_text()))
+            return actual_tid
+
+        with mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta", return_value=(self.ledger, TransportMode.ONLINE_RPC, False)), mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_codex_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.import_codex_rollout_via_rpc", side_effect=_fake_import) as importer:
             result = handoff_session(self.paths, self.workspace, direction=SyncDirection.AGY_TO_CODEX, source_id=str(cid), title="Chosen title")
             again = handoff_session(self.paths, self.workspace, direction=SyncDirection.AGY_TO_CODEX, source_id=str(cid))
         self.assertEqual(result.target_id, actual_tid)
         self.assertEqual(again.status, "no_op")
         self.assertEqual(importer.call_count, 1)
-        staged = importer.call_args.args[1]
+        staged, staged_text = captured[0]
         self.assertTrue(staged.is_relative_to(self.paths.sync_state_dir))
-        self.assertIn("CEDAR", staged.read_text())
+        self.assertIn("CEDAR", staged_text)
+        self.assertFalse(Path(result.staging_path).exists())
         self.assertEqual(importer.call_args.args[4], "Chosen title")
 
     def test_reasoning_summary_is_visible_text_without_native_runtime_state(self):

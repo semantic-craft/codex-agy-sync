@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>会话同频桥 · 工作空间原型</title>
+<title>Stage 1 本地工作台 · 会话同频桥</title>
 <style>
 :root{color-scheme:light;--page:#e9ebef;--bg:#fff;--sidebar:#f0f2f5;--list:#fafbfc;--text:#252932;--muted:#747d8c;--line:#e5e8ed;--hover:#e9edf3;--blue:#1368d9;--blue-soft:#e7f0fe;--green:#2e8762;--amber:#9a5b13;--amber-soft:#fef4e4;--red:#b42318;--red-soft:#fdecec;--code:#f4f6f8;--shadow:0 18px 65px #27375119,0 2px 8px #2737510a;--panel-shadow:0 24px 90px #14213a40;--radius:10px}
 :root[data-theme="dark"]{color-scheme:dark;--page:#15181e;--bg:#22262e;--sidebar:#1e222a;--list:#20242b;--text:#e5e9f0;--muted:#9aa4b5;--line:#343b47;--hover:#303846;--blue:#72acff;--blue-soft:#243c5e;--green:#80c6a3;--amber:#f3b469;--amber-soft:#3d2c16;--red:#f98e86;--red-soft:#441e1e;--code:#1b2028;--shadow:0 18px 65px #0004,0 2px 8px #0002;--panel-shadow:0 24px 90px #0008}
@@ -299,11 +299,11 @@ kbd{font-family:inherit;font-size:10px;color:var(--muted);background:var(--code)
 <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"></path></symbol>
 </defs></svg>
 <header class="proto-bar">
-  <div class="proto-label"><span></span><span id="protoLabelText">交互原型 · 示例数据</span><span class="small">/</span><span class="small">会话同频桥</span></div>
+  <div class="proto-label"><span></span><span id="protoLabelText">Stage 1 本地工作台 · 真实会话只读与交接</span><span class="small">/</span><span class="small">会话同频桥</span></div>
   <div class="proto-actions">
-    <div class="segmented" aria-label="原型视图"><button id="mainViewButton" type="button" aria-pressed="true">主窗口</button><button id="panelViewButton" type="button" aria-pressed="false">轻面板</button></div>
+    <div class="segmented" aria-label="视图切换"><button id="mainViewButton" type="button" aria-pressed="true">主窗口</button><button id="panelViewButton" type="button" aria-pressed="false">轻面板</button></div>
     <button class="theme-button" id="themeButton" type="button" aria-label="切换深色外观"><svg><use href="#i-moon"></use></svg><span>深色</span></button>
-    <button class="text-button small" type="button" id="resetButton">重置演示</button>
+    <button class="text-button small" type="button" id="resetButton">刷新工作区</button>
   </div>
 </header>
 <main class="app" id="app" aria-label="会话同频桥主窗口">
@@ -314,34 +314,31 @@ kbd{font-family:inherit;font-size:10px;color:var(--muted);background:var(--code)
   </header>
   <div class="app-body">
     <aside class="sidebar" aria-label="项目导航">
-      <button class="nav-item" id="allWorkButton" type="button"><svg><use href="#i-chat"></use></svg><span class="nav-label">所有工作</span><span class="count" id="allWorkCount">5</span></button>
+      <button class="nav-item" id="allWorkButton" type="button"><svg><use href="#i-chat"></use></svg><span class="nav-label">所有工作</span><span class="count" id="allWorkCount">0</span></button>
       <button class="nav-item" id="historyButton" type="button"><svg><use href="#i-clock"></use></svg><span class="nav-label">搜索历史</span><kbd style="margin-left:auto">⌘ K</kbd></button>
       <div class="nav-section-label">项目</div>
-      <div id="sidebarProjects">
-        <button class="nav-item active" type="button" data-project="atlas"><span class="project-glyph">A</span><span class="nav-label">Atlas</span><span class="count">3</span></button>
-        <button class="nav-item" type="button" data-project="orbit"><span class="project-glyph">O</span><span class="nav-label">Orbit</span><span class="count">2</span></button>
-      </div>
+      <div id="sidebarProjects"></div>
       <div class="sidebar-bottom"><span class="bridge-glyph"><svg><use href="#i-bridge"></use></svg></span><div>Codex × Antigravity<br><span style="font-size:9px">在同一份上下文中工作</span></div></div>
     </aside>
     <section class="work-list" aria-label="工作与搜索结果">
-      <div class="list-head"><h2 id="listTitle">Atlas</h2><button class="icon" type="button" id="listActionButton" aria-label="打开快捷动作"><svg><use href="#i-plus"></use></svg></button></div>
-      <div class="list-caption" id="listCaption">3 项工作 · 2 个 Agent</div>
+      <div class="list-head"><h2 id="listTitle">所有工作</h2><button class="icon" type="button" id="listActionButton" aria-label="打开快捷动作"><svg><use href="#i-plus"></use></svg></button></div>
+      <div class="list-caption" id="listCaption">正在扫描本地工作区…</div>
       <div class="search-filters hidden" id="searchFilters" aria-label="来源筛选"><button class="active" data-filter="all" type="button">全部</button><button data-filter="Codex" type="button">Codex</button><button data-filter="AGY" type="button">AGY</button></div>
-      <div class="list-group" id="listGroup">进行中</div>
+      <div class="list-group" id="listGroup">按最近更新排序</div>
       <div class="work-items" id="workItems"></div>
       <div class="list-footer" id="listFooter">工作收拢会话，上下文按需流转。</div>
     </section>
     <section class="reader" aria-label="工作详情">
       <div class="source-banner hidden" id="sourceBanner"><span id="sourceBannerText"></span><button class="text-button" id="returnWorkButton" type="button"><svg style="width:12px;height:12px"><use href="#i-back"></use></svg>返回当前工作</button></div>
       <div class="reader-scroll" id="readerScroll"><div class="reader-inner">
-        <div class="breadcrumbs"><button class="mobile-switch" id="mobileWorksButton" type="button"><svg style="width:13px;height:13px"><use href="#i-list"></use></svg>工作</button><span id="readerProject">Atlas</span><svg><use href="#i-chevron"></use></svg><span>工作详情</span></div>
-        <div class="work-heading"><div><h1 id="workTitle">修复登录失败</h1><p class="work-description" id="workDescription">定位 token 过期后偶发的 401，补齐刷新逻辑。</p></div><span class="work-status" id="workStatus"><span class="status-dot"></span>进行中</span></div>
+        <div class="breadcrumbs"><button class="mobile-switch" id="mobileWorksButton" type="button"><svg style="width:13px;height:13px"><use href="#i-list"></use></svg>工作</button><span id="readerProject">工作空间</span><svg><use href="#i-chevron"></use></svg><span>工作详情</span></div>
+        <div class="work-heading"><div><h1 id="workTitle">正在加载本地会话</h1><p class="work-description" id="workDescription">从左侧选择工作空间或工作，浏览 Codex 与 Antigravity 会话记录。</p></div><span class="work-status" id="workStatus"><span class="status-dot"></span>进行中</span></div>
         <div class="live-banner hidden" id="livePairingBanner"></div>
         <div class="session-row" id="sessionChips"></div>
         <div class="chain-row hidden" id="liveHandoffChain"></div>
-        <div class="timeline-heading"><span id="timelineLabel">今天 · 11 月 14 日</span><span id="timelineSummary">4 条记录 · 已完成</span></div>
+        <div class="timeline-heading"><span id="timelineLabel">合并时间线</span><span id="timelineSummary">0 条记录</span></div>
         <div class="timeline" id="timeline"></div>
-        <div class="session-end"><svg style="width:12px;height:12px"><use href="#i-check"></use></svg><span id="sessionEndText">当前回合已完成，可以引用或换端接续</span></div>
+        <div class="session-end"><svg style="width:12px;height:12px"><use href="#i-check"></use></svg><span id="sessionEndText">以上为只读合并时间线 · Stage 1 仅支持引用草稿与桌面交接</span></div>
       </div></div>
       <footer class="reader-footer"><span class="footer-hint"><svg><use href="#i-bridge"></use></svg>让上下文随工作流转</span><div class="footer-actions"><button class="secondary" id="handoffButton" type="button"><svg><use href="#i-switch"></use></svg>换端继续</button><button class="primary" id="askButton" type="button"><svg><use href="#i-chat"></use></svg>请另一端看看</button></div></footer>
     </section>
@@ -354,21 +351,21 @@ kbd{font-family:inherit;font-size:10px;color:var(--muted);background:var(--code)
     <div class="palette-body" id="paletteBody"></div>
     <div class="palette-draft-bar hidden" id="paletteDraftBar"><span>草稿</span><button class="text-button" id="backToPanelSearch" type="button">返回搜索</button></div>
     <div class="draft-host hidden" id="panelDraftHost"></div>
-    <footer class="palette-footer"><span><kbd>esc</kbd>关闭 <kbd>⌘ K</kbd>呼出</span><span id="paletteFooterNote">示例数据 · 不连接真实 Agent</span></footer>
+    <footer class="palette-footer"><span><kbd>esc</kbd>关闭 <kbd>⌘ K</kbd>呼出</span><span id="paletteFooterNote">只读浏览 · 引用草稿 · 一键桌面交接</span></footer>
   </section>
 </div>
 <section class="draft hidden" id="draft" aria-label="共享草稿">
   <div class="segmented draft-mode" aria-label="草稿模式"><button id="askModeButton" type="button" aria-pressed="true">引用请教</button><button id="handoffModeButton" type="button" aria-pressed="false">换端接续</button></div>
-  <div class="draft-source"><svg><use href="#i-chat"></use></svg><span id="draftSourceText">来自 Codex · 修复登录失败</span></div>
+  <div class="draft-source"><svg><use href="#i-chat"></use></svg><span id="draftSourceText">当前工作</span></div>
   <div id="askFields">
-    <div class="stage1-notice hidden" id="liveDraftNotice">引用草稿（Stage 1 · 仅生成与复制，不向远端自动发消息）</div>
+    <div class="stage1-notice" id="liveDraftNotice">引用草稿（Stage 1 · 仅生成与复制，不向远端自动发消息）</div>
     <div class="draft-field"><label id="targetSessionLabel" for="targetSession">发送到已有会话</label><select id="targetSession"></select><div class="draft-help" id="targetSessionHelp">在目标会话中请教，当前工作保持不变。</div></div>
     <div class="draft-field"><label id="draftNoteLabel" for="draftNote">想请对方看看什么？</label><textarea id="draftNote" placeholder="写下问题，或补充你希望对方关注的地方…"></textarea></div>
     <div class="draft-section-head"><label>引用片段</label><span id="fragmentCount">0 段</span></div><div id="draftFragments"></div>
   </div>
   <div id="handoffFields" class="hidden">
     <div class="handoff-notice"><svg><use href="#i-switch"></use></svg><div><strong id="handoffNoticeTitle">在 AGY 创建新会话</strong><br><span id="handoffNoticeBody">带上来源会话全部已完成的可见历史，打开新会话后继续工作。</span></div></div>
-    <div id="liveHandoffControls" class="hidden">
+    <div id="liveHandoffControls">
       <div class="draft-field"><label for="handoffSourceSelect">选择交接来源会话</label><select id="handoffSourceSelect"></select></div>
       <div class="draft-field"><label for="handoffTitle">新会话标题（可选）</label><input id="handoffTitle" type="text" placeholder="留空则沿用当前工作标题"></div>
       <label class="checkbox-row" for="handoffPairIfOffline"><input id="handoffPairIfOffline" type="checkbox"><span>未配对时自动配对（优先在线 RPC，离线安全落盘）</span></label>
@@ -377,8 +374,8 @@ kbd{font-family:inherit;font-size:10px;color:var(--muted);background:var(--code)
     <div class="draft-section-head"><label>将带入的完整历史</label><span id="historyCount"></span></div><div class="history-preview" id="handoffHistory"></div>
     <div class="draft-help" id="handoffHelpText">引用请教只带选中的片段；换端接续带入下面的全部历史。工具调用以可读文本保留。</div>
   </div>
-  <button class="primary draft-submit" id="submitDraft" type="button"><svg><use href="#i-arrow"></use></svg><span>模拟发送给 AGY</span></button>
-  <div class="draft-disclaimer" id="draftDisclaimer">仅演示交互，不发送到真实宿主。</div>
+  <button class="primary draft-submit" id="submitDraft" type="button"><svg><use href="#i-arrow"></use></svg><span>生成并复制 Markdown 草稿</span></button>
+  <div class="draft-disclaimer" id="draftDisclaimer">引用草稿（Stage 1 · 仅生成与复制，不向远端自动发消息）</div>
   <div class="draft-response hidden" id="draftResponse" aria-live="polite"></div>
 </section>
 <div class="toast hidden" id="toast" role="status"></div>
@@ -523,527 +520,6 @@ function bindImeSafeEnter(el, handler, { ignoreShift = false } = {}) {
     e.preventDefault();
     handler(e);
   });
-}
-
-/* ============================================================================
-   Offline file:// Demo Mode (Zero Network Requests, 100% Preserved Behavior)
-   ============================================================================ */
-function createOfflineController() {
-  const initialSessions = [
-    { id: 'cx-login', workId: 'login', host: 'Codex', title: '修复登录失败', time: '10:42', fragmentIds: ['login-user', 'login-analysis', 'login-tool', 'login-fix'] },
-    { id: 'ag-review', workId: 'login', host: 'AGY', title: '登录方案复核', time: '昨天', fragmentIds: ['review-user', 'review-note'] },
-    { id: 'cx-refresh', workId: 'refresh', host: 'Codex', title: '梳理 token 刷新机制', time: '昨天', fragmentIds: ['refresh-user', 'refresh-note'] },
-    { id: 'ag-api', workId: 'api', host: 'AGY', title: '整理 API 错误响应', time: '周三', fragmentIds: ['api-user', 'api-note'] },
-    { id: 'cx-orbit', workId: 'orbit-nav', host: 'Codex', title: '调整导航交互', time: '09:15', fragmentIds: ['orbit-user', 'orbit-note'] },
-    { id: 'ag-export', workId: 'orbit-export', host: 'AGY', title: '导出设置确认', time: '昨天', fragmentIds: ['export-user', 'export-note'] }
-  ];
-  const initialFragments = [
-    { id: 'login-user', sessionId: 'cx-login', host: 'Codex', time: '10:32', role: 'user', text: '用户登录一段时间后，切换页面偶尔会收到 401。刷新页面又恢复正常。请检查 token 过期后的处理。' },
-    { id: 'login-analysis', sessionId: 'cx-login', host: 'Codex', time: '10:35', role: 'agent', text: '定位到 auth/client.ts 中的请求拦截器。多个请求同时收到 401 时，会各自触发 refresh。第一个请求更新 token 后，其余请求仍携带旧 token 重试，导致偶发登录失败。', html: '<p>定位到 <code>auth/client.ts</code> 中的请求拦截器。</p><p>多个请求同时收到 <code>401</code> 时，会各自触发 <code>refresh</code>。第一个请求更新 token 后，其余请求仍携带旧 token 重试，导致偶发登录失败。</p>' },
-    { id: 'login-tool', sessionId: 'cx-login', host: 'Codex', time: '10:38', role: 'tool', text: '运行 pnpm test auth。4 项测试通过，复现并发 refresh 场景。', html: '<p>已复现并发请求刷新 token 的竞态。</p><details class="tool-details"><summary>' + icon('tool') + '运行 pnpm test auth<span class="passed">4 项通过</span></summary><pre>$ pnpm test auth\n✓ expired token starts refresh\n✓ concurrent requests share refresh\n✓ retry uses latest token\n✓ refresh failure clears session\n\n4 passed · 0 failed</pre></details>' },
-    { id: 'login-fix', sessionId: 'cx-login', host: 'Codex', time: '10:42', role: 'agent', text: '建议将 refreshPromise 放在模块内共享。401 请求等待同一个 Promise，成功后从最新 token 存储读取再重试。还需要确认 refresh 失败时是否应统一清空会话。', html: '<p>建议将 <code>refreshPromise</code> 放在模块内共享，让并发请求等待同一次刷新。</p><ul><li>刷新成功后，读取最新 token 再重试。</li><li>refresh 失败时统一清空会话，回到登录页。</li></ul><p>核心逻辑已补齐。可以请另一端复核失败分支，确认没有遗漏。</p>' },
-    { id: 'review-user', sessionId: 'ag-review', host: 'AGY', time: '昨天 16:08', role: 'user', text: '帮我看一下登录状态与 token 刷新方案，重点关注 refresh 失败的行为。' },
-    { id: 'review-note', sessionId: 'ag-review', host: 'AGY', time: '昨天 16:12', role: 'agent', text: 'refresh 失败后应清空 access token 与 refresh token，并让所有等待请求收到同一个失败结果。刷新接口自身必须跳过 401 重试，避免循环。登录页面应保留原始跳转地址。' },
-    { id: 'refresh-user', sessionId: 'cx-refresh', host: 'Codex', time: '昨天 14:20', role: 'user', text: '梳理一下 token 过期与 refresh 的执行顺序，记录当前拦截器的实现。' },
-    { id: 'refresh-note', sessionId: 'cx-refresh', host: 'Codex', time: '昨天 14:28', role: 'agent', text: '当前 refresh 在每个 401 请求内单独执行，没有共享等待队列。建议使用单一 refreshPromise 合并并发刷新，并保证重试请求读取最新 token。这与登录后偶发失败可能相关。' },
-    { id: 'api-user', sessionId: 'ag-api', host: 'AGY', time: '周三 15:10', role: 'user', text: '整理 API 错误响应，统一 401、403 和 500 的用户提示。' },
-    { id: 'api-note', sessionId: 'ag-api', host: 'AGY', time: '周三 15:18', role: 'agent', text: '401 先尝试刷新登录状态，刷新失败再回到登录页。403 保留当前页面并显示权限说明。500 允许用户稍后重试，同时保留本次输入。' },
-    { id: 'orbit-user', sessionId: 'cx-orbit', host: 'Codex', time: '09:04', role: 'user', text: '调整 Orbit 的导航交互，让键盘可以在搜索结果与预览之间移动。' },
-    { id: 'orbit-note', sessionId: 'cx-orbit', host: 'Codex', time: '09:15', role: 'agent', text: '已为搜索结果添加上下方向键导航。Enter 打开预览，Escape 返回搜索框；预览关闭后焦点回到原来的结果。' },
-    { id: 'export-user', sessionId: 'ag-export', host: 'AGY', time: '昨天 11:02', role: 'user', text: '导出面板记住上一次格式，但文件名每次按当前文档重新生成。' },
-    { id: 'export-note', sessionId: 'ag-export', host: 'AGY', time: '昨天 11:10', role: 'agent', text: '已确认格式选择可独立保存。文件名由当前文档标题派生，避免上一次导出名称误用于新文档。' }
-  ];
-  const works = [
-    { id: 'login', projectId: 'atlas', title: '修复登录失败', description: '定位 token 过期后偶发的 401，补齐刷新逻辑。', preview: 'refresh 并发竞态已定位，等待方案复核', time: '10:42', sessions: ['cx-login', 'ag-review'] },
-    { id: 'refresh', projectId: 'atlas', title: '梳理 token 刷新机制', description: '记录请求拦截器的刷新顺序与等待队列。', preview: '记录当前拦截器与 token 生命周期', time: '昨天', sessions: ['cx-refresh'] },
-    { id: 'api', projectId: 'atlas', title: '整理 API 错误响应', description: '统一错误提示，保留用户当前输入。', preview: '401、403 与 500 的提示约定', time: '周三', sessions: ['ag-api'] },
-    { id: 'orbit-nav', projectId: 'orbit', title: '调整导航交互', description: '补齐键盘导航与预览焦点的返回行为。', preview: '搜索结果与预览的键盘切换', time: '09:15', sessions: ['cx-orbit'] },
-    { id: 'orbit-export', projectId: 'orbit', title: '导出设置确认', description: '保留格式偏好，按当前文档生成文件名。', preview: '格式记忆与文件名生成已确认', time: '昨天', sessions: ['ag-export'] }
-  ];
-  const initialDraft = () => ({ mode: 'ask', sourceSessionId: 'cx-login', targetSessionId: 'ag-review', note: '请帮我复核 token 刷新方案，重点看看并发请求和 refresh 失败的处理是否完整。', fragmentIds: [] });
-  const state = { view: 'main', projectId: 'atlas', workId: 'login', sessionId: 'cx-login', query: '', sourceFilter: 'all', draft: initialDraft(), deliveries: [], sessions: structuredClone(initialSessions), fragments: structuredClone(initialFragments), handoffs: {}, theme: 'light', draftOpen: false, panelDraft: false, selectedFragmentId: null, sourceSessionId: null, phase: 'idle', lastResult: null, allWorks: false };
-  let operationEpoch = 0;
-
-  const getSession = id => state.sessions.find(s => s.id === id);
-  const getFragment = id => state.fragments.find(f => f.id === id);
-  const getWork = id => works.find(w => w.id === id);
-  const projectName = id => (id === 'atlas' ? 'Atlas' : 'Orbit');
-  const visibleSession = () => getSession(state.sourceSessionId || state.sessionId);
-  const sourceHistory = id => (getSession(id)?.fragmentIds || []).map(getFragment).filter(Boolean);
-  const completedHistory = id => [...sourceHistory(id), ...state.deliveries.filter(d => d.sourceSessionId === id).map(d => ({
-    id: 'completed-' + d.id, sessionId: id, host: getSession(id).host, time: '刚刚', role: 'agent',
-    text: `请 ${d.host} 复核。${d.note}\n${d.fragmentIds.map(fid => { const f = getFragment(fid); return `[引用 ${f.host} · ${getSession(f.sessionId).title}] ${f.text}`; }).join('\n')}\n${d.host} 的示例回复：${d.reply}`
-  }))];
-  const handoffKey = id => JSON.stringify([id, completedHistory(id).map(f => [f.id, f.text])]);
-  const highlighted = text => highlightSafe(text, state.query);
-  const searchResults = () => {
-    const query = state.query.trim().toLowerCase();
-    return state.fragments.filter(f => (state.sourceFilter === 'all' || f.host === state.sourceFilter) && (!query || `${f.text} ${getSession(f.sessionId)?.title || ''} ${f.host}`.toLowerCase().includes(query)));
-  };
-
-  function renderWorkList() {
-    const searching = !!state.query.trim();
-    $('app').classList.toggle('searching', searching);
-    $('app').classList.toggle('source-open', !!state.sourceSessionId);
-    $('listTitle').textContent = searching ? '搜索结果' : state.allWorks ? '所有工作' : projectName(state.projectId);
-    $('searchFilters').classList.toggle('hidden', !searching);
-    $('listGroup').classList.toggle('hidden', searching);
-    $('listGroup').textContent = '最近工作';
-    document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('active', b.dataset.filter === state.sourceFilter));
-    if (searching) {
-      const results = searchResults();
-      $('listCaption').textContent = `“${state.query}” · ${results.length} 条历史片段`;
-      $('listFooter').textContent = '查看来源后，选择需要带走的片段。';
-      $('workItems').innerHTML = results.length
-        ? results.map(f => `<button class="result-item ${f.id === state.selectedFragmentId ? 'active' : ''}" type="button" data-result="${esc(f.id)}"><div class="result-title">${esc(getSession(f.sessionId).title)}</div><p class="result-excerpt">${highlighted(f.text)}</p><div class="work-meta"><span class="host-mark">${esc(f.host)}</span><span>${esc(f.time)}</span></div></button>`).join('')
-        : `<div class="empty-state">${icon('search')}<strong>没有找到相关历史</strong>试试“token”“登录”或“refresh”。<br><button class="text-button" type="button" data-clear-search="true">清空搜索</button></div>`;
-    } else {
-      const list = works.filter(w => state.allWorks || w.projectId === state.projectId);
-      $('listCaption').textContent = `${list.length} 项工作 · 2 个 Agent`;
-      $('listFooter').textContent = '工作收拢会话，上下文按需流转。';
-      $('workItems').innerHTML = list.map(w => `<button class="work-item ${w.id === state.workId ? 'active' : ''}" type="button" data-work="${esc(w.id)}"><div class="work-item-title">${icon('chat')}<span>${esc(w.title)}</span></div><div class="work-item-desc">${esc(w.preview)}</div><div class="work-meta">${w.sessions.map(s => `<span class="host-mark">${esc(getSession(s).host)}</span>`).join('')}<span class="dot">·</span><span>${esc(w.time)}</span></div></button>`).join('');
-    }
-    document.querySelectorAll('[data-project]').forEach(b => b.classList.toggle('active', !state.allWorks && b.dataset.project === state.projectId));
-    $('allWorkButton').classList.toggle('active', state.allWorks);
-  }
-
-  function renderReader() {
-    const session = visibleSession();
-    const work = getWork(session.workId);
-    $('readerProject').textContent = projectName(work.projectId);
-    $('workTitle').textContent = session.title;
-    $('workDescription').textContent = work.description;
-    $('sourceBanner').classList.toggle('hidden', !state.sourceSessionId);
-    $('sourceBannerText').textContent = `历史来源 · ${projectName(work.projectId)} / ${session.host} · ${session.time}`;
-    const sessions = state.sessions.filter(s => s.workId === work.id);
-    $('sessionChips').innerHTML = sessions.map(s => `<button class="session-chip ${s.id === session.id ? 'active' : ''}" type="button" data-session="${esc(s.id)}">${hostIcon(s.host)}<span>${esc(s.host)}</span><small>${s.inherited ? '接续会话' : s.id === state.sessionId ? '当前会话' : s.title === work.title ? '相关会话' : esc(s.title)}</small></button>`).join('');
-    const history = sourceHistory(session.id);
-    $('timelineSummary').textContent = `${history.length} 条记录 · 已完成`;
-    $('timelineLabel').textContent = session.time === '昨天' ? '昨天 · 11 月 13 日' : session.time === '周三' ? '11 月 11 日' : '今天 · 11 月 14 日';
-    let content = session.inherited ? `<div class="inherit-node">${icon('switch')}<span>从 ${esc(getSession(session.inherited).host)} 接续，已带入 ${history.length} 条可见历史</span></div>` : '';
-    content += history.map(f => `<article class="message ${f.id === state.selectedFragmentId ? 'highlight' : ''}" id="message-${esc(f.id)}"><div class="avatar ${f.role !== 'user' ? 'agent' : ''}">${f.role === 'user' ? '你' : f.role === 'tool' ? icon('tool') : f.host === 'AGY' ? 'A' : 'C'}</div><div><div class="message-header"><strong>${f.role === 'user' ? '你' : f.role === 'tool' ? '工具记录' : esc(f.host)}</strong><time>${esc(f.time)}</time></div><div class="message-body">${f.html || `<p>${esc(f.text)}</p>`}</div><div class="message-actions"><button type="button" data-add-fragment="${esc(f.id)}">${icon('quote')}${state.draft.fragmentIds.includes(f.id) ? '已加入引用' : '加入引用'}</button><button type="button" data-ask-fragment="${esc(f.id)}">${icon('chat')}请另一端看看</button></div></div></article>`).join('');
-    const deliveries = state.deliveries.filter(d => d.sourceSessionId === session.id);
-    content += deliveries.map(d => `<article class="delivery"><div class="delivery-top">${hostIcon(d.host)}<strong>${esc(d.host)} 的方案复核</strong><span class="sample-tag">示例回复</span><span style="margin-left:auto">刚刚</span></div><p>${esc(d.reply)}</p><button class="text-button" type="button" data-bring-back="${esc(d.id)}">${icon('back')}带回 ${esc(getSession(d.sourceSessionId).host)}</button></article>`).join('');
-    content += Object.values(state.handoffs).filter(target => getSession(target).inherited === session.id).map(target => `<div class="inherit-node">${icon('switch')}<span>已在 ${esc(getSession(target).host)} 创建接续会话<br><span class="small">完整可见历史已带入 · 示例</span></span><button class="text-button" type="button" data-open-handoff="${esc(target)}">打开会话 ${icon('arrow')}</button></div>`).join('');
-    $('timeline').innerHTML = content;
-    $('askButton').innerHTML = icon('chat') + '请另一端看看';
-  }
-
-  function renderPalette() {
-    if (state.query.trim()) {
-      const results = searchResults();
-      $('paletteBody').innerHTML = `<div class="palette-group-label">历史片段 <span style="float:right">${results.length} 条结果</span></div>` + (results.length
-        ? results.map(f => `<article class="palette-result">${hostIcon(f.host)}<div class="palette-result-content"><div class="palette-result-title">${esc(getSession(f.sessionId).title)}</div><p>${highlighted(f.text)}</p><div class="palette-result-meta">${esc(f.host)} · ${esc(f.time)} · ${projectName(getWork(getSession(f.sessionId).workId).projectId)}</div><div class="palette-result-actions"><button class="secondary" type="button" data-panel-preview="${esc(f.id)}">查看原文</button><button class="text-button" type="button" data-add-fragment="${esc(f.id)}">${icon('plus')}加入引用</button></div></div></article>`).join('')
-        : `<div class="empty-state">${icon('search')}<strong>没有找到相关历史</strong>试试“token”“登录”或“refresh”。<br><button class="text-button" type="button" data-clear-search="true">清空搜索</button></div>`);
-    } else {
-      $('paletteBody').innerHTML = `<div class="palette-group-label">快捷动作</div><button class="palette-action" type="button" data-action="ask">${icon('chat')}<span class="action-copy">请另一端看看<small>选取片段，发送到已有会话</small></span><small>引用请教</small></button><button class="palette-action" type="button" data-action="handoff">${icon('switch')}<span class="action-copy">换端继续<small>带完整历史，在另一端创建新会话</small></span><small>创建接续</small></button><div class="palette-group-label">最近工作</div>${works.slice(0, 3).map(w => `<button class="palette-action" type="button" data-panel-work="${esc(w.id)}">${icon('chat')}<span>${esc(w.title)}</span><small>${projectName(w.projectId)} · ${esc(w.time)}</small></button>`).join('')}<div class="palette-group-label">搜索提示</div><button class="palette-action" type="button" data-query="token">${icon('search')}<span>搜索 token 刷新相关讨论</span><small>历史</small></button>`;
-    }
-  }
-
-  function renderDraft() {
-    const d = state.draft;
-    const source = getSession(d.sourceSessionId);
-    const isAsk = d.mode === 'ask';
-    $('askModeButton').setAttribute('aria-pressed', isAsk);
-    $('handoffModeButton').setAttribute('aria-pressed', !isAsk);
-    $('askFields').classList.toggle('hidden', !isAsk);
-    $('handoffFields').classList.toggle('hidden', isAsk);
-    $('draftSourceText').textContent = `来自 ${source.host} · ${source.title}`;
-    $('drawerTitle').textContent = isAsk ? '请另一端看看' : '换端继续';
-    const targets = state.sessions.filter(s => s.id !== source.id);
-    if (!targets.some(s => s.id === d.targetSessionId)) d.targetSessionId = targets.find(s => s.host !== source.host)?.id || targets[0]?.id;
-    $('targetSession').innerHTML = targets.map(s => `<option value="${esc(s.id)}" ${s.id === d.targetSessionId ? 'selected' : ''}>${esc(s.host)} · ${esc(s.title)}${getWork(s.workId).projectId !== getWork(source.workId).projectId ? ' · ' + projectName(getWork(s.workId).projectId) : ''}</option>`).join('');
-    $('draftNote').value = d.note;
-    $('fragmentCount').textContent = `${d.fragmentIds.length} 段`;
-    $('draftFragments').innerHTML = d.fragmentIds.length
-      ? d.fragmentIds.map(id => {
-          const f = getFragment(id);
-          return `<div class="fragment-card"><div class="fragment-origin"><span class="host-mark">${esc(f.host)}</span><span>${esc(getSession(f.sessionId).title)} · ${esc(f.time)}</span></div><div class="fragment-text">${esc(f.text)}</div><button class="icon fragment-remove" type="button" data-remove-fragment="${esc(id)}" aria-label="移除此引用">${icon('close')}</button></div>`;
-        }).join('')
-      : `<div class="draft-empty">还没有引用片段。搜索历史，或从当前会话加入。<br><button class="text-button" type="button" id="searchForReferences">搜索相关历史 ${icon('arrow')}</button></div>`;
-    const history = completedHistory(source.id);
-    const targetHost = source.host === 'Codex' ? 'AGY' : 'Codex';
-    $('handoffNoticeTitle').textContent = `在 ${targetHost} 创建新会话`;
-    $('historyCount').textContent = `${history.length} 条 · 全部已完成`;
-    $('handoffHistory').innerHTML = history.map(f => `<div class="history-row"><strong>${f.role === 'user' ? '你' : f.role === 'tool' ? '工具记录' : esc(f.host)} · ${esc(f.time)}</strong><p>${esc(f.text)}</p></div>`).join('');
-    const busy = state.phase === 'sending';
-    ['askModeButton', 'handoffModeButton', 'targetSession', 'draftNote', 'closeDrawer', 'askButton', 'handoffButton'].forEach(id => { $(id).disabled = busy; });
-    document.querySelectorAll('[data-add-fragment],[data-ask-fragment],[data-remove-fragment],[data-bring-back],[data-action]').forEach(button => { button.disabled = busy; });
-    $('submitDraft').disabled = busy || (isAsk && !d.note.trim());
-    const target = getSession(d.targetSessionId);
-    $('submitDraft').innerHTML = icon(busy ? 'spin' : 'arrow', busy ? 'rotate' : '') + `<span>${busy ? (isAsk ? '正在模拟发送…' : '正在模拟创建…') : isAsk ? `模拟发送给 ${target.host}` : state.handoffs[handoffKey(source.id)] ? '打开已创建的接续会话' : '模拟创建并接续'}</span>`;
-    $('draftResponse').classList.toggle('hidden', !state.lastResult);
-    if (state.lastResult) {
-      const result = state.lastResult;
-      if (result.type === 'ask') {
-        $('draftResponse').innerHTML = `<div class="draft-result-meta">${icon('check')}模拟发送完成 · 未连接真实宿主</div><strong>${esc(result.host)} 的回复 <span class="sample-tag">示例</span></strong><p>${esc(result.reply)}</p><button class="secondary" type="button" data-bring-back="${esc(result.id)}">${icon('back')}带回 ${esc(getSession(result.sourceSessionId).host)}</button>`;
-      } else {
-        $('draftResponse').innerHTML = `<div class="draft-result-meta">${icon('check')}模拟接续已完成</div><strong>${esc(getSession(result.targetId).host)} 新会话已准备好</strong><p>已带入 ${completedHistory(result.targetId).length} 条可见历史，来源会话仍保留。</p><button class="secondary" type="button" data-open-handoff="${esc(result.targetId)}">${icon('chat')}打开接续会话</button>`;
-      }
-    }
-  }
-
-  function syncDraftLocation() {
-    const panel = state.view === 'panel';
-    const show = state.draftOpen;
-    const inPanel = panel && show && state.panelDraft;
-    $('drawer').classList.toggle('hidden', !show || panel);
-    $('panelDraftHost').classList.toggle('hidden', !inPanel);
-    $('paletteDraftBar').classList.toggle('hidden', !inPanel);
-    $('paletteBody').classList.toggle('hidden', inPanel);
-    const host = inPanel ? $('panelDraftHost') : $('mainDraftHost');
-    host.append($('draft'));
-    $('draft').classList.toggle('hidden', !show);
-  }
-
-  function render() {
-    renderWorkList();
-    renderReader();
-    renderPalette();
-    renderDraft();
-    syncDraftLocation();
-    $('mainSearch').value = state.query;
-    $('panelSearch').value = state.query;
-    $('panelBackdrop').classList.toggle('hidden', state.view !== 'panel');
-    $('mainViewButton').setAttribute('aria-pressed', state.view === 'main');
-    $('panelViewButton').setAttribute('aria-pressed', state.view === 'panel');
-    document.documentElement.dataset.theme = state.theme;
-    $('themeButton').innerHTML = icon(state.theme === 'light' ? 'moon' : 'sun') + `<span>${state.theme === 'light' ? '深色' : '浅色'}</span>`;
-    $('themeButton').setAttribute('aria-label', `切换${state.theme === 'light' ? '深' : '浅'}色外观`);
-  }
-
-  const scrollToFragment = id => {
-    const scroller = $('readerScroll');
-    const el = $('message-' + id);
-    if (!el || !scroller) return;
-    const sRect = scroller.getBoundingClientRect();
-    const eRect = el.getBoundingClientRect();
-    if (eRect.top >= sRect.top && eRect.bottom <= sRect.bottom) return;
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  };
-
-  function setQuery(query) {
-    state.query = query;
-    state.sourceFilter = 'all';
-    if (!query.trim()) {
-      state.sourceSessionId = null;
-      state.selectedFragmentId = null;
-    }
-    renderWorkList();
-    renderPalette();
-    renderReader();
-    $('mainSearch').value = query;
-    $('panelSearch').value = query;
-  }
-
-  function openPanel() {
-    previousFocus = document.activeElement;
-    state.view = 'panel';
-    state.panelDraft = state.draftOpen;
-    render();
-    setTimeout(() => $('panelSearch').focus(), 20);
-  }
-
-  function expandMain() {
-    state.view = 'main';
-    render();
-    if (state.sourceSessionId && state.selectedFragmentId) scrollToFragment(state.selectedFragmentId);
-  }
-
-  function closePanel() {
-    expandMain();
-    previousFocus?.focus();
-  }
-
-  function chooseWork(id) {
-    const work = getWork(id);
-    state.workId = id;
-    state.projectId = work.projectId;
-    state.sessionId = work.sessions[0];
-    state.sourceSessionId = null;
-    state.selectedFragmentId = null;
-    state.query = '';
-    state.allWorks = false;
-    render();
-    $('readerScroll').scrollTop = 0;
-  }
-
-  function showSource(id) {
-    const fragment = getFragment(id);
-    state.sourceSessionId = fragment.sessionId;
-    state.selectedFragmentId = id;
-    renderWorkList();
-    renderReader();
-    scrollToFragment(id);
-  }
-
-  function chooseSession(id) {
-    const session = getSession(id);
-    if (state.sourceSessionId) state.sourceSessionId = id;
-    else {
-      state.sessionId = id;
-      state.workId = session.workId;
-      state.projectId = getWork(session.workId).projectId;
-    }
-    state.selectedFragmentId = null;
-    render();
-    $('readerScroll').scrollTop = 0;
-  }
-
-  function openDraft(mode, fragmentId) {
-    if (state.phase === 'sending') return;
-    const current = visibleSession();
-    if (!state.draftOpen && state.draft.fragmentIds.length === 0) {
-      state.draft.sourceSessionId = current.id;
-      state.draft.targetSessionId = state.sessions.find(s => s.host !== current.host && s.workId === current.workId)?.id || state.sessions.find(s => s.host !== current.host)?.id;
-    }
-    state.draft.mode = mode;
-    if (mode === 'handoff') {
-      state.draft.sourceSessionId = current.id;
-      state.lastResult = null;
-    }
-    if (fragmentId && !state.draft.fragmentIds.includes(fragmentId)) state.draft.fragmentIds.push(fragmentId);
-    state.draftOpen = true;
-    state.panelDraft = state.view === 'panel';
-    render();
-  }
-
-  function addFragment(id) {
-    if (state.phase === 'sending') return;
-    if (!state.draft.fragmentIds.includes(id)) {
-      state.draft.fragmentIds.push(id);
-      state.lastResult = null;
-    }
-    state.draft.mode = 'ask';
-    state.draftOpen = true;
-    state.panelDraft = state.view === 'panel';
-    render();
-    showToast('片段已加入引用，来源已保留');
-  }
-
-  function bringBack(id) {
-    if (state.phase === 'sending') return;
-    const delivery = state.deliveries.find(d => d.id === id);
-    const fragmentId = 'reply-' + id;
-    if (!getFragment(fragmentId)) {
-      state.fragments.push({ id: fragmentId, sessionId: delivery.targetSessionId, host: delivery.host, time: '刚刚', role: 'agent', text: delivery.reply });
-      getSession(delivery.targetSessionId).fragmentIds.push(fragmentId);
-    }
-    state.draft = { mode: 'ask', sourceSessionId: delivery.targetSessionId, targetSessionId: delivery.sourceSessionId, note: '这是另一端对方案的复核意见。请结合当前实现继续完善，重点补齐 refresh 失败的处理。', fragmentIds: [fragmentId] };
-    state.draftOpen = true;
-    state.panelDraft = state.view === 'panel';
-    state.lastResult = null;
-    render();
-    showToast(`回复已加入草稿，准备带回 ${getSession(delivery.sourceSessionId).host}`);
-  }
-
-  function openHandoff(id) {
-    const session = getSession(id);
-    state.view = 'main';
-    state.sessionId = id;
-    state.workId = session.workId;
-    state.projectId = getWork(session.workId).projectId;
-    state.query = '';
-    state.sourceSessionId = null;
-    state.selectedFragmentId = null;
-    state.draftOpen = false;
-    state.panelDraft = false;
-    render();
-    $('readerScroll').scrollTop = 0;
-    showToast('已打开示例接续会话');
-  }
-
-  async function submitDraft() {
-    if (state.phase === 'sending') return;
-    const d = structuredClone(state.draft);
-    if (d.mode === 'ask' && !d.note.trim()) return;
-    if (d.mode === 'handoff' && state.handoffs[handoffKey(d.sourceSessionId)]) {
-      openHandoff(state.handoffs[handoffKey(d.sourceSessionId)]);
-      return;
-    }
-    state.phase = 'sending';
-    state.lastResult = null;
-    renderDraft();
-    const epoch = operationEpoch;
-    await new Promise(r => setTimeout(r, 850));
-    if (epoch !== operationEpoch) return;
-    if (d.mode === 'ask') {
-      const target = getSession(d.targetSessionId);
-      const source = getSession(d.sourceSessionId);
-      const reply = source.host === 'AGY'
-        ? '复核意见已收到。会把共享 refreshPromise 与失败清理放在同一条路径，并补充“刷新接口不重试自身”的检查。下一步验证并发 401 只触发一次刷新。'
-        : '共享 refreshPromise 的方向正确。建议补齐两个细节：refresh 接口本身跳过 401 重试；刷新失败时统一拒绝所有等待请求并清空登录态，避免部分请求继续使用旧 token。';
-      const result = { type: 'ask', id: 'delivery-' + Date.now(), host: target.host, sourceSessionId: source.id, targetSessionId: target.id, reply, note: d.note, fragmentIds: d.fragmentIds };
-      state.deliveries.push(result);
-      const quoted = d.fragmentIds.map(id => {
-        const f = getFragment(id);
-        return `[引用 ${f.host} · ${getSession(f.sessionId).title}] ${f.text}`;
-      }).join('\n\n');
-      const questionId = 'question-' + result.id;
-      const replyId = 'reply-' + result.id;
-      state.fragments.push(
-        { id: questionId, sessionId: target.id, host: target.host, time: '刚刚', role: 'user', text: d.note + (quoted ? '\n\n' + quoted : '') },
-        { id: replyId, sessionId: target.id, host: target.host, time: '刚刚', role: 'agent', text: reply }
-      );
-      target.fragmentIds.push(questionId, replyId);
-      state.lastResult = result;
-      showToast(`已模拟发送给 ${target.host}，示例回复已返回`);
-    } else {
-      const source = getSession(d.sourceSessionId);
-      const host = source.host === 'Codex' ? 'AGY' : 'Codex';
-      const id = 'handoff-' + source.id + '-' + Object.keys(state.handoffs).length;
-      const history = completedHistory(source.id);
-      const copied = history.map((f, i) => ({ ...structuredClone(f), id: id + '-' + i, sessionId: id }));
-      state.fragments.push(...copied);
-      state.sessions.push({ id, workId: source.workId, host, title: source.title + ' · 接续', time: '刚刚', fragmentIds: copied.map(f => f.id), inherited: source.id });
-      state.handoffs[handoffKey(source.id)] = id;
-      state.lastResult = { type: 'handoff', targetId: id };
-      showToast(`已模拟创建 ${host} 接续会话`);
-    }
-    state.phase = 'idle';
-    render();
-  }
-
-  function resetDemo() {
-    operationEpoch++;
-    state.view = 'main';
-    state.projectId = 'atlas';
-    state.workId = 'login';
-    state.sessionId = 'cx-login';
-    state.query = '';
-    state.sourceFilter = 'all';
-    state.draft = initialDraft();
-    state.deliveries = [];
-    state.sessions = structuredClone(initialSessions);
-    state.fragments = structuredClone(initialFragments);
-    state.handoffs = {};
-    state.draftOpen = false;
-    state.panelDraft = false;
-    state.selectedFragmentId = null;
-    state.sourceSessionId = null;
-    state.phase = 'idle';
-    state.lastResult = null;
-    state.allWorks = false;
-    render();
-    $('readerScroll').scrollTop = 0;
-    showToast('已重置示例数据与草稿');
-  }
-
-  function confirmTopSearchHit() {
-    if (!state.query.trim()) return;
-    const top = searchResults()[0];
-    if (!top) return;
-    showSource(top.id);
-    if (state.view === 'panel') expandMain();
-  }
-
-  $('mainSearch').addEventListener('input', e => setQuery(e.target.value));
-  $('panelSearch').addEventListener('input', e => setQuery(e.target.value));
-  bindImeSafeEnter($('mainSearch'), confirmTopSearchHit);
-  bindImeSafeEnter($('panelSearch'), confirmTopSearchHit);
-  bindImeSafeEnter($('draftNote'), () => { if (!$('submitDraft').disabled) submitDraft(); }, { ignoreShift: true });
-  $('mainViewButton').addEventListener('click', expandMain);
-  $('panelViewButton').addEventListener('click', openPanel);
-  $('quickPanelButton').addEventListener('click', openPanel);
-  $('toolbarPanelButton').addEventListener('click', openPanel);
-  $('historyButton').addEventListener('click', openPanel);
-  $('listActionButton').addEventListener('click', openPanel);
-  $('expandMainButton').addEventListener('click', expandMain);
-  $('closePanel').addEventListener('click', closePanel);
-  $('resetButton').addEventListener('click', resetDemo);
-  $('themeButton').addEventListener('click', () => { state.theme = state.theme === 'light' ? 'dark' : 'light'; render(); });
-  $('askButton').addEventListener('click', () => openDraft('ask'));
-  $('handoffButton').addEventListener('click', () => openDraft('handoff'));
-  $('askModeButton').addEventListener('click', () => { state.draft.mode = 'ask'; state.lastResult = null; renderDraft(); });
-  $('handoffModeButton').addEventListener('click', () => { state.draft.mode = 'handoff'; state.lastResult = null; renderDraft(); });
-  $('closeDrawer').addEventListener('click', () => { state.draftOpen = false; syncDraftLocation(); });
-  $('backToPanelSearch').addEventListener('click', () => { state.panelDraft = false; syncDraftLocation(); $('panelSearch').focus(); });
-  $('targetSession').addEventListener('change', e => { state.draft.targetSessionId = e.target.value; state.lastResult = null; renderDraft(); });
-  $('draftNote').addEventListener('input', e => { state.draft.note = e.target.value; $('submitDraft').disabled = state.phase === 'sending' || (state.draft.mode === 'ask' && !e.target.value.trim()); });
-  $('submitDraft').addEventListener('click', submitDraft);
-  $('returnWorkButton').addEventListener('click', () => { state.sourceSessionId = null; state.selectedFragmentId = null; render(); });
-  $('allWorkButton').addEventListener('click', () => { state.allWorks = true; state.query = ''; state.sourceSessionId = null; state.selectedFragmentId = null; render(); });
-  $('mobileWorksButton').addEventListener('click', openPanel);
-  $('panelBackdrop').addEventListener('click', e => { if (e.target === $('panelBackdrop')) closePanel(); });
-
-  document.addEventListener('click', e => {
-    const b = e.target.closest('button');
-    if (!b) return;
-    const data = b.dataset;
-    if (data.project) {
-      state.projectId = data.project;
-      state.allWorks = false;
-      chooseWork(works.find(w => w.projectId === data.project).id);
-    } else if (data.work) chooseWork(data.work);
-    else if (data.result) showSource(data.result);
-    else if (data.session) chooseSession(data.session);
-    else if (data.filter) {
-      state.sourceFilter = data.filter;
-      renderWorkList();
-      renderPalette();
-    } else if (data.addFragment) addFragment(data.addFragment);
-    else if (data.askFragment) openDraft('ask', data.askFragment);
-    else if (data.removeFragment) {
-      state.draft.fragmentIds = state.draft.fragmentIds.filter(id => id !== data.removeFragment);
-      state.lastResult = null;
-      renderDraft();
-      renderReader();
-    } else if (data.bringBack) bringBack(data.bringBack);
-    else if (data.openHandoff) openHandoff(data.openHandoff);
-    else if (data.panelPreview) {
-      showSource(data.panelPreview);
-      expandMain();
-    } else if (data.panelWork) {
-      chooseWork(data.panelWork);
-      expandMain();
-    } else if (data.action) openDraft(data.action);
-    else if (data.query) {
-      setQuery(data.query);
-      $('panelSearch').focus();
-    } else if (data.clearSearch) {
-      setQuery('');
-      (state.view === 'panel' ? $('panelSearch') : $('mainSearch')).focus();
-    } else if (b.id === 'searchForReferences') {
-      if (state.view === 'panel') {
-        state.panelDraft = false;
-        syncDraftLocation();
-        setQuery('token');
-        $('panelSearch').focus();
-      } else {
-        setQuery('token');
-        $('mainSearch').focus();
-      }
-    }
-  });
-
-  document.addEventListener('keydown', e => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-      e.preventDefault();
-      if (state.view === 'panel') closePanel();
-      else openPanel();
-    }
-    if (e.key === 'Escape') {
-      if (state.view === 'panel') closePanel();
-      else if (state.draftOpen && state.phase !== 'sending') {
-        state.draftOpen = false;
-        syncDraftLocation();
-      } else if (state.query) setQuery('');
-    }
-    if (e.key === 'Tab' && state.view === 'panel') {
-      const focusable = [...$('palette').querySelectorAll('button,input,textarea,select,summary')].filter(el => !el.disabled && el.getClientRects().length);
-      if (!focusable.length) return;
-      const first = focusable[0], last = focusable.at(-1);
-      if (e.shiftKey && (document.activeElement === first || !$('palette').contains(document.activeElement))) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && (document.activeElement === last || !$('palette').contains(document.activeElement))) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-  });
-
-  render();
 }
 
 /* ============================================================================
@@ -1570,6 +1046,12 @@ function createLiveController() {
   }
 
   async function refreshSnapshot({ refresh = false, showNotice = false, preserveDraftState = false } = {}) {
+    if (!isLiveMode) {
+      live.status = 'error';
+      live.snapshotError = '未检测到本地工作台令牌，请通过 codex-agy-sync serve --open 启动本地工作台。';
+      render();
+      return;
+    }
     const epoch = ++snapshotEpoch;
     if (!live.works.length) {
       live.status = 'loading';
@@ -2144,11 +1626,7 @@ function createLiveController() {
   refreshSnapshot({ refresh: false });
 }
 
-if (isLiveMode) {
-  createLiveController();
-} else {
-  createOfflineController();
-}
+createLiveController();
 </script>
 </body>
 </html>
