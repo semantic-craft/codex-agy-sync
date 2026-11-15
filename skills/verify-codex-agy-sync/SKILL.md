@@ -9,6 +9,17 @@ description: "Drive and verify the codex-agy-sync CLI and its multi-store SQLite
 
 Run the repository gate `./scripts/check` alongside this skill whenever source or schema files change. Read [`features/README.md`](./features/README.md) for the maintained feature map.
 
+## Native macOS menu bar app route
+
+For the zero-polling macOS menu bar app (`CodexAgyHandoff.app` backed by `./bin/codex-agy-sync menubar-feed`), run:
+
+```bash
+python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py doctor
+python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py suite
+```
+
+`suite` builds `CodexAgyHandoff.app` with an isolated QA bundle ID outside `/tmp`, seeds an unpaired stopped interrupted Antigravity session with active `-wal` and `presence/<cid>.lock` inside `_sandbox/`, starts loopback AGY Connect-RPC and Codex `AF_UNIX` WebSocket JSON-RPC stubs (`CreateProject`, `GetCascadeTrajectory` returning `cascade_run_status=1`, `project/list`, `project/create`, `thread/fork`, `thread/metadata/update`, `thread/name/set`, `thread/read`, `thread/unsubscribe`), drives the panel through `cua-driver` to trigger hero rescue (`--auto-pair --include-interrupted`), verifies the ready receipt, staging cleanup, RPC pairing, and Codex rollout output, saves `screenshots/01-hero-ready.png` and `screenshots/02-handoff-done.png`, confirms host DB fingerprint parity, and tears down processes, LaunchServices registration, QA prefs, and `_sandbox/`.
+
 ## Live Stage-1 workbench route
 
 For the live Stage-1 Local Workbench (`codex-agy-sync serve`) using the packaged default UI (`src/codex_agy_sync/workbench/ui/index.html`, or an explicit `--prototype <path>` custom UI HTML override), follow [Live Stage-1 workbench](./features/live-workbench.md).
@@ -52,7 +63,7 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py doctor --run
 `doctor` performs a strictly read-only check and exits `0` with `"status": "PASS"` only when all conditions hold:
 - `RUN_DIR` resolves via `Path.resolve()` outside `/tmp` and `/private/tmp`.
 - `_sandbox/owner.json` exists and carries `"marker": "codex-agy-sync-verify-sandbox"`.
-- `./bin/codex-agy-sync --help` exits `0` and exposes all seven subcommands (`pair`, `status`, `inspect`, `sync-session`, `handoff`, `sync-workspace`, `serve`).
+- `./bin/codex-agy-sync --help` exits `0` and exposes all eight subcommands (`pair`, `status`, `inspect`, `sync-session`, `handoff`, `menubar-feed`, `sync-workspace`, `serve`).
 - Live host files (`$HOME/.gemini/antigravity/conversation_summaries.db` and `$HOME/.codex/state_5.sqlite`, when present) match the `(inode, size, mtime_ns)` fingerprint captured at `init`.
 
 ## Drive
@@ -122,3 +133,7 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py cleanup --ru
 `skills/verify-codex-agy-sync/scripts/workbench_verify.py` (with helper `_workbench_sandbox.py`) is an executable Python 3 script for live Stage-1 workbench verification (`codex-agy-sync serve`) supporting two subcommands:
 - `doctor [--prototype <path>]`
 - `suite [--prototype <path>] [--run-dir <dir>] [--timeout <seconds>]`
+
+`skills/verify-codex-agy-sync/scripts/menubar_verify.py` is an executable Python 3 script for isolated `CodexAgyHandoff.app` GUI verification via `cua-driver` supporting two subcommands:
+- `doctor`
+- `suite [--run-dir <dir>]`

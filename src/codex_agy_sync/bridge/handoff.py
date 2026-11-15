@@ -20,6 +20,7 @@ from ..events import (
     HostKind,
     SubagentLineage,
     SystemEvent,
+    TaskBoundaryEvent,
     ThinkingEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -99,9 +100,30 @@ def read_handoff_source(
     if not to_agy and endpoint is None and locks.agy_presence_locked:
         raise ValueError("Source Antigravity session is locked and its live status cannot be read.")
     if to_agy:
-        ledger, _, active = transport.read_codex_ledger_with_meta(binding, CodexThreadId(source_id), locks, mode)
+        try:
+            ledger, read_mode, active = transport.read_codex_ledger_with_meta(
+                binding, CodexThreadId(source_id), locks, mode
+            )
+        except rpc.OnlineRpcUnavailableError:
+            if locks.codex_wal_active:
+                raise ValueError("Source Codex session is locked and its live status cannot be read.") from None
+            ledger, read_mode, active = transport.read_codex_ledger_with_meta(
+                binding, CodexThreadId(source_id), locks, TransportMode.OFFLINE_STORAGE
+            )
+        has_in_progress_boundary = any(
+            isinstance(ev, TaskBoundaryEvent) and ev.task_status.lower() == "in_progress"
+            for ev in ledger.events
+        )
+        rpc_verified_inactive = (
+            read_mode == TransportMode.ONLINE_RPC and not active and not has_in_progress_boundary
+        )
     else:
-        active = endpoint is not None and rpc.fetch_agy_trajectory_via_rpc(endpoint, CascadeId(source_id)).is_active
+        active = False
+        rpc_verified_inactive = False
+        if endpoint is not None:
+            rpc_res = rpc.fetch_agy_trajectory_via_rpc(endpoint, CascadeId(source_id))
+            active = rpc_res.is_active
+            rpc_verified_inactive = rpc_res.cascade_run_status == 1
         if active:
             raise ValueError("Source session is active. Finish the turn before handoff.")
         ledger, _, _ = transport.read_agy_ledger_with_meta(binding, CascadeId(source_id), locks, TransportMode.OFFLINE_STORAGE)
@@ -109,7 +131,7 @@ def read_handoff_source(
         if not ledger.has_inflight_turn or not include_interrupted:
             raise ValueError("Source session is active or has an incomplete turn. Finish the turn before handoff.")
         host = HostKind.CODEX if to_agy else HostKind.ANTIGRAVITY
-        if is_source_actively_running(host, ledger, locks, rpc_active=active):
+        if active or (not rpc_verified_inactive and is_source_actively_running(host, ledger, locks, rpc_active=active)):
             raise ValueError("Source session is active. Finish the turn before handoff.")
         ledger, _ = rescue_interrupted_ledger(ledger)
     if ledger.latest_watermark() is None:

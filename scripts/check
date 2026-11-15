@@ -160,10 +160,16 @@ for p in repo.rglob("*"):
     if not p.is_file():
         continue
     rel = p.relative_to(repo)
-    if rel.parts[0] in (".git", "out") or "__pycache__" in rel.parts or rel.suffix == ".pyc":
+    if (
+        rel.parts[0] in (".git", "out")
+        or ".build" in rel.parts
+        or ".swiftpm" in rel.parts
+        or "__pycache__" in rel.parts
+        or rel.suffix == ".pyc"
+    ):
         continue
     txt = p.read_text(encoding="utf-8", errors="ignore")
-    if rel.parts[0] in ("scripts", "src", "docs", "tests", "bin", "skills"):
+    if rel.parts[0] in ("scripts", "src", "docs", "tests", "bin", "skills", "macos"):
         for line_no, line in enumerate(txt.splitlines(), start=1):
             if home_str in line:
                 bad.append(f"{rel}:{line_no}: hardcoded home path {home_str}")
@@ -182,9 +188,13 @@ if bad:
     for b in bad:
         print("SECURITY/HYGIENE FAIL:", b, file=sys.stderr)
     sys.exit(1)
-print("  Hygiene & credential isolation check passed (0 hardcoded user paths in scripts/src/docs/tests, 0 csrfToken leaks).")
+print("  Hygiene & credential isolation check passed (0 hardcoded user paths in scripts/src/docs/tests/bin/skills/macos, 0 csrfToken leaks).")
 '
 
 echo "[5/5] Running behavioral test suite..."
 PYTHONPATH=src python3 -m unittest discover -s tests -v
+if [[ "$(uname -s)" == "Darwin" ]] && command -v swift >/dev/null 2>&1; then
+    echo "[5b/5] Running Swift macOS menubar tests..."
+    swift test --package-path macos --scratch-path out/swift-test-check
+fi
 echo "All checks passed."
