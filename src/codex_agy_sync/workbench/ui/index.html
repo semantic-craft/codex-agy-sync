@@ -1,0 +1,2144 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话同频桥 · 工作空间原型</title>
+<style>
+:root{color-scheme:light;--page:#e9ebef;--bg:#fff;--sidebar:#f0f2f5;--list:#fafbfc;--text:#252932;--muted:#747d8c;--line:#e5e8ed;--hover:#e9edf3;--blue:#1368d9;--blue-soft:#e7f0fe;--green:#2e8762;--amber:#9a5b13;--amber-soft:#fef4e4;--red:#b42318;--red-soft:#fdecec;--code:#f4f6f8;--shadow:0 18px 65px #27375119,0 2px 8px #2737510a;--panel-shadow:0 24px 90px #14213a40;--radius:10px}
+:root[data-theme="dark"]{color-scheme:dark;--page:#15181e;--bg:#22262e;--sidebar:#1e222a;--list:#20242b;--text:#e5e9f0;--muted:#9aa4b5;--line:#343b47;--hover:#303846;--blue:#72acff;--blue-soft:#243c5e;--green:#80c6a3;--amber:#f3b469;--amber-soft:#3d2c16;--red:#f98e86;--red-soft:#441e1e;--code:#1b2028;--shadow:0 18px 65px #0004,0 2px 8px #0002;--panel-shadow:0 24px 90px #0008}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;font-size:13px;line-height:1.6;-webkit-font-smoothing:antialiased}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none}
+button,input,select{min-height:28px}
+button{border-radius:6px}
+button:hover{background:var(--hover)}
+button:disabled{opacity:.55;cursor:wait}
+button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid color-mix(in srgb,var(--blue) 55%,transparent);outline-offset:2px}
+input,textarea,select{border:1px solid var(--line);border-radius:6px;background:var(--bg);max-width:100%}
+textarea{resize:vertical;padding:10px 12px;line-height:1.7;width:100%;min-height:96px}
+input{padding:0 10px}
+select{padding:5px 28px 5px 9px;width:100%}
+svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+svg.sprite{display:none}
+.visually-hidden:where(:not(:focus-within,:active)){position:absolute!important;clip-path:inset(50%)!important;overflow:hidden!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;border:0!important;white-space:nowrap!important;left:0;top:0}
+.icon{width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:var(--muted)}
+.primary{background:var(--blue);color:#fff;padding:7px 14px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px}
+.primary:hover{background:color-mix(in srgb,var(--blue) 88%,#000)}
+[data-theme="dark"] .primary{color:#0d233d}
+.secondary{padding:6px 11px;border:1px solid var(--line);background:var(--bg);display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.text-button{color:var(--blue);font-weight:500;padding:4px 7px;display:inline-flex;align-items:center;gap:5px}
+.subtle{color:var(--muted)}
+.small{font-size:11px}
+.hidden,[hidden]{display:none!important}
+.proto-bar{max-width:1360px;margin:0 auto;height:62px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 4px}
+.proto-label{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted);min-width:0}
+.proto-label>span:first-child{width:7px;height:7px;background:var(--blue);border-radius:50%;flex-shrink:0}
+.proto-actions{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.segmented{display:flex;background:color-mix(in srgb,var(--text) 7%,transparent);padding:3px;border-radius:7px;gap:2px}
+.segmented button{padding:3px 12px;min-height:27px;font-size:12px;color:var(--muted)}
+.segmented button[aria-pressed="true"]{color:var(--text);background:var(--bg);box-shadow:0 1px 3px #00000013}
+.theme-button{display:flex;align-items:center;gap:6px;color:var(--muted);padding:4px 7px;font-size:12px}
+.app{max-width:1360px;margin:0 auto 28px;background:var(--bg);border:1px solid color-mix(in srgb,var(--line) 70%,#adb4bf);border-radius:12px;box-shadow:var(--shadow);height:calc(100vh - 90px);min-height:660px;max-height:850px;overflow:hidden;position:relative}
+.app-toolbar{height:58px;display:grid;grid-template-columns:184px 280px minmax(0,1fr);border-bottom:1px solid var(--line);align-items:center;background:var(--list)}
+.window-chrome{height:100%;display:flex;align-items:center;gap:17px;padding:0 18px;background:var(--sidebar)}
+.traffic{display:flex;gap:7px}
+.traffic i{width:11px;height:11px;border-radius:50%;display:block;background:#ff5f58;box-shadow:inset 0 0 0 1px #0000000c}
+.traffic i:nth-child(2){background:#febc2e}
+.traffic i:nth-child(3){background:#28c840}
+.app-mark{font-weight:650;letter-spacing:-.3px;font-size:12px;white-space:nowrap}
+.workspace-title{height:100%;padding:0 18px;display:flex;align-items:center;justify-content:space-between;border-right:1px solid var(--line);font-size:12px;font-weight:600}
+.search-toolbar{display:flex;align-items:center;padding:0 20px;gap:14px;min-width:0}
+.global-search{height:32px;display:flex;gap:8px;align-items:center;flex:1;max-width:450px;min-width:0;border:1px solid var(--line);background:var(--bg);border-radius:6px;padding:0 9px;color:var(--muted)}
+.global-search input{width:100%;min-width:0;border:0;background:transparent;outline:none;padding:0;font-size:12px}
+.global-search:focus-within{box-shadow:0 0 0 2px color-mix(in srgb,var(--blue) 30%,transparent);border-color:var(--blue)}
+kbd{font-family:inherit;font-size:10px;color:var(--muted);background:var(--code);border:1px solid var(--line);border-radius:4px;min-width:27px;line-height:18px;text-align:center;white-space:nowrap}
+.toolbar-end{margin-left:auto;display:flex;gap:8px;align-items:center;flex-shrink:0}
+.local-status{font-size:11px;color:var(--muted);white-space:nowrap;display:flex;gap:5px;align-items:center}
+.status-dot{width:5px;height:5px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
+.app-body{display:grid;grid-template-columns:184px 280px minmax(0,1fr);height:calc(100% - 58px)}
+.sidebar{background:var(--sidebar);padding:19px 10px 13px;display:flex;flex-direction:column;min-width:0;overflow-y:auto}
+.nav-section-label{font-size:10px;color:var(--muted);padding:0 10px;margin:18px 0 7px;font-weight:600;letter-spacing:.5px}
+.nav-item{display:flex;align-items:center;width:100%;gap:7px;padding:6px 10px;text-align:left;font-size:12px;min-height:34px;color:var(--muted);margin:2px 0;min-width:0;overflow:hidden}
+.nav-item.active{color:var(--blue);background:var(--blue-soft);font-weight:600}
+.nav-item .nav-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-item .count{margin-left:auto;color:var(--muted);font-weight:400;font-size:10px;flex-shrink:0}
+.nav-empty{padding:8px 10px}
+.project-glyph{height:21px;width:21px;flex-shrink:0;background:var(--bg);border:1px solid var(--line);border-radius:5px;font-size:10px;font-weight:650;color:var(--text);display:flex;align-items:center;justify-content:center}
+.pair-pill{font-size:9px;padding:0 4px;border-radius:3px;line-height:15px;flex-shrink:0;border:1px solid transparent;white-space:nowrap}
+.pair-pill.paired{color:var(--green);background:color-mix(in srgb,var(--green) 11%,transparent);border-color:color-mix(in srgb,var(--green) 24%,transparent)}
+.pair-pill.unpaired{color:var(--amber);background:var(--amber-soft);border-color:color-mix(in srgb,var(--amber) 30%,transparent)}
+.sidebar-bottom{margin-top:auto;border-top:1px solid var(--line);padding:13px 8px 0;display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted)}
+.bridge-glyph{width:26px;height:26px;flex-shrink:0;background:var(--text);border-radius:7px;display:flex;align-items:center;justify-content:center;color:var(--bg)}
+.bridge-glyph svg{width:15px;height:15px}
+.work-list{background:var(--list);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden;min-width:0}
+.list-head{padding:20px 18px 13px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.list-head h2{font-size:14px;margin:0;font-weight:650;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list-caption{font-size:11px;color:var(--muted);padding:0 18px 12px;overflow-wrap:anywhere}
+.list-group{font-size:10px;font-weight:550;color:var(--muted);padding:13px 18px 7px}
+.work-items{padding:0 8px;overflow-y:auto;flex:1;min-height:0}
+.work-item{width:100%;text-align:left;padding:12px 11px;border:1px solid transparent;margin-bottom:4px;display:block;border-radius:7px;min-width:0}
+.work-item.active{background:var(--blue-soft);border-color:color-mix(in srgb,var(--blue) 9%,transparent)}
+.work-item-title{font-size:12px;font-weight:600;display:flex;gap:7px;align-items:center;min-width:0}
+.work-item-title>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.work-item-title>svg{width:14px;height:14px;color:var(--muted)}
+.work-item-desc{font-size:11px;color:var(--muted);margin:5px 0 7px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.work-meta{font-size:10px;color:var(--muted);display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+.host-mark{font-size:9px;display:inline-block;padding:0 4px;border-radius:3px;background:var(--bg);border:1px solid var(--line);line-height:15px;color:var(--muted);white-space:nowrap}
+.work-meta .dot{margin:0 3px}
+.list-footer{margin-top:auto;font-size:10px;color:var(--muted);padding:15px 18px;border-top:1px solid var(--line)}
+.reader{display:flex;flex-direction:column;min-width:0;overflow:hidden;position:relative}
+.reader-scroll{overflow:auto;flex:1;min-width:0}
+.reader-inner{max-width:780px;margin:0 auto;padding:33px 38px 25px;min-width:0}
+.breadcrumbs{font-size:11px;color:var(--muted);display:flex;gap:7px;align-items:center;margin-bottom:14px;flex-wrap:wrap;overflow-wrap:anywhere}
+.breadcrumbs svg{width:12px;height:12px}
+.work-heading{display:flex;align-items:flex-start;gap:14px;justify-content:space-between;min-width:0}
+.work-heading>div{min-width:0;flex:1}
+.work-heading h1{font-size:24px;letter-spacing:-.7px;line-height:1.35;margin:0 0 7px;font-weight:650;overflow-wrap:anywhere}
+.work-description{color:var(--muted);font-size:12px;margin:0 0 18px;overflow-wrap:anywhere}
+.work-status{color:var(--green);background:color-mix(in srgb,var(--green) 9%,transparent);padding:3px 7px;white-space:nowrap;border-radius:4px;font-size:10px;display:flex;align-items:center;gap:5px;margin-top:3px;flex-shrink:0}
+.work-status.unpaired{color:var(--amber);background:var(--amber-soft)}
+.work-status.unpaired .status-dot{background:var(--amber)}
+.live-banner{border:1px solid var(--line);background:var(--list);border-radius:8px;padding:11px 13px;margin:0 0 16px;font-size:11px;line-height:1.65;overflow-wrap:anywhere}
+.live-banner.unpaired{border-color:color-mix(in srgb,var(--amber) 45%,var(--line));background:color-mix(in srgb,var(--amber-soft) 65%,var(--bg))}
+.live-banner-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+.live-banner-meta{font-size:10px;color:var(--muted);overflow-wrap:anywhere}
+.remediation-list{margin:6px 0 0;padding-left:18px;color:var(--text)}
+.remediation-list li{margin:3px 0;overflow-wrap:anywhere}
+.session-row{display:flex;gap:8px;flex-wrap:wrap;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.session-chip{border:1px solid var(--line);padding:4px 9px 4px 6px;font-size:11px;display:flex;align-items:center;gap:7px;background:var(--bg);max-width:100%;min-width:0}
+.session-chip.active{border-color:color-mix(in srgb,var(--blue) 38%,var(--line));background:var(--blue-soft)}
+.session-chip .chip-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+.host-icon{width:21px;height:21px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--text);color:var(--bg);border-radius:5px;font-size:10px;font-weight:700}
+.host-icon.agy{background:#e7eaf0;color:#43516d}
+.session-chip small{font-size:9px;color:var(--muted);white-space:nowrap}
+.chip-badge{font-size:9px;padding:1px 5px;border-radius:3px;background:var(--code);border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.chip-badge.baton{color:var(--blue);background:var(--blue-soft);border-color:color-mix(in srgb,var(--blue) 26%,transparent)}
+.chain-row{display:flex;flex-wrap:wrap;gap:6px;padding:12px 0;border-bottom:1px solid var(--line)}
+.chain-hop{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;padding:4px 8px;border-radius:5px;background:var(--list);border:1px solid var(--line);color:var(--muted);max-width:100%;overflow-wrap:anywhere}
+.chain-hop strong{color:var(--text);font-weight:600}
+.timeline-heading{display:flex;align-items:center;justify-content:space-between;color:var(--muted);font-size:10px;padding:21px 0 16px;gap:8px;flex-wrap:wrap}
+.timeline{position:relative}
+.timeline::before{content:"";position:absolute;left:12px;top:20px;bottom:16px;border-left:1px solid var(--line)}
+.message{position:relative;display:grid;grid-template-columns:26px minmax(0,1fr);gap:14px;margin-bottom:24px;scroll-margin-top:20px}
+.message>div{min-width:0}
+.avatar{width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:var(--code);border:1px solid var(--line);border-radius:7px;font-size:10px;font-weight:600;z-index:1}
+.avatar.agent{background:var(--text);color:var(--bg);border-color:var(--text)}
+.message-header{display:flex;align-items:center;gap:8px;margin:1px 0 9px;line-height:1.5;flex-wrap:wrap}
+.message-header strong{font-size:11px;font-weight:600}
+.message-header time{font-size:10px;color:var(--muted)}
+.turn-badge{font-size:9px;padding:1px 5px;border-radius:3px;background:var(--code);border:1px solid var(--line);color:var(--muted)}
+.turn-badge.inflight{color:var(--amber);background:var(--amber-soft);border-color:color-mix(in srgb,var(--amber) 35%,transparent)}
+.message-body{font-size:12px;line-height:1.85;overflow-wrap:anywhere}
+.message-body p{margin:0 0 9px}
+.message-body ul{padding-left:18px;margin:5px 0 10px}
+.message-body li{margin:4px 0}
+.turn-part{margin-bottom:10px}
+.turn-part:last-child{margin-bottom:0}
+.turn-part.turn-user{background:var(--list);border:1px solid var(--line);border-radius:7px;padding:9px 11px}
+.turn-role-label{font-size:10px;font-weight:600;color:var(--muted);margin-bottom:4px}
+.turn-text p:last-child{margin-bottom:0}
+.message code,.fragment-card code{background:var(--code);font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11px;padding:2px 4px;border-radius:3px;color:var(--text);overflow-wrap:anywhere}
+.message-actions{display:flex;gap:6px;margin-top:8px;opacity:0;transition:opacity .15s;flex-wrap:wrap}
+.message:hover .message-actions,.message:focus-within .message-actions{opacity:1}
+.message-actions button{font-size:10px;color:var(--muted);display:flex;align-items:center;gap:4px;padding:2px 6px}
+.message-actions svg{width:12px;height:12px}
+.message.highlight .message-body{background:color-mix(in srgb,#f2d37a 20%,var(--bg));border-radius:6px;box-shadow:0 0 0 8px color-mix(in srgb,#f2d37a 20%,var(--bg))}
+.message.highlight .message-actions{opacity:1}
+.tool-details{border:1px solid var(--line);border-radius:6px;margin-top:12px;background:var(--list);overflow:hidden;max-width:100%}
+.tool-details summary{padding:8px 11px;font-size:10px;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:7px;list-style:none}
+.tool-details summary::before{content:"›";font-size:15px;transform:rotate(0);transition:transform .15s}
+.tool-details[open] summary::before{transform:rotate(90deg)}
+.tool-details summary .passed{margin-left:auto;color:var(--green)}
+.tool-details pre{font:10px/1.8 ui-monospace,"SF Mono",Menlo,monospace;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border-top:1px solid var(--line);padding:10px 12px;margin:0;color:var(--muted)}
+.session-end{margin:0 0 18px 40px;font-size:10px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.reader-footer{border-top:1px solid var(--line);padding:16px 26px;display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--bg)}
+.footer-hint{font-size:10px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.footer-hint svg{width:13px;height:13px}
+.footer-actions{display:flex;gap:8px}
+.footer-actions button{font-size:11px}
+.search-filters{display:flex;gap:4px;padding:0 16px 12px;flex-wrap:wrap}
+.search-filters button{font-size:10px;color:var(--muted);padding:3px 8px}
+.search-filters button.active{background:var(--blue-soft);color:var(--blue)}
+.result-item{padding:12px 11px;display:block;text-align:left;border:1px solid transparent;width:100%;margin-bottom:6px;line-height:1.65;min-width:0}
+.result-item.active{background:var(--blue-soft);border-color:color-mix(in srgb,var(--blue) 10%,transparent)}
+.result-title{font-size:12px;font-weight:600;margin-bottom:6px;overflow-wrap:anywhere}
+.result-excerpt{font-size:11px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;margin:0 0 9px;overflow-wrap:anywhere}
+.result-item mark,.palette-result mark{background:color-mix(in srgb,#eac45d 30%,transparent);color:inherit;border-radius:2px}
+.source-banner{background:var(--list);border-bottom:1px solid var(--line);padding:9px 26px;font-size:10px;color:var(--muted);display:flex;align-items:center;justify-content:space-between;gap:8px}
+.source-banner span{min-width:0;overflow-wrap:anywhere}
+.source-banner button{font-size:10px;flex-shrink:0}
+.empty-state{text-align:center;padding:40px 15px;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+.empty-state svg{height:28px;width:28px;opacity:.6;margin-bottom:8px}
+.empty-state strong{display:block;color:var(--text);font-weight:500;margin-bottom:5px}
+.delivery{margin:0 0 23px 40px;padding:13px 15px;border:1px solid var(--line);border-radius:7px;background:var(--list);font-size:11px}
+.delivery-top{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:10px;margin-bottom:7px}
+.delivery-top strong{color:var(--text);font-size:11px}
+.delivery p{margin:7px 0;line-height:1.8}
+.delivery .text-button{font-size:10px;margin-left:-6px}
+.sample-tag{font-size:9px;color:var(--muted);border:1px solid var(--line);padding:0 4px;border-radius:3px}
+.inherit-node{padding:11px 13px;border:1px dashed var(--line);border-radius:7px;margin:0 0 23px 40px;font-size:11px;color:var(--muted);display:flex;gap:9px;align-items:center}
+.inherit-node svg{color:var(--blue)}
+.inherit-node button{font-size:10px;margin-left:auto;white-space:nowrap}
+.drawer{position:absolute;right:0;top:58px;bottom:0;width:410px;background:var(--bg);box-shadow:-15px 0 45px #1d2a4215;border-left:1px solid var(--line);z-index:5;display:flex;flex-direction:column;max-width:100%}
+.drawer-title{display:flex;align-items:center;justify-content:space-between;padding:16px 19px;border-bottom:1px solid var(--line);font-weight:600;font-size:13px}
+.draft-host{min-height:0;overflow:auto;flex:1}
+.draft{padding:20px;min-width:0}
+.draft-mode{margin-bottom:20px;width:100%}
+.draft-mode button{flex:1}
+.draft label{display:block;font-size:11px;font-weight:550;margin-bottom:7px}
+.draft-field{margin-bottom:18px}
+.draft-source{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:7px;margin-bottom:16px;min-width:0}
+.draft-source span{min-width:0;overflow-wrap:anywhere}
+.draft-source svg{height:14px;width:14px}
+.draft-help{color:var(--muted);font-size:10px;margin-top:7px;line-height:1.7;overflow-wrap:anywhere}
+.stage1-notice{padding:8px 10px;border-radius:6px;background:var(--blue-soft);color:var(--blue);font-size:11px;font-weight:500;margin-bottom:14px;overflow-wrap:anywhere}
+.checkbox-row{display:flex!important;align-items:flex-start;gap:8px;font-weight:400!important;font-size:11px;cursor:pointer;margin-bottom:16px!important;line-height:1.5}
+.checkbox-row input[type="checkbox"]{min-height:16px;width:16px;height:16px;margin:2px 0 0;padding:0;flex-shrink:0}
+.draft-section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
+.draft-section-head label{margin:0}
+.draft-section-head span{font-size:10px;color:var(--muted)}
+.fragment-card{background:var(--list);border:1px solid var(--line);border-radius:6px;padding:10px 11px;margin-bottom:7px;position:relative;min-width:0}
+.fragment-origin{font-size:9px;color:var(--muted);display:flex;gap:5px;align-items:center;padding-right:23px;flex-wrap:wrap;overflow-wrap:anywhere}
+.fragment-text{font-size:11px;line-height:1.75;margin-top:6px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.fragment-remove{position:absolute;right:5px;top:5px;width:25px;height:25px}
+.fragment-remove svg{width:13px;height:13px}
+.draft-empty{border:1px dashed var(--line);border-radius:6px;padding:16px;color:var(--muted);font-size:11px;line-height:1.75}
+.draft-empty .text-button{font-size:11px;padding:2px 0}
+.handoff-notice{padding:12px;border-radius:6px;background:var(--blue-soft);font-size:11px;line-height:1.8;margin-bottom:18px;display:flex;gap:9px}
+.handoff-notice>div{min-width:0;flex:1;overflow-wrap:anywhere}
+.handoff-notice svg{color:var(--blue);margin-top:2px;width:16px;height:16px}
+.handoff-notice strong{font-weight:600}
+.history-preview{max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:4px 12px;margin-bottom:18px}
+.history-row{padding:10px 0;border-bottom:1px solid var(--line);font-size:10px;line-height:1.7;overflow-wrap:anywhere}
+.history-row:last-child{border:0}
+.history-row strong{display:block;margin-bottom:3px;font-size:10px}
+.history-row p{margin:0;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere}
+.draft-submit{width:100%;margin-top:17px}
+.draft-disclaimer{font-size:9px;color:var(--muted);text-align:center;margin-top:8px;overflow-wrap:anywhere}
+.draft-response{border-top:1px solid var(--line);margin-top:18px;padding-top:16px;font-size:11px;overflow-wrap:anywhere}
+.draft-response strong{font-size:12px}
+.draft-response p{line-height:1.8;margin:9px 0}
+.draft-response .secondary{font-size:11px;width:100%}
+.draft-result-meta{font-size:9px;color:var(--muted);display:flex;align-items:center;gap:5px;margin-bottom:6px;flex-wrap:wrap}
+.draft-markdown-preview{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--code);border:1px solid var(--line);border-radius:6px;padding:10px 12px;font:11px/1.65 ui-monospace,"SF Mono",Menlo,monospace;max-height:240px;overflow:auto;margin:10px 0}
+.copy-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.copy-row .secondary{width:auto;flex:1}
+.copy-status{font-size:10px;color:var(--green);min-width:0}
+.receipt-card,.error-card{border:1px solid var(--line);border-radius:6px;padding:10px 12px;background:var(--list);margin:8px 0;overflow-wrap:anywhere}
+.error-card{border-color:color-mix(in srgb,var(--red) 45%,var(--line));background:color-mix(in srgb,var(--red-soft) 65%,var(--bg))}
+.error-card-title{color:var(--red);font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.receipt-kv{display:grid;grid-template-columns:86px minmax(0,1fr);gap:4px 8px;font-size:10px;margin-top:8px}
+.receipt-key{color:var(--muted)}
+.receipt-val{font-family:ui-monospace,"SF Mono",Menlo,monospace;overflow-wrap:anywhere}
+.modal-backdrop{position:fixed;inset:62px 0 0;background:#15203939;backdrop-filter:blur(3px);z-index:20;display:flex;align-items:flex-start;justify-content:center;padding:65px 20px 30px}
+.palette{width:520px;max-width:100%;max-height:calc(100vh - 172px);display:flex;flex-direction:column;background:var(--bg);border:1px solid color-mix(in srgb,var(--line) 80%,#9099a8);box-shadow:var(--panel-shadow);border-radius:12px;overflow:hidden}
+.palette-header{position:relative;display:flex;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid var(--line);color:var(--muted)}
+.palette-header input{border:0;background:transparent;outline:none;flex:1;min-width:0;font-size:14px;padding:0;height:32px}
+.palette-header:focus-within{box-shadow:inset 0 -2px var(--blue)}
+.palette-expand{font-size:10px;white-space:nowrap;padding:3px 6px;min-height:25px;color:var(--muted);display:flex;gap:4px;align-items:center}
+.palette-expand svg{width:13px;height:13px}
+.palette-body{overflow:auto;padding:9px;max-height:410px}
+.palette-group-label{font-size:10px;color:var(--muted);padding:9px 10px 6px}
+.palette-action{display:flex;align-items:center;gap:10px;text-align:left;padding:9px 10px;width:100%;font-size:12px;min-width:0}
+.palette-action>svg{width:16px;height:16px;color:var(--muted)}
+.palette-action small{color:var(--muted);font-size:10px;margin-left:auto;flex-shrink:0}
+.palette-action .action-copy{display:flex;flex-direction:column;gap:2px;min-width:0}
+.palette-action .action-copy small{margin:0;font-size:10px;font-weight:400}
+.palette-result{border-radius:7px;padding:11px 10px;display:flex;gap:10px;align-items:flex-start}
+.palette-result:hover{background:var(--hover)}
+.palette-result .host-icon{width:25px;height:25px;margin-top:2px}
+.palette-result-content{min-width:0;flex:1}
+.palette-result-title{font-size:12px;font-weight:550;overflow-wrap:anywhere}
+.palette-result p{font-size:11px;color:var(--muted);line-height:1.7;margin:4px 0 5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.palette-result-meta{font-size:9px;color:var(--muted);overflow-wrap:anywhere}
+.palette-result-actions{display:flex;gap:5px;margin-top:7px;flex-wrap:wrap}
+.palette-result-actions button{font-size:10px;padding:3px 7px}
+.palette-footer{border-top:1px solid var(--line);padding:9px 16px;display:flex;align-items:center;justify-content:space-between;color:var(--muted);font-size:9px;background:var(--list);gap:8px;flex-wrap:wrap}
+.palette-footer span{display:flex;gap:5px;align-items:center}
+.palette .draft{padding:18px 20px}
+.palette .draft-mode{margin-bottom:16px}
+.palette .draft-host{max-height:calc(100vh - 260px);overflow:auto}
+.palette-draft-bar{display:flex;align-items:center;justify-content:space-between;padding:11px 20px 0;font-size:11px;font-weight:600}
+.palette-draft-bar button{font-size:10px}
+.toast{position:fixed;bottom:27px;left:50%;transform:translateX(-50%);padding:10px 16px;background:var(--text);color:var(--bg);border-radius:8px;font-size:11px;box-shadow:0 4px 20px #0002;z-index:40;max-width:calc(100vw - 32px);text-align:center}
+.mobile-switch{display:none}
+.rotate{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(min-width:1600px){.proto-bar{margin-top:18px}.app{height:820px}}
+@media(max-width:1400px){.proto-bar{margin:0 24px}.app{margin-left:24px;margin-right:24px}.reader-inner{padding-left:30px;padding-right:30px}.local-status{display:none}}
+@media(max-width:1100px){.app-toolbar,.app-body{grid-template-columns:160px 245px minmax(0,1fr)}.app-mark{display:none}.window-chrome{justify-content:space-between}.work-heading h1{font-size:22px}.reader-inner{padding:26px 24px}.reader-footer{padding:14px 20px;flex-wrap:wrap}.footer-hint{display:none}.footer-actions{margin-left:auto}.search-toolbar{padding:0 16px;gap:8px}.search-toolbar kbd{display:none}.work-status{display:none}}
+@media(max-width:900px){.app-toolbar,.app-body{grid-template-columns:158px minmax(0,1fr)}.work-list{display:none}.workspace-title{display:none}.reader-inner{max-width:660px}.app-mark{display:block}.window-chrome{gap:12px;padding:0 14px}.traffic{gap:5px}.traffic i{width:9px;height:9px}.mobile-switch{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}.search-toolbar .toolbar-end{display:none}.app.searching .work-list{display:flex;grid-column:2}.app.searching .reader{display:none}.app.searching .work-list .work-items{max-width:none}.app.searching.source-open .work-list{display:none}.app.searching.source-open .reader{display:flex}.proto-actions{gap:6px}.proto-label{font-size:10px}.segmented button{padding:3px 10px}.drawer{width:400px}.modal-backdrop{padding-top:44px}.sidebar .pair-pill{display:none}}
+@media(max-width:600px){body{font-size:14px}.proto-bar{height:94px;margin:0 13px;padding:10px 0;align-items:flex-start;flex-direction:column;gap:7px}.proto-actions{width:100%;justify-content:space-between;gap:4px}.proto-label{font-size:11px}.proto-actions>.text-button{font-size:10px;padding:2px 4px}.theme-button{font-size:0;gap:0;padding:3px 7px}.theme-button svg{width:16px}.segmented button{font-size:11px;padding:3px 11px}.app{margin:0 8px 10px;border-radius:10px;height:calc(100dvh - 104px);min-height:620px;max-height:none}.app-toolbar{display:flex;padding:0 12px;height:53px;gap:9px}.window-chrome{background:none;padding:0}.traffic{display:none}.app-mark{display:none}.search-toolbar{padding:0;flex:1;gap:0}.global-search{height:32px;max-width:none}.global-search input{font-size:11px}.global-search svg{width:15px}.app-body{display:flex;height:calc(100% - 53px)}.sidebar{display:none}.reader{width:100%}.reader-inner{padding:22px 20px}.work-heading h1{font-size:22px}.work-description{margin-bottom:17px;font-size:11px}.breadcrumbs{margin-bottom:10px;font-size:10px}.session-row{gap:6px;padding-bottom:15px}.session-chip{font-size:10px;padding:4px 7px}.session-chip small{font-size:8px}.message{gap:10px;grid-template-columns:24px minmax(0,1fr);margin-bottom:24px}.message-body{font-size:12px}.message-actions{opacity:1}.reader-footer{padding:12px;justify-content:center}.footer-actions{width:100%;margin:0}.footer-actions button{flex:1;white-space:nowrap;font-size:11px;padding:7px 9px;min-height:38px}.delivery,.inherit-node{margin-left:34px}.session-end{margin-left:34px}.work-list{width:100%;border:0}.app.searching .work-list{display:flex}.app.searching .reader{display:none}.app.searching.source-open .reader{display:flex}.app.searching.source-open .work-list{display:none}.work-item{min-height:50px}.drawer{width:100%;top:53px}.drawer-title{padding:13px 16px}.draft{padding:16px}.modal-backdrop{inset:94px 0 0;padding:14px 8px 18px;align-items:flex-start}.palette{width:100%;max-height:calc(100dvh - 126px);border-radius:10px}.palette-header{padding:11px 12px;gap:6px}.palette-header input{font-size:12px}.palette-expand{font-size:9px;gap:3px;padding:2px}.palette-header>svg{width:16px}.palette-header kbd{display:none}.palette .draft{padding:14px}.palette .draft-host{max-height:calc(100dvh - 225px)}.palette-footer{font-size:8px;padding:9px 12px}.palette-result{padding:10px 6px}.palette-body{max-height:calc(100dvh - 255px)}.source-banner{padding:8px 15px}.source-banner span{max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.draft-submit{min-height:40px}.draft textarea{font-size:12px}.toolbar-end{display:none!important}.receipt-kv{grid-template-columns:74px minmax(0,1fr)}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true"><defs>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.7" cy="10.7" r="6.5"></circle><path d="m16 16 4.2 4.2"></path></symbol>
+<symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"></path></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></symbol>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 11.4a8 8 0 0 1-8 8H5l-3 2v-10a9 9 0 0 1 18 0Z"></path><path d="M7 10h8M7 14h5"></path></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M12 7v5l3 2"></path></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9H3Z"></path></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"></path></symbol>
+<symbol id="i-bridge" viewBox="0 0 24 24"><path d="M3 8v10M21 8v10M3 12h18M3 8c6 7 12 7 18 0M8 11v7M16 11v7"></path></symbol>
+<symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"></rect><path d="M3 10h18M7 7h1M12 14h5M7 14h1M7 17h7"></path></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14a8 8 0 0 1-10-10 8.5 8.5 0 1 0 10 10Z"></path></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1 1M18 18l1 1M5 19l1-1M18 6l1-1"></path></symbol>
+<symbol id="i-quote" viewBox="0 0 24 24"><path d="M4 12h5v7H3v-7c0-4 2-7 5-7M15 12h5v7h-6v-7c0-4 2-7 5-7"></path></symbol>
+<symbol id="i-switch" viewBox="0 0 24 24"><path d="M3 7h16m-4-4 4 4-4 4M21 17H5m4-4-4 4 4 4"></path></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"></path></symbol>
+<symbol id="i-tool" viewBox="0 0 24 24"><path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"></path></symbol>
+<symbol id="i-expand" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7"></path></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="M20 12H4m6-6-6 6 6 6"></path></symbol>
+<symbol id="i-spin" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-8-8"></path></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v5c0 5-4 8-8 10-4-2-8-5-8-10V6Z"></path><path d="m8 11 3 3 5-5"></path></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"></path></symbol>
+</defs></svg>
+<header class="proto-bar">
+  <div class="proto-label"><span></span><span id="protoLabelText">交互原型 · 示例数据</span><span class="small">/</span><span class="small">会话同频桥</span></div>
+  <div class="proto-actions">
+    <div class="segmented" aria-label="原型视图"><button id="mainViewButton" type="button" aria-pressed="true">主窗口</button><button id="panelViewButton" type="button" aria-pressed="false">轻面板</button></div>
+    <button class="theme-button" id="themeButton" type="button" aria-label="切换深色外观"><svg><use href="#i-moon"></use></svg><span>深色</span></button>
+    <button class="text-button small" type="button" id="resetButton">重置演示</button>
+  </div>
+</header>
+<main class="app" id="app" aria-label="会话同频桥主窗口">
+  <header class="app-toolbar">
+    <div class="window-chrome"><div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div><span class="app-mark">同频桥</span></div>
+    <div class="workspace-title"><span>工作空间</span><button class="icon" type="button" id="quickPanelButton" aria-label="打开轻面板"><svg><use href="#i-panel"></use></svg></button></div>
+    <div class="search-toolbar"><label class="global-search" for="mainSearch"><svg><use href="#i-search"></use></svg><input id="mainSearch" type="search" placeholder="搜索讨论、文件或命令" aria-label="搜索讨论、文件或命令" autocomplete="off"><kbd>⌘ K</kbd></label><div class="toolbar-end"><span class="local-status" id="localStatus"><span class="status-dot"></span>本地工作空间</span><button class="icon" type="button" id="toolbarPanelButton" aria-label="打开轻面板"><svg><use href="#i-panel"></use></svg></button></div></div>
+  </header>
+  <div class="app-body">
+    <aside class="sidebar" aria-label="项目导航">
+      <button class="nav-item" id="allWorkButton" type="button"><svg><use href="#i-chat"></use></svg><span class="nav-label">所有工作</span><span class="count" id="allWorkCount">5</span></button>
+      <button class="nav-item" id="historyButton" type="button"><svg><use href="#i-clock"></use></svg><span class="nav-label">搜索历史</span><kbd style="margin-left:auto">⌘ K</kbd></button>
+      <div class="nav-section-label">项目</div>
+      <div id="sidebarProjects">
+        <button class="nav-item active" type="button" data-project="atlas"><span class="project-glyph">A</span><span class="nav-label">Atlas</span><span class="count">3</span></button>
+        <button class="nav-item" type="button" data-project="orbit"><span class="project-glyph">O</span><span class="nav-label">Orbit</span><span class="count">2</span></button>
+      </div>
+      <div class="sidebar-bottom"><span class="bridge-glyph"><svg><use href="#i-bridge"></use></svg></span><div>Codex × Antigravity<br><span style="font-size:9px">在同一份上下文中工作</span></div></div>
+    </aside>
+    <section class="work-list" aria-label="工作与搜索结果">
+      <div class="list-head"><h2 id="listTitle">Atlas</h2><button class="icon" type="button" id="listActionButton" aria-label="打开快捷动作"><svg><use href="#i-plus"></use></svg></button></div>
+      <div class="list-caption" id="listCaption">3 项工作 · 2 个 Agent</div>
+      <div class="search-filters hidden" id="searchFilters" aria-label="来源筛选"><button class="active" data-filter="all" type="button">全部</button><button data-filter="Codex" type="button">Codex</button><button data-filter="AGY" type="button">AGY</button></div>
+      <div class="list-group" id="listGroup">进行中</div>
+      <div class="work-items" id="workItems"></div>
+      <div class="list-footer" id="listFooter">工作收拢会话，上下文按需流转。</div>
+    </section>
+    <section class="reader" aria-label="工作详情">
+      <div class="source-banner hidden" id="sourceBanner"><span id="sourceBannerText"></span><button class="text-button" id="returnWorkButton" type="button"><svg style="width:12px;height:12px"><use href="#i-back"></use></svg>返回当前工作</button></div>
+      <div class="reader-scroll" id="readerScroll"><div class="reader-inner">
+        <div class="breadcrumbs"><button class="mobile-switch" id="mobileWorksButton" type="button"><svg style="width:13px;height:13px"><use href="#i-list"></use></svg>工作</button><span id="readerProject">Atlas</span><svg><use href="#i-chevron"></use></svg><span>工作详情</span></div>
+        <div class="work-heading"><div><h1 id="workTitle">修复登录失败</h1><p class="work-description" id="workDescription">定位 token 过期后偶发的 401，补齐刷新逻辑。</p></div><span class="work-status" id="workStatus"><span class="status-dot"></span>进行中</span></div>
+        <div class="live-banner hidden" id="livePairingBanner"></div>
+        <div class="session-row" id="sessionChips"></div>
+        <div class="chain-row hidden" id="liveHandoffChain"></div>
+        <div class="timeline-heading"><span id="timelineLabel">今天 · 11 月 14 日</span><span id="timelineSummary">4 条记录 · 已完成</span></div>
+        <div class="timeline" id="timeline"></div>
+        <div class="session-end"><svg style="width:12px;height:12px"><use href="#i-check"></use></svg><span id="sessionEndText">当前回合已完成，可以引用或换端接续</span></div>
+      </div></div>
+      <footer class="reader-footer"><span class="footer-hint"><svg><use href="#i-bridge"></use></svg>让上下文随工作流转</span><div class="footer-actions"><button class="secondary" id="handoffButton" type="button"><svg><use href="#i-switch"></use></svg>换端继续</button><button class="primary" id="askButton" type="button"><svg><use href="#i-chat"></use></svg>请另一端看看</button></div></footer>
+    </section>
+  </div>
+  <aside class="drawer hidden" id="drawer" aria-label="发送草稿"><div class="drawer-title"><span id="drawerTitle">请另一端看看</span><button class="icon" id="closeDrawer" type="button" aria-label="关闭草稿"><svg><use href="#i-close"></use></svg></button></div><div class="draft-host" id="mainDraftHost"></div></aside>
+</main>
+<div class="modal-backdrop hidden" id="panelBackdrop">
+  <section class="palette" id="palette" role="dialog" aria-modal="true" aria-label="轻面板">
+    <header class="palette-header"><svg><use href="#i-search"></use></svg><label for="panelSearch" class="visually-hidden">轻面板搜索</label><input id="panelSearch" type="search" placeholder="搜索历史，或开始一个动作…" aria-label="轻面板搜索" autocomplete="off"><button class="palette-expand" id="expandMainButton" type="button"><svg><use href="#i-expand"></use></svg>展开主窗口</button><button class="icon" id="closePanel" type="button" aria-label="关闭轻面板"><svg style="width:14px;height:14px"><use href="#i-close"></use></svg></button></header>
+    <div class="palette-body" id="paletteBody"></div>
+    <div class="palette-draft-bar hidden" id="paletteDraftBar"><span>草稿</span><button class="text-button" id="backToPanelSearch" type="button">返回搜索</button></div>
+    <div class="draft-host hidden" id="panelDraftHost"></div>
+    <footer class="palette-footer"><span><kbd>esc</kbd>关闭 <kbd>⌘ K</kbd>呼出</span><span id="paletteFooterNote">示例数据 · 不连接真实 Agent</span></footer>
+  </section>
+</div>
+<section class="draft hidden" id="draft" aria-label="共享草稿">
+  <div class="segmented draft-mode" aria-label="草稿模式"><button id="askModeButton" type="button" aria-pressed="true">引用请教</button><button id="handoffModeButton" type="button" aria-pressed="false">换端接续</button></div>
+  <div class="draft-source"><svg><use href="#i-chat"></use></svg><span id="draftSourceText">来自 Codex · 修复登录失败</span></div>
+  <div id="askFields">
+    <div class="stage1-notice hidden" id="liveDraftNotice">引用草稿（Stage 1 · 仅生成与复制，不向远端自动发消息）</div>
+    <div class="draft-field"><label id="targetSessionLabel" for="targetSession">发送到已有会话</label><select id="targetSession"></select><div class="draft-help" id="targetSessionHelp">在目标会话中请教，当前工作保持不变。</div></div>
+    <div class="draft-field"><label id="draftNoteLabel" for="draftNote">想请对方看看什么？</label><textarea id="draftNote" placeholder="写下问题，或补充你希望对方关注的地方…"></textarea></div>
+    <div class="draft-section-head"><label>引用片段</label><span id="fragmentCount">0 段</span></div><div id="draftFragments"></div>
+  </div>
+  <div id="handoffFields" class="hidden">
+    <div class="handoff-notice"><svg><use href="#i-switch"></use></svg><div><strong id="handoffNoticeTitle">在 AGY 创建新会话</strong><br><span id="handoffNoticeBody">带上来源会话全部已完成的可见历史，打开新会话后继续工作。</span></div></div>
+    <div id="liveHandoffControls" class="hidden">
+      <div class="draft-field"><label for="handoffSourceSelect">选择交接来源会话</label><select id="handoffSourceSelect"></select></div>
+      <div class="draft-field"><label for="handoffTitle">新会话标题（可选）</label><input id="handoffTitle" type="text" placeholder="留空则沿用当前工作标题"></div>
+      <label class="checkbox-row" for="handoffPairIfOffline"><input id="handoffPairIfOffline" type="checkbox"><span>未配对时自动配对（优先在线 RPC，离线安全落盘）</span></label>
+      <label class="checkbox-row" for="handoffIncludeInterrupted"><input id="handoffIncludeInterrupted" type="checkbox"><span>允许抢救已停止的中断轮次 (--include-interrupted)</span></label>
+    </div>
+    <div class="draft-section-head"><label>将带入的完整历史</label><span id="historyCount"></span></div><div class="history-preview" id="handoffHistory"></div>
+    <div class="draft-help" id="handoffHelpText">引用请教只带选中的片段；换端接续带入下面的全部历史。工具调用以可读文本保留。</div>
+  </div>
+  <button class="primary draft-submit" id="submitDraft" type="button"><svg><use href="#i-arrow"></use></svg><span>模拟发送给 AGY</span></button>
+  <div class="draft-disclaimer" id="draftDisclaimer">仅演示交互，不发送到真实宿主。</div>
+  <div class="draft-response hidden" id="draftResponse" aria-live="polite"></div>
+</section>
+<div class="toast hidden" id="toast" role="status"></div>
+<script>
+const liveToken = document.querySelector('meta[name="workbench-token"]')?.content?.trim() || '';
+const isLiveMode = liveToken.length > 0;
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const icon = (name, cls = '') => `<svg${cls ? ` class="${cls}"` : ''} aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+
+let toastTimer;
+let previousFocus = null;
+function showToast(text) {
+  $('toast').textContent = text;
+  $('toast').classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 2600);
+}
+
+function highlightSafe(rawText, queryText) {
+  const source = String(rawText ?? '');
+  const trimmed = String(queryText ?? '').trim();
+  if (!trimmed) return esc(source);
+  const terms = [...new Set([trimmed, ...trimmed.split(/\s+/)].map(t => t.toLowerCase()).filter(Boolean))].sort((a, b) => b.length - a.length);
+  const lower = source.toLowerCase();
+  const ranges = [];
+  for (const term of terms) {
+    let idx = lower.indexOf(term);
+    while (idx !== -1) {
+      ranges.push([idx, idx + term.length]);
+      idx = lower.indexOf(term, idx + term.length);
+    }
+  }
+  if (!ranges.length) return esc(source);
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [];
+  for (const [start, end] of ranges) {
+    const prev = merged.at(-1);
+    if (!prev || start > prev[1]) merged.push([start, end]);
+    else if (end > prev[1]) prev[1] = end;
+  }
+  let out = '';
+  let cursor = 0;
+  for (const [start, end] of merged) {
+    out += esc(source.slice(cursor, start)) + '<mark>' + esc(source.slice(start, end)) + '</mark>';
+    cursor = end;
+  }
+  return out + esc(source.slice(cursor));
+}
+
+function normalizeHost(host) {
+  const cleaned = String(host ?? '').trim().toLowerCase();
+  if (cleaned === 'antigravity' || cleaned === 'agy') return 'antigravity';
+  if (cleaned === 'codex') return 'codex';
+  return cleaned || 'codex';
+}
+
+function hostLabel(host) {
+  const norm = normalizeHost(host);
+  if (norm === 'antigravity') return 'AGY';
+  if (norm === 'codex') return 'Codex';
+  return String(host || 'Session');
+}
+
+function oppositeHost(host) {
+  return normalizeHost(host) === 'codex' ? 'antigravity' : 'codex';
+}
+
+function hostIcon(host) {
+  const isAgy = normalizeHost(host) === 'antigravity';
+  return `<span class="host-icon ${isAgy ? 'agy' : ''}">${isAgy ? 'A' : 'C'}</span>`;
+}
+
+function shortId(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '—';
+  return text.length > 14 ? `${text.slice(0, 8)}…${text.slice(-4)}` : text;
+}
+
+function formatIsoTime(isoStr) {
+  const raw = String(isoStr ?? '').trim();
+  if (!raw) return '—';
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw.slice(0, 16);
+  try {
+    const pad = n => String(n).padStart(2, '0');
+    const now = new Date();
+    const sameDay = parsed.getFullYear() === now.getFullYear() && parsed.getMonth() === now.getMonth() && parsed.getDate() === now.getDate();
+    if (sameDay) return `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`;
+    return `${parsed.getMonth() + 1}/${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`;
+  } catch {
+    return raw.slice(0, 16).replace('T', ' ');
+  }
+}
+
+function renderEscapedParagraphs(text) {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) return '';
+  return trimmed.split(/\n{2,}/).map(block => `<p>${esc(block).replace(/\n/g, '<br>')}</p>`).join('');
+}
+
+function legacyCopyText(text) {
+  const field = Object.assign(document.createElement('textarea'), { value: text });
+  field.setAttribute('readonly', '');
+  field.style.cssText = 'position:fixed;inset-block-start:0;opacity:0';
+  document.body.append(field);
+  field.select();
+  try {
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    field.remove();
+  }
+}
+
+let copyStatusTimer;
+async function copyTextWithFeedback(text, statusEl) {
+  let ok = false;
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      ok = legacyCopyText(text);
+    }
+  } else {
+    ok = legacyCopyText(text);
+  }
+  if (statusEl) {
+    clearTimeout(copyStatusTimer);
+    statusEl.textContent = ok ? '已复制' : '复制失败，请手动复制';
+    copyStatusTimer = setTimeout(() => { statusEl.textContent = ''; }, 2400);
+  }
+  showToast(ok ? 'Markdown 草稿已复制到剪贴板' : '无法写入剪贴板，请从下方预览框复制');
+}
+
+function bindImeSafeEnter(el, handler, { ignoreShift = false } = {}) {
+  el.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || (ignoreShift && e.shiftKey)) return;
+    if (e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    handler(e);
+  });
+}
+
+/* ============================================================================
+   Offline file:// Demo Mode (Zero Network Requests, 100% Preserved Behavior)
+   ============================================================================ */
+function createOfflineController() {
+  const initialSessions = [
+    { id: 'cx-login', workId: 'login', host: 'Codex', title: '修复登录失败', time: '10:42', fragmentIds: ['login-user', 'login-analysis', 'login-tool', 'login-fix'] },
+    { id: 'ag-review', workId: 'login', host: 'AGY', title: '登录方案复核', time: '昨天', fragmentIds: ['review-user', 'review-note'] },
+    { id: 'cx-refresh', workId: 'refresh', host: 'Codex', title: '梳理 token 刷新机制', time: '昨天', fragmentIds: ['refresh-user', 'refresh-note'] },
+    { id: 'ag-api', workId: 'api', host: 'AGY', title: '整理 API 错误响应', time: '周三', fragmentIds: ['api-user', 'api-note'] },
+    { id: 'cx-orbit', workId: 'orbit-nav', host: 'Codex', title: '调整导航交互', time: '09:15', fragmentIds: ['orbit-user', 'orbit-note'] },
+    { id: 'ag-export', workId: 'orbit-export', host: 'AGY', title: '导出设置确认', time: '昨天', fragmentIds: ['export-user', 'export-note'] }
+  ];
+  const initialFragments = [
+    { id: 'login-user', sessionId: 'cx-login', host: 'Codex', time: '10:32', role: 'user', text: '用户登录一段时间后，切换页面偶尔会收到 401。刷新页面又恢复正常。请检查 token 过期后的处理。' },
+    { id: 'login-analysis', sessionId: 'cx-login', host: 'Codex', time: '10:35', role: 'agent', text: '定位到 auth/client.ts 中的请求拦截器。多个请求同时收到 401 时，会各自触发 refresh。第一个请求更新 token 后，其余请求仍携带旧 token 重试，导致偶发登录失败。', html: '<p>定位到 <code>auth/client.ts</code> 中的请求拦截器。</p><p>多个请求同时收到 <code>401</code> 时，会各自触发 <code>refresh</code>。第一个请求更新 token 后，其余请求仍携带旧 token 重试，导致偶发登录失败。</p>' },
+    { id: 'login-tool', sessionId: 'cx-login', host: 'Codex', time: '10:38', role: 'tool', text: '运行 pnpm test auth。4 项测试通过，复现并发 refresh 场景。', html: '<p>已复现并发请求刷新 token 的竞态。</p><details class="tool-details"><summary>' + icon('tool') + '运行 pnpm test auth<span class="passed">4 项通过</span></summary><pre>$ pnpm test auth\n✓ expired token starts refresh\n✓ concurrent requests share refresh\n✓ retry uses latest token\n✓ refresh failure clears session\n\n4 passed · 0 failed</pre></details>' },
+    { id: 'login-fix', sessionId: 'cx-login', host: 'Codex', time: '10:42', role: 'agent', text: '建议将 refreshPromise 放在模块内共享。401 请求等待同一个 Promise，成功后从最新 token 存储读取再重试。还需要确认 refresh 失败时是否应统一清空会话。', html: '<p>建议将 <code>refreshPromise</code> 放在模块内共享，让并发请求等待同一次刷新。</p><ul><li>刷新成功后，读取最新 token 再重试。</li><li>refresh 失败时统一清空会话，回到登录页。</li></ul><p>核心逻辑已补齐。可以请另一端复核失败分支，确认没有遗漏。</p>' },
+    { id: 'review-user', sessionId: 'ag-review', host: 'AGY', time: '昨天 16:08', role: 'user', text: '帮我看一下登录状态与 token 刷新方案，重点关注 refresh 失败的行为。' },
+    { id: 'review-note', sessionId: 'ag-review', host: 'AGY', time: '昨天 16:12', role: 'agent', text: 'refresh 失败后应清空 access token 与 refresh token，并让所有等待请求收到同一个失败结果。刷新接口自身必须跳过 401 重试，避免循环。登录页面应保留原始跳转地址。' },
+    { id: 'refresh-user', sessionId: 'cx-refresh', host: 'Codex', time: '昨天 14:20', role: 'user', text: '梳理一下 token 过期与 refresh 的执行顺序，记录当前拦截器的实现。' },
+    { id: 'refresh-note', sessionId: 'cx-refresh', host: 'Codex', time: '昨天 14:28', role: 'agent', text: '当前 refresh 在每个 401 请求内单独执行，没有共享等待队列。建议使用单一 refreshPromise 合并并发刷新，并保证重试请求读取最新 token。这与登录后偶发失败可能相关。' },
+    { id: 'api-user', sessionId: 'ag-api', host: 'AGY', time: '周三 15:10', role: 'user', text: '整理 API 错误响应，统一 401、403 和 500 的用户提示。' },
+    { id: 'api-note', sessionId: 'ag-api', host: 'AGY', time: '周三 15:18', role: 'agent', text: '401 先尝试刷新登录状态，刷新失败再回到登录页。403 保留当前页面并显示权限说明。500 允许用户稍后重试，同时保留本次输入。' },
+    { id: 'orbit-user', sessionId: 'cx-orbit', host: 'Codex', time: '09:04', role: 'user', text: '调整 Orbit 的导航交互，让键盘可以在搜索结果与预览之间移动。' },
+    { id: 'orbit-note', sessionId: 'cx-orbit', host: 'Codex', time: '09:15', role: 'agent', text: '已为搜索结果添加上下方向键导航。Enter 打开预览，Escape 返回搜索框；预览关闭后焦点回到原来的结果。' },
+    { id: 'export-user', sessionId: 'ag-export', host: 'AGY', time: '昨天 11:02', role: 'user', text: '导出面板记住上一次格式，但文件名每次按当前文档重新生成。' },
+    { id: 'export-note', sessionId: 'ag-export', host: 'AGY', time: '昨天 11:10', role: 'agent', text: '已确认格式选择可独立保存。文件名由当前文档标题派生，避免上一次导出名称误用于新文档。' }
+  ];
+  const works = [
+    { id: 'login', projectId: 'atlas', title: '修复登录失败', description: '定位 token 过期后偶发的 401，补齐刷新逻辑。', preview: 'refresh 并发竞态已定位，等待方案复核', time: '10:42', sessions: ['cx-login', 'ag-review'] },
+    { id: 'refresh', projectId: 'atlas', title: '梳理 token 刷新机制', description: '记录请求拦截器的刷新顺序与等待队列。', preview: '记录当前拦截器与 token 生命周期', time: '昨天', sessions: ['cx-refresh'] },
+    { id: 'api', projectId: 'atlas', title: '整理 API 错误响应', description: '统一错误提示，保留用户当前输入。', preview: '401、403 与 500 的提示约定', time: '周三', sessions: ['ag-api'] },
+    { id: 'orbit-nav', projectId: 'orbit', title: '调整导航交互', description: '补齐键盘导航与预览焦点的返回行为。', preview: '搜索结果与预览的键盘切换', time: '09:15', sessions: ['cx-orbit'] },
+    { id: 'orbit-export', projectId: 'orbit', title: '导出设置确认', description: '保留格式偏好，按当前文档生成文件名。', preview: '格式记忆与文件名生成已确认', time: '昨天', sessions: ['ag-export'] }
+  ];
+  const initialDraft = () => ({ mode: 'ask', sourceSessionId: 'cx-login', targetSessionId: 'ag-review', note: '请帮我复核 token 刷新方案，重点看看并发请求和 refresh 失败的处理是否完整。', fragmentIds: [] });
+  const state = { view: 'main', projectId: 'atlas', workId: 'login', sessionId: 'cx-login', query: '', sourceFilter: 'all', draft: initialDraft(), deliveries: [], sessions: structuredClone(initialSessions), fragments: structuredClone(initialFragments), handoffs: {}, theme: 'light', draftOpen: false, panelDraft: false, selectedFragmentId: null, sourceSessionId: null, phase: 'idle', lastResult: null, allWorks: false };
+  let operationEpoch = 0;
+
+  const getSession = id => state.sessions.find(s => s.id === id);
+  const getFragment = id => state.fragments.find(f => f.id === id);
+  const getWork = id => works.find(w => w.id === id);
+  const projectName = id => (id === 'atlas' ? 'Atlas' : 'Orbit');
+  const visibleSession = () => getSession(state.sourceSessionId || state.sessionId);
+  const sourceHistory = id => (getSession(id)?.fragmentIds || []).map(getFragment).filter(Boolean);
+  const completedHistory = id => [...sourceHistory(id), ...state.deliveries.filter(d => d.sourceSessionId === id).map(d => ({
+    id: 'completed-' + d.id, sessionId: id, host: getSession(id).host, time: '刚刚', role: 'agent',
+    text: `请 ${d.host} 复核。${d.note}\n${d.fragmentIds.map(fid => { const f = getFragment(fid); return `[引用 ${f.host} · ${getSession(f.sessionId).title}] ${f.text}`; }).join('\n')}\n${d.host} 的示例回复：${d.reply}`
+  }))];
+  const handoffKey = id => JSON.stringify([id, completedHistory(id).map(f => [f.id, f.text])]);
+  const highlighted = text => highlightSafe(text, state.query);
+  const searchResults = () => {
+    const query = state.query.trim().toLowerCase();
+    return state.fragments.filter(f => (state.sourceFilter === 'all' || f.host === state.sourceFilter) && (!query || `${f.text} ${getSession(f.sessionId)?.title || ''} ${f.host}`.toLowerCase().includes(query)));
+  };
+
+  function renderWorkList() {
+    const searching = !!state.query.trim();
+    $('app').classList.toggle('searching', searching);
+    $('app').classList.toggle('source-open', !!state.sourceSessionId);
+    $('listTitle').textContent = searching ? '搜索结果' : state.allWorks ? '所有工作' : projectName(state.projectId);
+    $('searchFilters').classList.toggle('hidden', !searching);
+    $('listGroup').classList.toggle('hidden', searching);
+    $('listGroup').textContent = '最近工作';
+    document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('active', b.dataset.filter === state.sourceFilter));
+    if (searching) {
+      const results = searchResults();
+      $('listCaption').textContent = `“${state.query}” · ${results.length} 条历史片段`;
+      $('listFooter').textContent = '查看来源后，选择需要带走的片段。';
+      $('workItems').innerHTML = results.length
+        ? results.map(f => `<button class="result-item ${f.id === state.selectedFragmentId ? 'active' : ''}" type="button" data-result="${esc(f.id)}"><div class="result-title">${esc(getSession(f.sessionId).title)}</div><p class="result-excerpt">${highlighted(f.text)}</p><div class="work-meta"><span class="host-mark">${esc(f.host)}</span><span>${esc(f.time)}</span></div></button>`).join('')
+        : `<div class="empty-state">${icon('search')}<strong>没有找到相关历史</strong>试试“token”“登录”或“refresh”。<br><button class="text-button" type="button" data-clear-search="true">清空搜索</button></div>`;
+    } else {
+      const list = works.filter(w => state.allWorks || w.projectId === state.projectId);
+      $('listCaption').textContent = `${list.length} 项工作 · 2 个 Agent`;
+      $('listFooter').textContent = '工作收拢会话，上下文按需流转。';
+      $('workItems').innerHTML = list.map(w => `<button class="work-item ${w.id === state.workId ? 'active' : ''}" type="button" data-work="${esc(w.id)}"><div class="work-item-title">${icon('chat')}<span>${esc(w.title)}</span></div><div class="work-item-desc">${esc(w.preview)}</div><div class="work-meta">${w.sessions.map(s => `<span class="host-mark">${esc(getSession(s).host)}</span>`).join('')}<span class="dot">·</span><span>${esc(w.time)}</span></div></button>`).join('');
+    }
+    document.querySelectorAll('[data-project]').forEach(b => b.classList.toggle('active', !state.allWorks && b.dataset.project === state.projectId));
+    $('allWorkButton').classList.toggle('active', state.allWorks);
+  }
+
+  function renderReader() {
+    const session = visibleSession();
+    const work = getWork(session.workId);
+    $('readerProject').textContent = projectName(work.projectId);
+    $('workTitle').textContent = session.title;
+    $('workDescription').textContent = work.description;
+    $('sourceBanner').classList.toggle('hidden', !state.sourceSessionId);
+    $('sourceBannerText').textContent = `历史来源 · ${projectName(work.projectId)} / ${session.host} · ${session.time}`;
+    const sessions = state.sessions.filter(s => s.workId === work.id);
+    $('sessionChips').innerHTML = sessions.map(s => `<button class="session-chip ${s.id === session.id ? 'active' : ''}" type="button" data-session="${esc(s.id)}">${hostIcon(s.host)}<span>${esc(s.host)}</span><small>${s.inherited ? '接续会话' : s.id === state.sessionId ? '当前会话' : s.title === work.title ? '相关会话' : esc(s.title)}</small></button>`).join('');
+    const history = sourceHistory(session.id);
+    $('timelineSummary').textContent = `${history.length} 条记录 · 已完成`;
+    $('timelineLabel').textContent = session.time === '昨天' ? '昨天 · 11 月 13 日' : session.time === '周三' ? '11 月 11 日' : '今天 · 11 月 14 日';
+    let content = session.inherited ? `<div class="inherit-node">${icon('switch')}<span>从 ${esc(getSession(session.inherited).host)} 接续，已带入 ${history.length} 条可见历史</span></div>` : '';
+    content += history.map(f => `<article class="message ${f.id === state.selectedFragmentId ? 'highlight' : ''}" id="message-${esc(f.id)}"><div class="avatar ${f.role !== 'user' ? 'agent' : ''}">${f.role === 'user' ? '你' : f.role === 'tool' ? icon('tool') : f.host === 'AGY' ? 'A' : 'C'}</div><div><div class="message-header"><strong>${f.role === 'user' ? '你' : f.role === 'tool' ? '工具记录' : esc(f.host)}</strong><time>${esc(f.time)}</time></div><div class="message-body">${f.html || `<p>${esc(f.text)}</p>`}</div><div class="message-actions"><button type="button" data-add-fragment="${esc(f.id)}">${icon('quote')}${state.draft.fragmentIds.includes(f.id) ? '已加入引用' : '加入引用'}</button><button type="button" data-ask-fragment="${esc(f.id)}">${icon('chat')}请另一端看看</button></div></div></article>`).join('');
+    const deliveries = state.deliveries.filter(d => d.sourceSessionId === session.id);
+    content += deliveries.map(d => `<article class="delivery"><div class="delivery-top">${hostIcon(d.host)}<strong>${esc(d.host)} 的方案复核</strong><span class="sample-tag">示例回复</span><span style="margin-left:auto">刚刚</span></div><p>${esc(d.reply)}</p><button class="text-button" type="button" data-bring-back="${esc(d.id)}">${icon('back')}带回 ${esc(getSession(d.sourceSessionId).host)}</button></article>`).join('');
+    content += Object.values(state.handoffs).filter(target => getSession(target).inherited === session.id).map(target => `<div class="inherit-node">${icon('switch')}<span>已在 ${esc(getSession(target).host)} 创建接续会话<br><span class="small">完整可见历史已带入 · 示例</span></span><button class="text-button" type="button" data-open-handoff="${esc(target)}">打开会话 ${icon('arrow')}</button></div>`).join('');
+    $('timeline').innerHTML = content;
+    $('askButton').innerHTML = icon('chat') + '请另一端看看';
+  }
+
+  function renderPalette() {
+    if (state.query.trim()) {
+      const results = searchResults();
+      $('paletteBody').innerHTML = `<div class="palette-group-label">历史片段 <span style="float:right">${results.length} 条结果</span></div>` + (results.length
+        ? results.map(f => `<article class="palette-result">${hostIcon(f.host)}<div class="palette-result-content"><div class="palette-result-title">${esc(getSession(f.sessionId).title)}</div><p>${highlighted(f.text)}</p><div class="palette-result-meta">${esc(f.host)} · ${esc(f.time)} · ${projectName(getWork(getSession(f.sessionId).workId).projectId)}</div><div class="palette-result-actions"><button class="secondary" type="button" data-panel-preview="${esc(f.id)}">查看原文</button><button class="text-button" type="button" data-add-fragment="${esc(f.id)}">${icon('plus')}加入引用</button></div></div></article>`).join('')
+        : `<div class="empty-state">${icon('search')}<strong>没有找到相关历史</strong>试试“token”“登录”或“refresh”。<br><button class="text-button" type="button" data-clear-search="true">清空搜索</button></div>`);
+    } else {
+      $('paletteBody').innerHTML = `<div class="palette-group-label">快捷动作</div><button class="palette-action" type="button" data-action="ask">${icon('chat')}<span class="action-copy">请另一端看看<small>选取片段，发送到已有会话</small></span><small>引用请教</small></button><button class="palette-action" type="button" data-action="handoff">${icon('switch')}<span class="action-copy">换端继续<small>带完整历史，在另一端创建新会话</small></span><small>创建接续</small></button><div class="palette-group-label">最近工作</div>${works.slice(0, 3).map(w => `<button class="palette-action" type="button" data-panel-work="${esc(w.id)}">${icon('chat')}<span>${esc(w.title)}</span><small>${projectName(w.projectId)} · ${esc(w.time)}</small></button>`).join('')}<div class="palette-group-label">搜索提示</div><button class="palette-action" type="button" data-query="token">${icon('search')}<span>搜索 token 刷新相关讨论</span><small>历史</small></button>`;
+    }
+  }
+
+  function renderDraft() {
+    const d = state.draft;
+    const source = getSession(d.sourceSessionId);
+    const isAsk = d.mode === 'ask';
+    $('askModeButton').setAttribute('aria-pressed', isAsk);
+    $('handoffModeButton').setAttribute('aria-pressed', !isAsk);
+    $('askFields').classList.toggle('hidden', !isAsk);
+    $('handoffFields').classList.toggle('hidden', isAsk);
+    $('draftSourceText').textContent = `来自 ${source.host} · ${source.title}`;
+    $('drawerTitle').textContent = isAsk ? '请另一端看看' : '换端继续';
+    const targets = state.sessions.filter(s => s.id !== source.id);
+    if (!targets.some(s => s.id === d.targetSessionId)) d.targetSessionId = targets.find(s => s.host !== source.host)?.id || targets[0]?.id;
+    $('targetSession').innerHTML = targets.map(s => `<option value="${esc(s.id)}" ${s.id === d.targetSessionId ? 'selected' : ''}>${esc(s.host)} · ${esc(s.title)}${getWork(s.workId).projectId !== getWork(source.workId).projectId ? ' · ' + projectName(getWork(s.workId).projectId) : ''}</option>`).join('');
+    $('draftNote').value = d.note;
+    $('fragmentCount').textContent = `${d.fragmentIds.length} 段`;
+    $('draftFragments').innerHTML = d.fragmentIds.length
+      ? d.fragmentIds.map(id => {
+          const f = getFragment(id);
+          return `<div class="fragment-card"><div class="fragment-origin"><span class="host-mark">${esc(f.host)}</span><span>${esc(getSession(f.sessionId).title)} · ${esc(f.time)}</span></div><div class="fragment-text">${esc(f.text)}</div><button class="icon fragment-remove" type="button" data-remove-fragment="${esc(id)}" aria-label="移除此引用">${icon('close')}</button></div>`;
+        }).join('')
+      : `<div class="draft-empty">还没有引用片段。搜索历史，或从当前会话加入。<br><button class="text-button" type="button" id="searchForReferences">搜索相关历史 ${icon('arrow')}</button></div>`;
+    const history = completedHistory(source.id);
+    const targetHost = source.host === 'Codex' ? 'AGY' : 'Codex';
+    $('handoffNoticeTitle').textContent = `在 ${targetHost} 创建新会话`;
+    $('historyCount').textContent = `${history.length} 条 · 全部已完成`;
+    $('handoffHistory').innerHTML = history.map(f => `<div class="history-row"><strong>${f.role === 'user' ? '你' : f.role === 'tool' ? '工具记录' : esc(f.host)} · ${esc(f.time)}</strong><p>${esc(f.text)}</p></div>`).join('');
+    const busy = state.phase === 'sending';
+    ['askModeButton', 'handoffModeButton', 'targetSession', 'draftNote', 'closeDrawer', 'askButton', 'handoffButton'].forEach(id => { $(id).disabled = busy; });
+    document.querySelectorAll('[data-add-fragment],[data-ask-fragment],[data-remove-fragment],[data-bring-back],[data-action]').forEach(button => { button.disabled = busy; });
+    $('submitDraft').disabled = busy || (isAsk && !d.note.trim());
+    const target = getSession(d.targetSessionId);
+    $('submitDraft').innerHTML = icon(busy ? 'spin' : 'arrow', busy ? 'rotate' : '') + `<span>${busy ? (isAsk ? '正在模拟发送…' : '正在模拟创建…') : isAsk ? `模拟发送给 ${target.host}` : state.handoffs[handoffKey(source.id)] ? '打开已创建的接续会话' : '模拟创建并接续'}</span>`;
+    $('draftResponse').classList.toggle('hidden', !state.lastResult);
+    if (state.lastResult) {
+      const result = state.lastResult;
+      if (result.type === 'ask') {
+        $('draftResponse').innerHTML = `<div class="draft-result-meta">${icon('check')}模拟发送完成 · 未连接真实宿主</div><strong>${esc(result.host)} 的回复 <span class="sample-tag">示例</span></strong><p>${esc(result.reply)}</p><button class="secondary" type="button" data-bring-back="${esc(result.id)}">${icon('back')}带回 ${esc(getSession(result.sourceSessionId).host)}</button>`;
+      } else {
+        $('draftResponse').innerHTML = `<div class="draft-result-meta">${icon('check')}模拟接续已完成</div><strong>${esc(getSession(result.targetId).host)} 新会话已准备好</strong><p>已带入 ${completedHistory(result.targetId).length} 条可见历史，来源会话仍保留。</p><button class="secondary" type="button" data-open-handoff="${esc(result.targetId)}">${icon('chat')}打开接续会话</button>`;
+      }
+    }
+  }
+
+  function syncDraftLocation() {
+    const panel = state.view === 'panel';
+    const show = state.draftOpen;
+    const inPanel = panel && show && state.panelDraft;
+    $('drawer').classList.toggle('hidden', !show || panel);
+    $('panelDraftHost').classList.toggle('hidden', !inPanel);
+    $('paletteDraftBar').classList.toggle('hidden', !inPanel);
+    $('paletteBody').classList.toggle('hidden', inPanel);
+    const host = inPanel ? $('panelDraftHost') : $('mainDraftHost');
+    host.append($('draft'));
+    $('draft').classList.toggle('hidden', !show);
+  }
+
+  function render() {
+    renderWorkList();
+    renderReader();
+    renderPalette();
+    renderDraft();
+    syncDraftLocation();
+    $('mainSearch').value = state.query;
+    $('panelSearch').value = state.query;
+    $('panelBackdrop').classList.toggle('hidden', state.view !== 'panel');
+    $('mainViewButton').setAttribute('aria-pressed', state.view === 'main');
+    $('panelViewButton').setAttribute('aria-pressed', state.view === 'panel');
+    document.documentElement.dataset.theme = state.theme;
+    $('themeButton').innerHTML = icon(state.theme === 'light' ? 'moon' : 'sun') + `<span>${state.theme === 'light' ? '深色' : '浅色'}</span>`;
+    $('themeButton').setAttribute('aria-label', `切换${state.theme === 'light' ? '深' : '浅'}色外观`);
+  }
+
+  const scrollToFragment = id => {
+    const scroller = $('readerScroll');
+    const el = $('message-' + id);
+    if (!el || !scroller) return;
+    const sRect = scroller.getBoundingClientRect();
+    const eRect = el.getBoundingClientRect();
+    if (eRect.top >= sRect.top && eRect.bottom <= sRect.bottom) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+
+  function setQuery(query) {
+    state.query = query;
+    state.sourceFilter = 'all';
+    if (!query.trim()) {
+      state.sourceSessionId = null;
+      state.selectedFragmentId = null;
+    }
+    renderWorkList();
+    renderPalette();
+    renderReader();
+    $('mainSearch').value = query;
+    $('panelSearch').value = query;
+  }
+
+  function openPanel() {
+    previousFocus = document.activeElement;
+    state.view = 'panel';
+    state.panelDraft = state.draftOpen;
+    render();
+    setTimeout(() => $('panelSearch').focus(), 20);
+  }
+
+  function expandMain() {
+    state.view = 'main';
+    render();
+    if (state.sourceSessionId && state.selectedFragmentId) scrollToFragment(state.selectedFragmentId);
+  }
+
+  function closePanel() {
+    expandMain();
+    previousFocus?.focus();
+  }
+
+  function chooseWork(id) {
+    const work = getWork(id);
+    state.workId = id;
+    state.projectId = work.projectId;
+    state.sessionId = work.sessions[0];
+    state.sourceSessionId = null;
+    state.selectedFragmentId = null;
+    state.query = '';
+    state.allWorks = false;
+    render();
+    $('readerScroll').scrollTop = 0;
+  }
+
+  function showSource(id) {
+    const fragment = getFragment(id);
+    state.sourceSessionId = fragment.sessionId;
+    state.selectedFragmentId = id;
+    renderWorkList();
+    renderReader();
+    scrollToFragment(id);
+  }
+
+  function chooseSession(id) {
+    const session = getSession(id);
+    if (state.sourceSessionId) state.sourceSessionId = id;
+    else {
+      state.sessionId = id;
+      state.workId = session.workId;
+      state.projectId = getWork(session.workId).projectId;
+    }
+    state.selectedFragmentId = null;
+    render();
+    $('readerScroll').scrollTop = 0;
+  }
+
+  function openDraft(mode, fragmentId) {
+    if (state.phase === 'sending') return;
+    const current = visibleSession();
+    if (!state.draftOpen && state.draft.fragmentIds.length === 0) {
+      state.draft.sourceSessionId = current.id;
+      state.draft.targetSessionId = state.sessions.find(s => s.host !== current.host && s.workId === current.workId)?.id || state.sessions.find(s => s.host !== current.host)?.id;
+    }
+    state.draft.mode = mode;
+    if (mode === 'handoff') {
+      state.draft.sourceSessionId = current.id;
+      state.lastResult = null;
+    }
+    if (fragmentId && !state.draft.fragmentIds.includes(fragmentId)) state.draft.fragmentIds.push(fragmentId);
+    state.draftOpen = true;
+    state.panelDraft = state.view === 'panel';
+    render();
+  }
+
+  function addFragment(id) {
+    if (state.phase === 'sending') return;
+    if (!state.draft.fragmentIds.includes(id)) {
+      state.draft.fragmentIds.push(id);
+      state.lastResult = null;
+    }
+    state.draft.mode = 'ask';
+    state.draftOpen = true;
+    state.panelDraft = state.view === 'panel';
+    render();
+    showToast('片段已加入引用，来源已保留');
+  }
+
+  function bringBack(id) {
+    if (state.phase === 'sending') return;
+    const delivery = state.deliveries.find(d => d.id === id);
+    const fragmentId = 'reply-' + id;
+    if (!getFragment(fragmentId)) {
+      state.fragments.push({ id: fragmentId, sessionId: delivery.targetSessionId, host: delivery.host, time: '刚刚', role: 'agent', text: delivery.reply });
+      getSession(delivery.targetSessionId).fragmentIds.push(fragmentId);
+    }
+    state.draft = { mode: 'ask', sourceSessionId: delivery.targetSessionId, targetSessionId: delivery.sourceSessionId, note: '这是另一端对方案的复核意见。请结合当前实现继续完善，重点补齐 refresh 失败的处理。', fragmentIds: [fragmentId] };
+    state.draftOpen = true;
+    state.panelDraft = state.view === 'panel';
+    state.lastResult = null;
+    render();
+    showToast(`回复已加入草稿，准备带回 ${getSession(delivery.sourceSessionId).host}`);
+  }
+
+  function openHandoff(id) {
+    const session = getSession(id);
+    state.view = 'main';
+    state.sessionId = id;
+    state.workId = session.workId;
+    state.projectId = getWork(session.workId).projectId;
+    state.query = '';
+    state.sourceSessionId = null;
+    state.selectedFragmentId = null;
+    state.draftOpen = false;
+    state.panelDraft = false;
+    render();
+    $('readerScroll').scrollTop = 0;
+    showToast('已打开示例接续会话');
+  }
+
+  async function submitDraft() {
+    if (state.phase === 'sending') return;
+    const d = structuredClone(state.draft);
+    if (d.mode === 'ask' && !d.note.trim()) return;
+    if (d.mode === 'handoff' && state.handoffs[handoffKey(d.sourceSessionId)]) {
+      openHandoff(state.handoffs[handoffKey(d.sourceSessionId)]);
+      return;
+    }
+    state.phase = 'sending';
+    state.lastResult = null;
+    renderDraft();
+    const epoch = operationEpoch;
+    await new Promise(r => setTimeout(r, 850));
+    if (epoch !== operationEpoch) return;
+    if (d.mode === 'ask') {
+      const target = getSession(d.targetSessionId);
+      const source = getSession(d.sourceSessionId);
+      const reply = source.host === 'AGY'
+        ? '复核意见已收到。会把共享 refreshPromise 与失败清理放在同一条路径，并补充“刷新接口不重试自身”的检查。下一步验证并发 401 只触发一次刷新。'
+        : '共享 refreshPromise 的方向正确。建议补齐两个细节：refresh 接口本身跳过 401 重试；刷新失败时统一拒绝所有等待请求并清空登录态，避免部分请求继续使用旧 token。';
+      const result = { type: 'ask', id: 'delivery-' + Date.now(), host: target.host, sourceSessionId: source.id, targetSessionId: target.id, reply, note: d.note, fragmentIds: d.fragmentIds };
+      state.deliveries.push(result);
+      const quoted = d.fragmentIds.map(id => {
+        const f = getFragment(id);
+        return `[引用 ${f.host} · ${getSession(f.sessionId).title}] ${f.text}`;
+      }).join('\n\n');
+      const questionId = 'question-' + result.id;
+      const replyId = 'reply-' + result.id;
+      state.fragments.push(
+        { id: questionId, sessionId: target.id, host: target.host, time: '刚刚', role: 'user', text: d.note + (quoted ? '\n\n' + quoted : '') },
+        { id: replyId, sessionId: target.id, host: target.host, time: '刚刚', role: 'agent', text: reply }
+      );
+      target.fragmentIds.push(questionId, replyId);
+      state.lastResult = result;
+      showToast(`已模拟发送给 ${target.host}，示例回复已返回`);
+    } else {
+      const source = getSession(d.sourceSessionId);
+      const host = source.host === 'Codex' ? 'AGY' : 'Codex';
+      const id = 'handoff-' + source.id + '-' + Object.keys(state.handoffs).length;
+      const history = completedHistory(source.id);
+      const copied = history.map((f, i) => ({ ...structuredClone(f), id: id + '-' + i, sessionId: id }));
+      state.fragments.push(...copied);
+      state.sessions.push({ id, workId: source.workId, host, title: source.title + ' · 接续', time: '刚刚', fragmentIds: copied.map(f => f.id), inherited: source.id });
+      state.handoffs[handoffKey(source.id)] = id;
+      state.lastResult = { type: 'handoff', targetId: id };
+      showToast(`已模拟创建 ${host} 接续会话`);
+    }
+    state.phase = 'idle';
+    render();
+  }
+
+  function resetDemo() {
+    operationEpoch++;
+    state.view = 'main';
+    state.projectId = 'atlas';
+    state.workId = 'login';
+    state.sessionId = 'cx-login';
+    state.query = '';
+    state.sourceFilter = 'all';
+    state.draft = initialDraft();
+    state.deliveries = [];
+    state.sessions = structuredClone(initialSessions);
+    state.fragments = structuredClone(initialFragments);
+    state.handoffs = {};
+    state.draftOpen = false;
+    state.panelDraft = false;
+    state.selectedFragmentId = null;
+    state.sourceSessionId = null;
+    state.phase = 'idle';
+    state.lastResult = null;
+    state.allWorks = false;
+    render();
+    $('readerScroll').scrollTop = 0;
+    showToast('已重置示例数据与草稿');
+  }
+
+  function confirmTopSearchHit() {
+    if (!state.query.trim()) return;
+    const top = searchResults()[0];
+    if (!top) return;
+    showSource(top.id);
+    if (state.view === 'panel') expandMain();
+  }
+
+  $('mainSearch').addEventListener('input', e => setQuery(e.target.value));
+  $('panelSearch').addEventListener('input', e => setQuery(e.target.value));
+  bindImeSafeEnter($('mainSearch'), confirmTopSearchHit);
+  bindImeSafeEnter($('panelSearch'), confirmTopSearchHit);
+  bindImeSafeEnter($('draftNote'), () => { if (!$('submitDraft').disabled) submitDraft(); }, { ignoreShift: true });
+  $('mainViewButton').addEventListener('click', expandMain);
+  $('panelViewButton').addEventListener('click', openPanel);
+  $('quickPanelButton').addEventListener('click', openPanel);
+  $('toolbarPanelButton').addEventListener('click', openPanel);
+  $('historyButton').addEventListener('click', openPanel);
+  $('listActionButton').addEventListener('click', openPanel);
+  $('expandMainButton').addEventListener('click', expandMain);
+  $('closePanel').addEventListener('click', closePanel);
+  $('resetButton').addEventListener('click', resetDemo);
+  $('themeButton').addEventListener('click', () => { state.theme = state.theme === 'light' ? 'dark' : 'light'; render(); });
+  $('askButton').addEventListener('click', () => openDraft('ask'));
+  $('handoffButton').addEventListener('click', () => openDraft('handoff'));
+  $('askModeButton').addEventListener('click', () => { state.draft.mode = 'ask'; state.lastResult = null; renderDraft(); });
+  $('handoffModeButton').addEventListener('click', () => { state.draft.mode = 'handoff'; state.lastResult = null; renderDraft(); });
+  $('closeDrawer').addEventListener('click', () => { state.draftOpen = false; syncDraftLocation(); });
+  $('backToPanelSearch').addEventListener('click', () => { state.panelDraft = false; syncDraftLocation(); $('panelSearch').focus(); });
+  $('targetSession').addEventListener('change', e => { state.draft.targetSessionId = e.target.value; state.lastResult = null; renderDraft(); });
+  $('draftNote').addEventListener('input', e => { state.draft.note = e.target.value; $('submitDraft').disabled = state.phase === 'sending' || (state.draft.mode === 'ask' && !e.target.value.trim()); });
+  $('submitDraft').addEventListener('click', submitDraft);
+  $('returnWorkButton').addEventListener('click', () => { state.sourceSessionId = null; state.selectedFragmentId = null; render(); });
+  $('allWorkButton').addEventListener('click', () => { state.allWorks = true; state.query = ''; state.sourceSessionId = null; state.selectedFragmentId = null; render(); });
+  $('mobileWorksButton').addEventListener('click', openPanel);
+  $('panelBackdrop').addEventListener('click', e => { if (e.target === $('panelBackdrop')) closePanel(); });
+
+  document.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    const data = b.dataset;
+    if (data.project) {
+      state.projectId = data.project;
+      state.allWorks = false;
+      chooseWork(works.find(w => w.projectId === data.project).id);
+    } else if (data.work) chooseWork(data.work);
+    else if (data.result) showSource(data.result);
+    else if (data.session) chooseSession(data.session);
+    else if (data.filter) {
+      state.sourceFilter = data.filter;
+      renderWorkList();
+      renderPalette();
+    } else if (data.addFragment) addFragment(data.addFragment);
+    else if (data.askFragment) openDraft('ask', data.askFragment);
+    else if (data.removeFragment) {
+      state.draft.fragmentIds = state.draft.fragmentIds.filter(id => id !== data.removeFragment);
+      state.lastResult = null;
+      renderDraft();
+      renderReader();
+    } else if (data.bringBack) bringBack(data.bringBack);
+    else if (data.openHandoff) openHandoff(data.openHandoff);
+    else if (data.panelPreview) {
+      showSource(data.panelPreview);
+      expandMain();
+    } else if (data.panelWork) {
+      chooseWork(data.panelWork);
+      expandMain();
+    } else if (data.action) openDraft(data.action);
+    else if (data.query) {
+      setQuery(data.query);
+      $('panelSearch').focus();
+    } else if (data.clearSearch) {
+      setQuery('');
+      (state.view === 'panel' ? $('panelSearch') : $('mainSearch')).focus();
+    } else if (b.id === 'searchForReferences') {
+      if (state.view === 'panel') {
+        state.panelDraft = false;
+        syncDraftLocation();
+        setQuery('token');
+        $('panelSearch').focus();
+      } else {
+        setQuery('token');
+        $('mainSearch').focus();
+      }
+    }
+  });
+
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      if (state.view === 'panel') closePanel();
+      else openPanel();
+    }
+    if (e.key === 'Escape') {
+      if (state.view === 'panel') closePanel();
+      else if (state.draftOpen && state.phase !== 'sending') {
+        state.draftOpen = false;
+        syncDraftLocation();
+      } else if (state.query) setQuery('');
+    }
+    if (e.key === 'Tab' && state.view === 'panel') {
+      const focusable = [...$('palette').querySelectorAll('button,input,textarea,select,summary')].filter(el => !el.disabled && el.getClientRects().length);
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable.at(-1);
+      if (e.shiftKey && (document.activeElement === first || !$('palette').contains(document.activeElement))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (document.activeElement === last || !$('palette').contains(document.activeElement))) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  });
+
+  render();
+}
+
+/* ============================================================================
+   Live Stage-1 Workbench Mode (Served over loopback HTTP by codex-agy-sync)
+   ============================================================================ */
+function createLiveController() {
+  const ROLE_LABELS = { work_title: '工作标题', session_title: '会话标题', user: '用户', assistant: '回复', tool: '工具' };
+  const live = {
+    view: 'main',
+    theme: 'light',
+    status: 'loading',
+    snapshotError: null,
+    workspaces: [],
+    works: [],
+    allWorks: true,
+    selectedWorkspaceId: null,
+    activeWorkId: null,
+    activeWork: null,
+    activeWorkEpoch: 0,
+    selectedSessionId: null,
+    highlightedTurnId: null,
+    highlightedSessionId: null,
+    sourceBannerText: '',
+    query: '',
+    sourceFilter: 'all',
+    searchStatus: 'idle',
+    searchHits: [],
+    searchError: null,
+    selectedHitId: null,
+    draftOpen: false,
+    panelDraft: false,
+    busy: false,
+    lastResult: null,
+    lastError: null,
+    draft: {
+      mode: 'ask',
+      workId: null,
+      targetHint: 'antigravity',
+      note: '',
+      citations: [],
+      sourceSessionId: '',
+      title: '',
+      pairIfOffline: false,
+      includeInterrupted: false,
+    },
+  };
+
+  let searchTimer = null;
+  let searchAbort = null;
+  let searchEpoch = 0;
+
+  async function apiFetch(path, options = {}) {
+    const headers = {
+      'X-Workbench-Token': liveToken,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    };
+    const resp = await fetch(path, { ...options, headers, cache: 'no-store' });
+    const raw = await resp.text();
+    let payload = null;
+    try {
+      payload = raw ? JSON.parse(raw) : null;
+    } catch {
+      payload = null;
+    }
+    if (!resp.ok) {
+      const err = new Error(payload?.message || payload?.error || `HTTP ${resp.status}`);
+      err.status = resp.status;
+      err.code = payload?.error || payload?.code || '';
+      err.payload = payload;
+      throw err;
+    }
+    return payload;
+  }
+
+  function normalizeSearchScope(scope) {
+    const cleaned = String(scope || 'all').trim().toLowerCase();
+    if (cleaned === 'codex') return 'codex';
+    if (cleaned === 'agy' || cleaned === 'antigravity') return 'antigravity';
+    return 'all';
+  }
+
+  function activeWorkspace() {
+    const wsId = live.activeWork?.workspace_id || live.selectedWorkspaceId;
+    return live.workspaces.find(w => w.workspace_id === wsId) || null;
+  }
+
+  function visibleWorks() {
+    if (live.allWorks || !live.selectedWorkspaceId) return live.works;
+    return live.works.filter(w => w.workspace_id === live.selectedWorkspaceId);
+  }
+
+  function workPreviewText(work) {
+    const turns = work?.turns || [];
+    const lastTurn = turns.at(-1);
+    if (lastTurn) {
+      const raw = lastTurn.assistant_text || lastTurn.user_text || lastTurn.tool_summary || '';
+      const compact = raw.replace(/\s+/g, ' ').trim();
+      if (compact) return compact.slice(0, 140);
+    }
+    const lastHop = (work?.handoffs || []).at(-1);
+    if (lastHop?.title) return lastHop.title;
+    return work?.workspace_path || '暂无回合内容';
+  }
+
+  function workHosts(work) {
+    const list = [];
+    for (const sess of work?.sessions || []) {
+      const norm = normalizeHost(sess.host);
+      if (!list.includes(norm)) list.push(norm);
+    }
+    if (!list.length && work?.active_host) list.push(normalizeHost(work.active_host));
+    return list;
+  }
+
+  function applyStaticLiveChrome() {
+    document.title = 'Stage 1 本地工作台 · 会话同频桥';
+    $('protoLabelText').textContent = 'Stage 1 本地工作台 · 真实会话只读与交接';
+    $('localStatus').innerHTML = '<span class="status-dot"></span>Stage 1 · 本地回环只读';
+    $('resetButton').textContent = '刷新工作区';
+    $('resetButton').setAttribute('aria-label', '刷新工作区');
+    $('paletteFooterNote').textContent = 'Stage 1 真实数据 · 仅生成引用草稿与一键交接（不自动发消息）';
+    $('sessionEndText').textContent = '以上为只读合并时间线 · Stage 1 仅支持引用草稿与桌面交接';
+    $('askModeButton').textContent = '引用草稿';
+    $('handoffModeButton').textContent = '一键交接';
+    $('liveDraftNotice').classList.remove('hidden');
+    $('liveHandoffControls').classList.remove('hidden');
+    $('targetSessionLabel').textContent = '目标引用提示';
+    $('targetSessionHelp').textContent = '仅写入 Markdown 草稿头提示，不会向远端会话自动发送消息。';
+    $('targetSession').innerHTML = '<option value="codex">Codex（目标引用提示）</option><option value="antigravity">AGY（目标引用提示）</option>';
+    $('draftNoteLabel').textContent = '草稿备注或待确认问题';
+    $('draftNote').placeholder = '写下说明或复核要点，生成后可一键复制 Markdown 草稿…';
+    $('handoffNoticeBody').textContent = '从下方选择自动接续链或非接力来源会话，在目标桌面端创建新会话。';
+    $('handoffHelpText').textContent = '默认沿用当前工作接续链（chain: true）；若工作区未配对，可勾选自动配对后提交。';
+    $('draftDisclaimer').textContent = '引用草稿（Stage 1 · 仅生成与复制，不向远端自动发消息）';
+  }
+
+  function resetDraftForWork(work, { force = false } = {}) {
+    const nextWorkId = work?.work_id || null;
+    if (force || live.draft.workId !== nextWorkId) {
+      live.draft.workId = nextWorkId;
+      live.draft.citations = [];
+      live.draft.targetHint = work ? oppositeHost(work.active_host) : 'antigravity';
+      live.draft.sourceSessionId = '';
+      live.draft.title = '';
+      live.draft.pairIfOffline = false;
+      live.draft.includeInterrupted = false;
+      live.lastResult = null;
+      live.lastError = null;
+    }
+  }
+
+  function renderSidebar() {
+    $('allWorkCount').textContent = String(live.works.length);
+    $('allWorkButton').classList.toggle('active', live.allWorks);
+    if (!live.workspaces.length) {
+      $('sidebarProjects').innerHTML = '<div class="nav-empty subtle small">未发现本地工作空间</div>';
+      return;
+    }
+    $('sidebarProjects').innerHTML = live.workspaces.map(ws => {
+      const glyph = esc((ws.name || 'W').trim().charAt(0).toUpperCase() || 'W');
+      const active = !live.allWorks && live.selectedWorkspaceId === ws.workspace_id;
+      return `<button class="nav-item ${active ? 'active' : ''}" type="button" data-live-workspace="${esc(ws.workspace_id)}"><span class="project-glyph">${glyph}</span><span class="nav-label" title="${esc(ws.workspace_path)}">${esc(ws.name)}</span><span class="pair-pill ${ws.is_paired ? 'paired' : 'unpaired'}">${ws.is_paired ? '已配对' : '未配对'}</span><span class="count">${Number(ws.work_count || 0)}</span></button>`;
+    }).join('');
+  }
+
+  function renderWorkList() {
+    const searching = !!live.query.trim();
+    const selectedWs = live.workspaces.find(w => w.workspace_id === live.selectedWorkspaceId);
+    $('app').classList.toggle('searching', searching);
+    $('app').classList.toggle('source-open', Boolean(live.sourceBannerText));
+    $('listTitle').textContent = searching ? '跨端搜索' : (live.allWorks ? '所有工作' : (selectedWs?.name || '工作空间'));
+    $('searchFilters').classList.toggle('hidden', !searching);
+    $('listGroup').classList.toggle('hidden', searching);
+    $('listGroup').textContent = '按最近更新排序';
+    document.querySelectorAll('[data-filter]').forEach(btn => {
+      btn.classList.toggle('active', normalizeSearchScope(btn.dataset.filter) === live.sourceFilter);
+    });
+
+    if (searching) {
+      if (live.searchStatus === 'loading') {
+        $('listCaption').textContent = `正在搜索 “${live.query.trim()}”…`;
+        $('listFooter').textContent = '跨工作空间只读检索中…';
+        $('workItems').innerHTML = `<div class="empty-state">${icon('spin', 'rotate')}<strong>正在检索全量会话…</strong>请稍候</div>`;
+        return;
+      }
+      if (live.searchError) {
+        $('listCaption').textContent = '搜索出错';
+        $('workItems').innerHTML = `<div class="empty-state"><strong>搜索请求失败</strong>${esc(live.searchError)}<br><button class="text-button" type="button" id="retrySearchButton">重试</button></div>`;
+        return;
+      }
+      const hits = live.searchHits;
+      $('listCaption').textContent = `“${live.query.trim()}” · ${hits.length} 条命中`;
+      $('listFooter').textContent = '点击任意命中跳转到原工作与回合。';
+      $('workItems').innerHTML = hits.length
+        ? hits.map((hit, idx) => {
+            const roleLabel = ROLE_LABELS[hit.role] || hit.role || '片段';
+            return `<button class="result-item ${hit.hit_id === live.selectedHitId ? 'active' : ''}" type="button" data-live-hit="${idx}"><div class="result-title">${esc(hit.work_title || 'Untitled Session')}</div><p class="result-excerpt">${highlightSafe(hit.snippet || '', live.query)}</p><div class="work-meta"><span class="host-mark">${esc(hostLabel(hit.host))}</span><span class="host-mark">${esc(roleLabel)}</span><span>${esc(hit.workspace_name || '')}</span><span class="dot">·</span><span>${esc(formatIsoTime(hit.timestamp_iso))}</span></div></button>`;
+          }).join('')
+        : `<div class="empty-state">${icon('search')}<strong>没有找到相关历史</strong>换个关键词或切换来源筛选试试。<br><button class="text-button" type="button" data-clear-search="true">清空搜索</button></div>`;
+      return;
+    }
+
+    if (live.status === 'loading') {
+      $('listCaption').textContent = '正在扫描本地工作区…';
+      $('workItems').innerHTML = `<div class="empty-state">${icon('spin', 'rotate')}<strong>正在加载真实会话快照…</strong></div>`;
+      return;
+    }
+    if (live.status === 'error') {
+      $('listCaption').textContent = '快照加载失败';
+      $('workItems').innerHTML = `<div class="empty-state"><strong>无法加载工作区快照</strong>${esc(live.snapshotError || '未知错误')}<br><button class="text-button" type="button" id="retrySnapshotButton">重新加载</button></div>`;
+      return;
+    }
+
+    const list = visibleWorks();
+    $('listCaption').textContent = `${list.length} 项工作 · ${live.workspaces.length} 个工作空间`;
+    $('listFooter').textContent = '只读索引合并 Codex 与 Antigravity 会话。';
+    if (!list.length) {
+      $('workItems').innerHTML = `<div class="empty-state">${icon('folder')}<strong>暂无会话工作</strong>${selectedWs ? `工作空间 ${esc(selectedWs.name)} 暂无可展示会话。` : '尚未在本地存储发现任何会话。'}</div>`;
+      return;
+    }
+    $('workItems').innerHTML = list.map(w => {
+      const hosts = workHosts(w);
+      return `<button class="work-item ${w.work_id === live.activeWorkId ? 'active' : ''}" type="button" data-live-work="${esc(w.work_id)}"><div class="work-item-title">${icon('chat')}<span>${esc(w.title || 'Untitled Session')}</span></div><div class="work-item-desc">${esc(workPreviewText(w))}</div><div class="work-meta">${hosts.map(h => `<span class="host-mark">${esc(hostLabel(h))}</span>`).join('')}<span class="host-mark">${Number(w.turn_count ?? (w.turns || []).length)} 轮</span>${!w.is_paired ? '<span class="pair-pill unpaired">未配对</span>' : ''}<span class="dot">·</span><span>${esc(formatIsoTime(w.updated_at_iso))}</span></div></button>`;
+    }).join('');
+  }
+
+  function renderPairingBanner(ws, work) {
+    const banner = $('livePairingBanner');
+    const paired = work ? Boolean(work.is_paired) : Boolean(ws?.is_paired);
+    if (!ws && !work) {
+      banner.classList.add('hidden');
+      banner.innerHTML = '';
+      return;
+    }
+    const diag = ws?.diagnosis || {};
+    const steps = diag.remediation_steps || diag.next_actions || [];
+    const agyReg = diag.agy_registered ? 'AGY 已注册' : 'AGY 未注册';
+    const codexReg = diag.codex_registered ? 'Codex 已注册' : 'Codex 未注册';
+    const agyLive = diag.agy_daemon_active ? 'AGY 守护进程在线' : 'AGY 离线';
+    const codexLive = diag.codex_daemon_active ? 'Codex 守护进程在线' : 'Codex 离线';
+    if (paired) {
+      banner.classList.add('hidden');
+      banner.innerHTML = '';
+      return;
+    }
+    banner.classList.remove('hidden');
+    banner.classList.add('unpaired');
+    banner.innerHTML = `<div class="live-banner-head"><strong>工作空间未完成双端配对</strong><span class="live-banner-meta">${esc(agyReg)} · ${esc(codexReg)} · ${esc(agyLive)} · ${esc(codexLive)}</span></div><div class="live-banner-meta">路径：${esc(work?.workspace_path || ws?.workspace_path || '')}</div>${steps.length ? `<ul class="remediation-list">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ul>` : ''}`;
+  }
+
+  function renderLiveReader() {
+    const work = live.activeWork;
+    const ws = activeWorkspace();
+    $('sourceBanner').classList.toggle('hidden', !live.sourceBannerText);
+    $('sourceBannerText').textContent = live.sourceBannerText;
+
+    if (!work) {
+      $('readerProject').textContent = ws?.name || '工作空间';
+      $('workTitle').textContent = live.status === 'loading' ? '正在加载…' : (ws ? `${ws.name} · 暂无会话` : '暂无工作详情');
+      $('workDescription').textContent = ws?.workspace_path || (live.snapshotError || '从左侧选择工作空间或工作会话以查看时间线。');
+      const isPaired = Boolean(ws?.is_paired);
+      $('workStatus').className = `work-status ${ws && !isPaired ? 'unpaired' : ''}`;
+      $('workStatus').innerHTML = `<span class="status-dot"></span>${ws ? (isPaired ? '双端已配对' : '未配对') : '只读等待'}`;
+      renderPairingBanner(ws, null);
+      $('sessionChips').innerHTML = '';
+      $('liveHandoffChain').classList.add('hidden');
+      $('liveHandoffChain').innerHTML = '';
+      $('timelineLabel').textContent = '时间线';
+      $('timelineSummary').textContent = '0 轮对话';
+      $('timeline').innerHTML = `<div class="empty-state">${icon('chat')}<strong>${live.status === 'loading' ? '正在读取本地会话…' : '暂无可显示的时间线'}</strong>${ws ? '当前工作空间尚无历史回合。' : '请确认 Codex 或 Antigravity 已在本地产生会话记录。'}</div>`;
+      $('askButton').disabled = true;
+      $('handoffButton').disabled = true;
+      $('askButton').innerHTML = icon('chat') + '生成引用草稿';
+      $('handoffButton').innerHTML = icon('switch') + '执行真实交接';
+      return;
+    }
+
+    $('askButton').disabled = live.busy;
+    $('handoffButton').disabled = live.busy;
+    $('askButton').innerHTML = icon('chat') + '生成引用草稿';
+    $('handoffButton').innerHTML = icon('switch') + '执行真实交接';
+
+    $('readerProject').textContent = ws?.name || work.workspace_path.split('/').filter(Boolean).at(-1) || '工作空间';
+    $('workTitle').textContent = work.title || 'Untitled Session';
+    $('workDescription').textContent = work.workspace_path;
+    $('workStatus').className = `work-status ${work.is_paired ? '' : 'unpaired'}`;
+    $('workStatus').innerHTML = `<span class="status-dot"></span>${work.is_paired ? '双端已配对' : '未配对'}`;
+
+    renderPairingBanner(ws, work);
+
+    const sessions = work.sessions || [];
+    $('sessionChips').innerHTML = sessions.map((s, idx) => {
+      const selected = live.selectedSessionId === s.session_id;
+      return `<button class="session-chip ${selected ? 'active' : ''}" type="button" data-live-session="${idx}" title="${esc(s.session_id)}">${hostIcon(s.host)}<span>${esc(hostLabel(s.host))}</span><span class="chip-title">${esc(s.title || shortId(s.session_id))}</span><small>${Number(s.turn_or_step_count || 0)} 条</small>${s.is_baton_target ? '<span class="chip-badge baton">接续目标</span>' : ''}${s.handoff_status ? `<span class="chip-badge">${esc(s.handoff_status)}</span>` : ''}</button>`;
+    }).join('');
+
+    const handoffs = work.handoffs || [];
+    $('liveHandoffChain').classList.toggle('hidden', handoffs.length === 0);
+    $('liveHandoffChain').innerHTML = handoffs.map(hop => `<span class="chain-hop"><strong>depth ${Number(hop.chain_depth ?? 0)}</strong><span>${esc(hostLabel(hop.source_host))} (${esc(shortId(hop.source_id))}) → ${esc(hostLabel(hop.target_host))} (${hop.target_id ? esc(shortId(hop.target_id)) : 'pending'})</span><span class="chip-badge">${esc(hop.status)}</span></span>`).join('');
+
+    const turns = work.turns || [];
+    $('timelineLabel').textContent = `最近更新 · ${formatIsoTime(work.updated_at_iso)}`;
+    $('timelineSummary').textContent = `${turns.length} 轮对话 · ${Number(work.session_count || sessions.length)} 个会话`;
+
+    if (!turns.length) {
+      $('timeline').innerHTML = `<div class="empty-state">${icon('chat')}<strong>暂无合并回合</strong>该工作的会话尚无已解析的用户/助手文本回合。</div>`;
+      return;
+    }
+
+    $('timeline').innerHTML = turns.map((turn, idx) => {
+      const isHighlighted = live.highlightedTurnId === turn.turn_id && (!live.highlightedSessionId || live.highlightedSessionId === turn.session_id);
+      const isCited = live.draft.citations.some(c => c.work_id === work.work_id && c.turn_id === turn.turn_id && c.session_id === turn.session_id);
+      const hLabel = hostLabel(turn.host);
+      const userHtml = turn.user_text?.trim() ? `<div class="turn-part turn-user"><div class="turn-role-label">用户</div><div class="turn-text">${renderEscapedParagraphs(turn.user_text)}</div></div>` : '';
+      const asstHtml = turn.assistant_text?.trim() ? `<div class="turn-part turn-assistant"><div class="turn-role-label">${esc(hLabel)} 回复</div><div class="turn-text">${renderEscapedParagraphs(turn.assistant_text)}</div></div>` : '';
+      const toolHtml = turn.tool_summary?.trim() ? `<details class="tool-details"><summary>${icon('tool')}<span>工具调用摘要</span></summary><pre>${esc(turn.tool_summary)}</pre></details>` : '';
+      return `<article class="message ${isHighlighted ? 'highlight' : ''}" data-turn-id="${esc(turn.turn_id)}" data-session-id="${esc(turn.session_id)}"><div class="avatar agent">${normalizeHost(turn.host) === 'antigravity' ? 'A' : 'C'}</div><div><div class="message-header"><strong>${esc(hLabel)}</strong><span class="turn-badge">${esc(turn.session_title || shortId(turn.session_id))}</span><time>${esc(formatIsoTime(turn.timestamp_iso))}</time>${turn.is_inflight ? '<span class="turn-badge inflight">进行中</span>' : ''}${turn.has_thinking ? '<span class="turn-badge">含思考摘要</span>' : ''}</div><div class="message-body">${userHtml}${asstHtml}${toolHtml}</div><div class="message-actions"><button type="button" data-live-cite="${idx}">${icon('quote')}${isCited ? '已加入引用' : '加入引用'}</button><button type="button" data-live-draft-turn="${idx}">${icon('chat')}引用草稿</button></div></div></article>`;
+    }).join('');
+  }
+
+  function renderPalette() {
+    if (live.query.trim()) {
+      if (live.searchStatus === 'loading') {
+        $('paletteBody').innerHTML = `<div class="empty-state">${icon('spin', 'rotate')}<strong>正在跨端搜索 “${esc(live.query.trim())}”…</strong></div>`;
+        return;
+      }
+      if (live.searchError) {
+        $('paletteBody').innerHTML = `<div class="empty-state"><strong>搜索失败</strong>${esc(live.searchError)}</div>`;
+        return;
+      }
+      const hits = live.searchHits;
+      $('paletteBody').innerHTML = `<div class="palette-group-label">跨端搜索命中 <span style="float:right">${hits.length} 条结果</span></div>` + (hits.length
+        ? hits.map((hit, idx) => {
+            const roleLabel = ROLE_LABELS[hit.role] || hit.role || '片段';
+            return `<article class="palette-result">${hostIcon(hit.host)}<div class="palette-result-content"><div class="palette-result-title">${esc(hit.work_title || 'Untitled Session')} · <span class="subtle">${esc(roleLabel)}</span></div><p>${highlightSafe(hit.snippet || '', live.query)}</p><div class="palette-result-meta">${esc(hostLabel(hit.host))} · ${esc(hit.workspace_name || '')} · ${esc(formatIsoTime(hit.timestamp_iso))}</div><div class="palette-result-actions"><button class="secondary" type="button" data-live-panel-preview="${idx}">查看原文</button><button class="text-button" type="button" data-live-panel-cite="${idx}">${icon('plus')}加入引用</button></div></div></article>`;
+          }).join('')
+        : `<div class="empty-state">${icon('search')}<strong>没有找到相关历史</strong><br><button class="text-button" type="button" data-clear-search="true">清空搜索</button></div>`);
+      return;
+    }
+
+    const worksHtml = live.works.slice(0, 5).map(w => `<button class="palette-action" type="button" data-live-panel-work="${esc(w.work_id)}">${icon('chat')}<span>${esc(w.title || 'Untitled Session')}</span><small>${esc(formatIsoTime(w.updated_at_iso))}</small></button>`).join('');
+    const wsHtml = live.workspaces.slice(0, 6).map(ws => `<button class="palette-action" type="button" data-live-panel-ws="${esc(ws.workspace_id)}">${icon('folder')}<span>${esc(ws.name)}</span><small>${ws.is_paired ? '已配对' : '未配对'} · ${Number(ws.work_count || 0)} 项</small></button>`).join('');
+    $('paletteBody').innerHTML = `<div class="palette-group-label">快捷动作</div><button class="palette-action" type="button" data-live-action="ask">${icon('chat')}<span class="action-copy">生成引用草稿<small>选取回合片段，生成并复制 Markdown 草稿</small></span><small>Stage 1</small></button><button class="palette-action" type="button" data-live-action="handoff">${icon('switch')}<span class="action-copy">执行真实交接<small>在目标桌面端创建接续会话</small></span><small>Handoff</small></button>${worksHtml ? `<div class="palette-group-label">最近工作</div>${worksHtml}` : ''}${wsHtml ? `<div class="palette-group-label">工作空间</div>${wsHtml}` : ''}`;
+  }
+
+  function renderDraftResponse() {
+    const respEl = $('draftResponse');
+    if (live.lastError) {
+      respEl.classList.remove('hidden');
+      const payload = live.lastError.payload || {};
+      const code = payload.error || payload.code || live.lastError.code || 'request_error';
+      const msg = payload.message || live.lastError.message || '操作失败';
+      const steps = payload.diagnosis?.remediation_steps || payload.diagnosis?.next_actions || payload.remediation || [];
+      const rec = payload.receipt;
+      let actionBtn = '';
+      if (code === 'unpaired_workspace') {
+        actionBtn = `<button class="secondary" type="button" id="retryPairHandoff" style="margin-top:10px">自动配对并重试</button>`;
+      } else if (code === 'handoff_pending') {
+        actionBtn = `<button class="secondary" type="button" id="reconcilePendingHandoff" style="margin-top:10px">核对并清理/恢复卡住的 pending 交棒</button>`;
+      }
+      const receiptHtml = rec ? `<div class="receipt-kv"><span class="receipt-key">target_id</span><span class="receipt-val">${esc(rec.target_id || '—')}</span><span class="receipt-key">staging_path</span><span class="receipt-val">${esc(rec.staging_path || '—')}</span><span class="receipt-key">cause</span><span class="receipt-val">${esc(rec.error || '—')}</span></div>` : '';
+      respEl.innerHTML = `<div class="error-card"><div class="error-card-title"><span>请求失败</span><span class="host-mark">${esc(code)}</span></div><p>${esc(msg)}</p>${receiptHtml}${steps.length ? `<ul class="remediation-list">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ul>` : ''}${actionBtn}</div>`;
+      return;
+    }
+
+    if (!live.lastResult) {
+      respEl.classList.add('hidden');
+      respEl.innerHTML = '';
+      return;
+    }
+
+    respEl.classList.remove('hidden');
+    if (live.lastResult.type === 'draft') {
+      const r = live.lastResult.data;
+      respEl.innerHTML = `<div class="draft-result-meta">${icon('check')}<span>Stage 1 只读草稿 · delivery_executed: ${String(Boolean(r.delivery_executed))} · 引用 ${Number(r.citation_count || 0)} 段</span></div><strong>Markdown 草稿已生成</strong><p class="small subtle">${esc(r.notice || 'Stage 1 copy-only draft ready.')}</p><pre class="draft-markdown-preview" id="draftMarkdownPreview">${esc(r.markdown || '')}</pre><div class="copy-row"><button class="secondary" type="button" id="copyDraftMarkdown">${icon('quote')}<span>复制 Markdown 草稿</span></button><span class="copy-status" id="copyDraftStatus" role="status">${live.lastResult.copied ? '已自动复制' : ''}</span></div>`;
+      return;
+    }
+
+    if (live.lastResult.type === 'reconcile') {
+      const r = live.lastResult.reconcile || {};
+      const promoted = r.promoted || [];
+      const cleared = r.cleared || [];
+      const unresolved = r.unresolved || [];
+      const fmtItems = items => items.map(x => `${shortId(x.source_id || x.target_id || '')}${x.reason ? ` (${x.reason})` : ''}`).join('、');
+      const fmtCount = items => (items.length ? `${items.length} 条：${fmtItems(items)}` : '0 条');
+      respEl.innerHTML = `<div class="draft-result-meta">${icon('check')}<span>pending 交棒核对结果</span></div><div class="receipt-card" id="receiptBox"><strong>已完成 pending 交棒核对与清理</strong><p>核对前 pending ${Number(r.total_pending_before ?? 0)} 条，核对后剩余 ${Number(r.total_pending_after ?? 0)} 条${r.dry_run ? '（dry-run）' : ''}。</p><div class="receipt-kv"><span class="receipt-key">promoted</span><span class="receipt-val">${esc(fmtCount(promoted))}</span><span class="receipt-key">cleared</span><span class="receipt-val">${esc(fmtCount(cleared))}</span><span class="receipt-key">unresolved</span><span class="receipt-val">${esc(fmtCount(unresolved))}</span><span class="receipt-key">workspace</span><span class="receipt-val">${esc(r.workspace || '—')}</span></div></div>`;
+      return;
+    }
+
+    const rec = live.lastResult.receipt || {};
+    const direction = rec.direction || `${hostLabel(rec.source_host)} → ${hostLabel(rec.target_host)}`;
+    const handoffPath = rec.handoff_path || rec.staging_path || '—';
+    const summaryMsg = rec.message || (rec.status === 'no_op' ? '来源会话没有新增已完成回合，已沿用现有接续目标。' : '已在目标桌面端创建并验证新接续会话，来源会话保持不变。');
+    const pairingModeRow = rec.pairing_mode ? `<span class="receipt-key">pairing_mode</span><span class="receipt-val">${esc(rec.pairing_mode || '—')}</span>` : '';
+    respEl.innerHTML = `<div class="draft-result-meta">${icon('check')}<span>真实交接回执 · ${esc(rec.status || 'ready')}</span></div><div class="receipt-card" id="receiptBox"><strong>${rec.status === 'no_op' ? '接续幂等命中（no_op）' : '桌面端交接已完成'}</strong><p>${esc(summaryMsg)}</p><div class="receipt-kv"><span class="receipt-key">status</span><span class="receipt-val">${esc(rec.status || '—')}</span><span class="receipt-key">direction</span><span class="receipt-val">${esc(direction)}</span><span class="receipt-key">source_id</span><span class="receipt-val">${esc(rec.source_id || '—')}</span><span class="receipt-key">target_id</span><span class="receipt-val">${esc(rec.target_id || '—')}</span><span class="receipt-key">chain_id</span><span class="receipt-val">${esc(rec.chain_id || '—')}</span><span class="receipt-key">chain_depth</span><span class="receipt-val">${String(rec.chain_depth ?? 0)}</span>${pairingModeRow}<span class="receipt-key">handoff_path</span><span class="receipt-val">${esc(handoffPath)}</span></div></div>`;
+  }
+
+  function renderDraft() {
+    const work = live.activeWork;
+    const ws = activeWorkspace();
+    const d = live.draft;
+    const isAsk = d.mode === 'ask';
+    $('askModeButton').setAttribute('aria-pressed', isAsk);
+    $('handoffModeButton').setAttribute('aria-pressed', !isAsk);
+    $('askFields').classList.toggle('hidden', !isAsk);
+    $('handoffFields').classList.toggle('hidden', isAsk);
+    $('drawerTitle').textContent = isAsk ? '引用草稿（Stage 1）' : '执行真实交接';
+    $('draftDisclaimer').textContent = isAsk
+      ? '引用草稿（Stage 1 · 仅生成与复制，不向远端自动发消息）'
+      : '真实桌面交接 · 在目标端新建接续会话，来源会话保持不变';
+    $('draftSourceText').textContent = work ? `工作：${work.title} · ${work.workspace_path}` : '请先选择一个工作会话';
+
+    $('targetSession').value = d.targetHint;
+    $('draftNote').value = d.note;
+    $('fragmentCount').textContent = `${d.citations.length} 段`;
+    $('draftFragments').innerHTML = d.citations.length
+      ? d.citations.map((cit, idx) => `<div class="fragment-card"><div class="fragment-origin"><span class="host-mark">${esc(hostLabel(cit.host))}</span><span>${esc(cit.label || shortId(cit.session_id))}</span></div><div class="fragment-text">${esc(cit.excerpt || '（无正文摘要）')}</div><button class="icon fragment-remove" type="button" data-live-remove-cite="${idx}" aria-label="移除此引用">${icon('close')}</button></div>`).join('')
+      : `<div class="draft-empty">还没有引用片段。从时间线点击“加入引用”，或通过搜索添加。<br><button class="text-button" type="button" id="searchForReferences">前往搜索引用 ${icon('arrow')}</button></div>`;
+
+    const selectableSessions = (work?.sessions || []).filter(s => !s.is_baton_target);
+    if (d.sourceSessionId && !selectableSessions.some(s => s.session_id === d.sourceSessionId)) d.sourceSessionId = '';
+    const selectedSource = d.sourceSessionId ? selectableSessions.find(s => s.session_id === d.sourceSessionId) : null;
+    const pairedText = work ? (work.is_paired ? '双端已配对' : '未配对（需配对或勾选自动配对）') : (ws ? (ws.is_paired ? '双端已配对' : '未配对') : '未知');
+    const sourceHost = selectedSource ? selectedSource.host : work?.active_host;
+    const targetName = work ? hostLabel(oppositeHost(sourceHost)) : '另一端';
+    $('handoffNoticeTitle').textContent = `向 ${targetName} 执行真实交接 · ${pairedText}`;
+    $('handoffNoticeBody').textContent = selectedSource
+      ? `已选定来源：${hostLabel(selectedSource.host)} · ${selectedSource.title || shortId(selectedSource.session_id)} (${shortId(selectedSource.session_id)})，将在 ${targetName} 创建新会话。`
+      : '从下方选择自动接续链或非接力来源会话，在目标桌面端创建新会话。';
+
+    const autoDir = work?.latest_direction || (work ? (normalizeHost(work.active_host) === 'codex' ? 'codex_to_agy' : 'agy_to_codex') : 'codex_to_agy');
+    const autoLabel = work
+      ? `自动接续链（chain: true · ${hostLabel(work.active_host)} ${shortId(work.latest_source_id)} → ${hostLabel(oppositeHost(work.active_host))}）`
+      : '自动接续链（chain: true）';
+    $('handoffSourceSelect').innerHTML = `<option value="" data-direction="${esc(autoDir)}">${esc(autoLabel)}</option>` + selectableSessions.map(s => {
+      const dir = normalizeHost(s.host) === 'codex' ? 'codex_to_agy' : 'agy_to_codex';
+      return `<option value="${esc(s.session_id)}" data-direction="${esc(dir)}" ${d.sourceSessionId === s.session_id ? 'selected' : ''}>${esc(hostLabel(s.host))} · ${esc(s.title)} (${esc(shortId(s.session_id))} · ${Number(s.turn_or_step_count || 0)} 条)</option>`;
+    }).join('');
+    $('handoffSourceSelect').value = d.sourceSessionId;
+    $('handoffTitle').value = d.title;
+    $('handoffPairIfOffline').checked = Boolean(d.pairIfOffline);
+    $('handoffIncludeInterrupted').checked = Boolean(d.includeInterrupted);
+
+    const turns = work?.turns || [];
+    $('historyCount').textContent = `${turns.length} 轮 · 可见历史`;
+    $('handoffHistory').innerHTML = turns.length
+      ? turns.map(t => `<div class="history-row"><strong>#${Number(t.seq || 0)} · ${esc(hostLabel(t.host))} · ${esc(t.session_title || shortId(t.session_id))} · ${esc(formatIsoTime(t.timestamp_iso))}</strong><p>${esc([t.user_text && `用户：${t.user_text}`, t.assistant_text && `助手：${t.assistant_text}`, t.tool_summary && `工具：${t.tool_summary}`].filter(Boolean).join('\n'))}</p></div>`).join('')
+      : '<div class="history-row"><p>暂无可预览回合。</p></div>';
+
+    const busy = live.busy;
+    ['askModeButton', 'handoffModeButton', 'targetSession', 'draftNote', 'closeDrawer', 'askButton', 'handoffButton', 'handoffSourceSelect', 'handoffTitle', 'handoffPairIfOffline', 'handoffIncludeInterrupted'].forEach(id => { $(id).disabled = busy; });
+    const canAsk = Boolean(work) && (d.note.trim().length > 0 || d.citations.length > 0);
+    const canHandoff = Boolean(work);
+    $('submitDraft').disabled = busy || (isAsk ? !canAsk : !canHandoff);
+    $('submitDraft').innerHTML = icon(busy ? 'spin' : 'arrow', busy ? 'rotate' : '') + `<span>${busy ? (isAsk ? '正在生成草稿…' : '正在执行交接…') : (isAsk ? '生成并复制 Markdown 草稿' : '执行真实交接')}</span>`;
+
+    renderDraftResponse();
+  }
+
+  function syncDraftLocation() {
+    const panel = live.view === 'panel';
+    const show = live.draftOpen;
+    const inPanel = panel && show && live.panelDraft;
+    $('drawer').classList.toggle('hidden', !show || panel);
+    $('panelDraftHost').classList.toggle('hidden', !inPanel);
+    $('paletteDraftBar').classList.toggle('hidden', !inPanel);
+    $('paletteBody').classList.toggle('hidden', inPanel);
+    const host = inPanel ? $('panelDraftHost') : $('mainDraftHost');
+    host.append($('draft'));
+    $('draft').classList.toggle('hidden', !show);
+  }
+
+  function render() {
+    renderSidebar();
+    renderWorkList();
+    renderLiveReader();
+    renderPalette();
+    renderDraft();
+    syncDraftLocation();
+    $('mainSearch').value = live.query;
+    $('panelSearch').value = live.query;
+    $('panelBackdrop').classList.toggle('hidden', live.view !== 'panel');
+    $('mainViewButton').setAttribute('aria-pressed', live.view === 'main');
+    $('panelViewButton').setAttribute('aria-pressed', live.view === 'panel');
+    document.documentElement.dataset.theme = live.theme;
+    $('themeButton').innerHTML = icon(live.theme === 'light' ? 'moon' : 'sun') + `<span>${live.theme === 'light' ? '深色' : '浅色'}</span>`;
+    $('themeButton').setAttribute('aria-label', `切换${live.theme === 'light' ? '深' : '浅'}色外观`);
+  }
+
+  function scrollToTurn(turnId, sessionId) {
+    requestAnimationFrame(() => {
+      const candidates = [...$('timeline').querySelectorAll('[data-turn-id]')];
+      const match = candidates.find(el => el.dataset.turnId === turnId && (!sessionId || el.dataset.sessionId === sessionId)) || candidates.find(el => el.dataset.turnId === turnId);
+      if (match) match.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      else $('readerScroll').scrollTop = 0;
+    });
+  }
+
+  async function loadWorkDetail(workId, { refresh = false, preserveDraftState = false } = {}) {
+    const epoch = ++live.activeWorkEpoch;
+    live.activeWorkId = workId;
+    const cached = live.works.find(w => w.work_id === workId) || null;
+    if (cached) {
+      live.activeWork = cached;
+      if (!preserveDraftState) resetDraftForWork(cached);
+      render();
+    }
+    try {
+      const detail = await apiFetch(`/api/works/${encodeURIComponent(workId)}${refresh ? '?refresh=1' : ''}`);
+      if (epoch !== live.activeWorkEpoch) return null;
+      live.activeWork = detail;
+      const idx = live.works.findIndex(w => w.work_id === detail.work_id);
+      if (idx >= 0) live.works[idx] = detail;
+      if (!preserveDraftState) resetDraftForWork(detail);
+      render();
+      return detail;
+    } catch (err) {
+      if (epoch !== live.activeWorkEpoch) return null;
+      showToast(`加载工作详情失败：${err.message}`);
+      return null;
+    }
+  }
+
+  async function refreshSnapshot({ refresh = false, showNotice = false, preserveDraftState = false } = {}) {
+    if (!live.works.length) {
+      live.status = 'loading';
+      live.snapshotError = null;
+      render();
+    }
+    try {
+      const snap = await apiFetch(`/api/snapshot${refresh ? '?refresh=1' : ''}`);
+      live.status = 'ready';
+      live.snapshotError = null;
+      live.workspaces = snap.workspaces || [];
+      live.works = snap.works || [];
+
+      if (live.selectedWorkspaceId && !live.workspaces.some(w => w.workspace_id === live.selectedWorkspaceId)) {
+        live.selectedWorkspaceId = null;
+        live.allWorks = true;
+      }
+
+      const pool = visibleWorks();
+      let nextWork = pool.find(w => w.work_id === live.activeWorkId) || pool[0] || null;
+      if (!nextWork) {
+        live.activeWorkId = null;
+        live.activeWork = null;
+        if (!preserveDraftState) resetDraftForWork(null);
+        render();
+      } else {
+        await loadWorkDetail(nextWork.work_id, { refresh, preserveDraftState });
+      }
+      if (showNotice) showToast('已刷新工作区与真实会话');
+    } catch (err) {
+      live.status = 'error';
+      live.snapshotError = err.message;
+      render();
+      if (showNotice) showToast(`刷新失败：${err.message}`);
+    }
+  }
+
+  async function executeLiveSearch(queryText) {
+    const trimmed = String(queryText ?? '').trim();
+    if (searchAbort) {
+      searchAbort.abort();
+      searchAbort = null;
+    }
+    if (!trimmed) {
+      live.searchStatus = 'idle';
+      live.searchHits = [];
+      live.searchError = null;
+      renderWorkList();
+      renderPalette();
+      return;
+    }
+    const epoch = ++searchEpoch;
+    const controller = new AbortController();
+    searchAbort = controller;
+    live.searchStatus = 'loading';
+    live.searchError = null;
+    renderWorkList();
+    renderPalette();
+    try {
+      const url = `/api/search?q=${encodeURIComponent(trimmed)}&scope=${encodeURIComponent(live.sourceFilter)}&limit=60`;
+      const data = await apiFetch(url, { signal: controller.signal });
+      if (epoch !== searchEpoch) return;
+      live.searchStatus = 'ready';
+      live.searchHits = data?.hits || [];
+      live.searchError = null;
+      renderWorkList();
+      renderPalette();
+    } catch (err) {
+      if (err.name === 'AbortError' || epoch !== searchEpoch) return;
+      live.searchStatus = 'error';
+      live.searchError = err.message;
+      renderWorkList();
+      renderPalette();
+    }
+  }
+
+  function scheduleSearch(queryText) {
+    live.query = queryText;
+    if (!queryText.trim()) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+      live.sourceBannerText = '';
+      live.highlightedTurnId = null;
+      live.highlightedSessionId = null;
+      live.selectedHitId = null;
+      executeLiveSearch('');
+      renderLiveReader();
+      $('mainSearch').value = '';
+      $('panelSearch').value = '';
+      return;
+    }
+    $('mainSearch').value = queryText;
+    $('panelSearch').value = queryText;
+    live.searchStatus = 'loading';
+    renderWorkList();
+    renderPalette();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      executeLiveSearch(live.query);
+    }, 160);
+  }
+
+  async function openSearchHit(hit) {
+    if (!hit) return;
+    live.selectedHitId = hit.hit_id;
+    live.highlightedTurnId = hit.turn_id || null;
+    live.highlightedSessionId = hit.session_id || null;
+    const roleLabel = ROLE_LABELS[hit.role] || hit.role || '片段';
+    const note = hit.turn_id ? '' : '（标题命中）';
+    live.sourceBannerText = `搜索定位 · ${hit.workspace_name || ''} / ${hostLabel(hit.host)} · ${roleLabel}${note} · ${formatIsoTime(hit.timestamp_iso)}`;
+    await loadWorkDetail(hit.work_id);
+    if (hit.turn_id) scrollToTurn(hit.turn_id, hit.session_id);
+    else $('readerScroll').scrollTop = 0;
+  }
+
+  async function confirmTopSearchHit() {
+    if (!live.query.trim()) return;
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+      await executeLiveSearch(live.query);
+    }
+    const top = live.searchHits[0];
+    if (!top) return;
+    await openSearchHit(top);
+    if (live.view === 'panel') expandMain();
+  }
+
+  function addCitationFromTurn(turn, openNow = true) {
+    const work = live.activeWork;
+    if (!work || !turn || live.busy) return;
+    resetDraftForWork(work);
+    const exists = live.draft.citations.some(c => c.work_id === work.work_id && c.turn_id === turn.turn_id && c.session_id === turn.session_id);
+    if (!exists) {
+      live.draft.citations.push({
+        workspace_id: work.workspace_id,
+        work_id: work.work_id,
+        host: turn.host,
+        session_id: turn.session_id,
+        turn_id: turn.turn_id,
+        excerpt: (turn.assistant_text || turn.user_text || turn.tool_summary || '').trim().slice(0, 600),
+        label: `${hostLabel(turn.host)} · ${turn.session_title || work.title} (#${turn.seq})`,
+      });
+      live.lastResult = null;
+      live.lastError = null;
+    }
+    if (openNow) {
+      live.draft.mode = 'ask';
+      live.draftOpen = true;
+      live.panelDraft = live.view === 'panel';
+    }
+    render();
+    showToast('回合已加入引用草稿');
+  }
+
+  async function addCitationFromHit(hit) {
+    if (!hit || live.busy) return;
+    if (!live.activeWork) {
+      await loadWorkDetail(hit.work_id);
+    }
+    const work = live.activeWork;
+    if (!work) return;
+    const citeWorkId = hit.work_id || work.work_id;
+    const citeTurnId = hit.turn_id || '';
+    const citeRole = hit.role || '';
+    const citeExcerpt = String(hit.snippet || '').trim().slice(0, 600);
+    const exists = live.draft.citations.some(c =>
+      c.work_id === citeWorkId
+      && c.session_id === hit.session_id
+      && c.turn_id === citeTurnId
+      && (c.role || '') === citeRole
+      && (citeRole ? true : c.excerpt === citeExcerpt)
+    );
+    if (!exists) {
+      live.draft.citations.push({
+        workspace_id: hit.workspace_id || work.workspace_id,
+        work_id: citeWorkId,
+        host: hit.host,
+        session_id: hit.session_id,
+        turn_id: citeTurnId,
+        role: citeRole,
+        excerpt: citeExcerpt,
+        label: `${hostLabel(hit.host)} · ${hit.work_title || work.title} (${ROLE_LABELS[hit.role] || hit.role || '片段'})`,
+      });
+      live.lastResult = null;
+      live.lastError = null;
+    }
+    live.draft.mode = 'ask';
+    live.draftOpen = true;
+    live.panelDraft = live.view === 'panel';
+    render();
+    showToast('搜索命中已加入引用草稿');
+  }
+
+  function openDraft(mode) {
+    if (live.busy) return;
+    if (!live.activeWork) {
+      showToast('请先选择一个工作会话');
+      return;
+    }
+    resetDraftForWork(live.activeWork);
+    live.draft.mode = mode;
+    if (mode === 'handoff') {
+      live.lastResult = null;
+      live.lastError = null;
+    }
+    live.draftOpen = true;
+    live.panelDraft = live.view === 'panel';
+    render();
+  }
+
+  async function submitDraft() {
+    if (live.busy || !live.activeWork) return;
+    const work = live.activeWork;
+    live.busy = true;
+    live.lastResult = null;
+    live.lastError = null;
+    renderDraft();
+
+    try {
+      if (live.draft.mode === 'ask') {
+        const result = await apiFetch('/api/draft/render', {
+          method: 'POST',
+          body: JSON.stringify({
+            work_id: work.work_id,
+            note: live.draft.note,
+            citations: live.draft.citations,
+            target_hint: live.draft.targetHint,
+          }),
+        });
+        let copied = false;
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          try {
+            await navigator.clipboard.writeText(result.markdown || '');
+            copied = true;
+          } catch {
+            copied = false;
+          }
+        }
+        live.lastResult = { type: 'draft', data: result, copied };
+        showToast(copied ? 'Markdown 草稿已生成并复制' : 'Markdown 草稿已生成（Stage 1 只读）');
+      } else {
+        const explicitSourceId = live.draft.sourceSessionId.trim();
+        const title = live.draft.title.trim();
+        const body = {
+          workspace: work.workspace_path,
+          ...(title ? { title } : {}),
+          auto_pair: Boolean(live.draft.pairIfOffline),
+          include_interrupted: Boolean(live.draft.includeInterrupted),
+        };
+        if (explicitSourceId) {
+          const picked = (work.sessions || []).find(s => s.session_id === explicitSourceId);
+          const direction = picked
+            ? (normalizeHost(picked.host) === 'codex' ? 'codex_to_agy' : 'agy_to_codex')
+            : ($('handoffSourceSelect').selectedOptions?.[0]?.dataset?.direction
+              || work.latest_direction
+              || (normalizeHost(work.active_host) === 'codex' ? 'codex_to_agy' : 'agy_to_codex'));
+          body.source_id = explicitSourceId;
+          body.direction = direction;
+        } else {
+          if (work.latest_source_id) body.source_id = work.latest_source_id;
+          body.chain = true;
+        }
+        const receipt = await apiFetch('/api/handoff', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+        live.lastResult = { type: 'handoff', receipt };
+        if (receipt.status === 'ready') {
+          live.draft.title = '';
+          live.draft.includeInterrupted = false;
+        }
+        showToast(receipt.status === 'no_op' ? '接续幂等命中，已沿用现有目标会话' : '真实交接已完成');
+        await refreshSnapshot({ refresh: true, preserveDraftState: true });
+      }
+    } catch (err) {
+      live.lastError = {
+        message: err.message,
+        status: err.status || 0,
+        code: err.code || err.payload?.error || err.payload?.code || '',
+        payload: err.payload || null,
+      };
+      showToast(live.draft.mode === 'ask' ? `生成草稿失败：${err.message}` : `交接失败：${err.message}`);
+    } finally {
+      live.busy = false;
+      render();
+    }
+  }
+
+  async function reconcilePendingHandoffs() {
+    if (live.busy) return;
+    const work = live.activeWork;
+    const rec = live.lastError?.payload?.receipt || null;
+    const workspaceArg =
+      work?.workspace_path ||
+      live.selectedWorkspaceId ||
+      work?.workspace_id ||
+      rec?.workspace_path ||
+      rec?.workspace ||
+      '';
+    if (!workspaceArg) {
+      showToast('未定位到工作区，无法核对 pending 交棒');
+      return;
+    }
+    const sourceId =
+      (rec && rec.source_id) ||
+      live.draft.sourceSessionId.trim() ||
+      live.selectedSessionId ||
+      '';
+    const body = {
+      workspace: workspaceArg,
+      ...(sourceId ? { source_id: sourceId } : {}),
+    };
+    live.busy = true;
+    live.lastResult = null;
+    live.lastError = null;
+    renderDraft();
+    try {
+      const reconcile = await apiFetch('/api/handoff/reconcile', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      live.lastResult = { type: 'reconcile', reconcile };
+      const pCount = (reconcile.promoted || []).length;
+      const cCount = (reconcile.cleared || []).length;
+      const uCount = (reconcile.unresolved || []).length;
+      showToast(`pending 交棒已核对：恢复 ${pCount}，清理 ${cCount}，未决 ${uCount}`);
+      await refreshSnapshot({ refresh: true, preserveDraftState: true });
+    } catch (err) {
+      live.lastError = {
+        message: err.message,
+        status: err.status || 0,
+        code: err.code || err.payload?.error || err.payload?.code || '',
+        payload: err.payload || null,
+      };
+      showToast(`核对 pending 交棒失败：${err.message}`);
+    } finally {
+      live.busy = false;
+      render();
+    }
+  }
+
+  function openPanel() {
+    previousFocus = document.activeElement;
+    live.view = 'panel';
+    live.panelDraft = live.draftOpen;
+    render();
+    setTimeout(() => $('panelSearch').focus(), 20);
+  }
+
+  function expandMain() {
+    live.view = 'main';
+    render();
+    if (live.highlightedTurnId) scrollToTurn(live.highlightedTurnId, live.highlightedSessionId);
+  }
+
+  function closePanel() {
+    expandMain();
+    previousFocus?.focus();
+  }
+
+  $('mainSearch').addEventListener('input', e => scheduleSearch(e.target.value));
+  $('panelSearch').addEventListener('input', e => scheduleSearch(e.target.value));
+  bindImeSafeEnter($('mainSearch'), confirmTopSearchHit);
+  bindImeSafeEnter($('panelSearch'), confirmTopSearchHit);
+  bindImeSafeEnter($('draftNote'), () => { if (!$('submitDraft').disabled) submitDraft(); }, { ignoreShift: true });
+
+  $('mainViewButton').addEventListener('click', expandMain);
+  $('panelViewButton').addEventListener('click', openPanel);
+  $('quickPanelButton').addEventListener('click', openPanel);
+  $('toolbarPanelButton').addEventListener('click', openPanel);
+  $('historyButton').addEventListener('click', openPanel);
+  $('listActionButton').addEventListener('click', openPanel);
+  $('expandMainButton').addEventListener('click', expandMain);
+  $('closePanel').addEventListener('click', closePanel);
+  $('resetButton').addEventListener('click', () => {
+    resetDraftForWork(live.activeWork, { force: true });
+    refreshSnapshot({ refresh: true, showNotice: true });
+  });
+  $('themeButton').addEventListener('click', () => { live.theme = live.theme === 'light' ? 'dark' : 'light'; render(); });
+  $('askButton').addEventListener('click', () => openDraft('ask'));
+  $('handoffButton').addEventListener('click', () => openDraft('handoff'));
+  $('askModeButton').addEventListener('click', () => { live.draft.mode = 'ask'; live.lastResult = null; live.lastError = null; renderDraft(); });
+  $('handoffModeButton').addEventListener('click', () => { live.draft.mode = 'handoff'; live.lastResult = null; live.lastError = null; renderDraft(); });
+  $('closeDrawer').addEventListener('click', () => { live.draftOpen = false; syncDraftLocation(); });
+  $('backToPanelSearch').addEventListener('click', () => { live.panelDraft = false; syncDraftLocation(); $('panelSearch').focus(); });
+  $('targetSession').addEventListener('change', e => { live.draft.targetHint = e.target.value; live.lastResult = null; live.lastError = null; renderDraft(); });
+  $('draftNote').addEventListener('input', e => {
+    live.draft.note = e.target.value;
+    if (live.draft.mode === 'ask') {
+      $('submitDraft').disabled = live.busy || !live.activeWork || (!e.target.value.trim() && !live.draft.citations.length);
+    }
+  });
+  $('handoffSourceSelect').addEventListener('change', e => { live.draft.sourceSessionId = e.target.value; live.lastResult = null; live.lastError = null; renderDraft(); });
+  $('handoffTitle').addEventListener('input', e => { live.draft.title = e.target.value; });
+  $('handoffPairIfOffline').addEventListener('change', e => { live.draft.pairIfOffline = e.target.checked; });
+  $('handoffIncludeInterrupted').addEventListener('change', e => { live.draft.includeInterrupted = e.target.checked; });
+  $('submitDraft').addEventListener('click', submitDraft);
+  $('returnWorkButton').addEventListener('click', () => {
+    live.sourceBannerText = '';
+    live.highlightedTurnId = null;
+    live.highlightedSessionId = null;
+    live.selectedHitId = null;
+    renderWorkList();
+    renderLiveReader();
+  });
+  $('allWorkButton').addEventListener('click', () => {
+    live.allWorks = true;
+    live.selectedWorkspaceId = null;
+    scheduleSearch('');
+    const next = live.works[0] || null;
+    if (next) loadWorkDetail(next.work_id);
+    else {
+      live.activeWorkId = null;
+      live.activeWork = null;
+      render();
+    }
+  });
+  $('mobileWorksButton').addEventListener('click', openPanel);
+  $('panelBackdrop').addEventListener('click', e => { if (e.target === $('panelBackdrop')) closePanel(); });
+
+  document.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    const data = b.dataset;
+    if (data.liveWorkspace) {
+      live.allWorks = false;
+      live.selectedWorkspaceId = data.liveWorkspace;
+      scheduleSearch('');
+      const first = visibleWorks()[0] || null;
+      if (first) loadWorkDetail(first.work_id);
+      else {
+        live.activeWorkId = null;
+        live.activeWork = null;
+        resetDraftForWork(null);
+        render();
+      }
+    } else if (data.liveWork) {
+      loadWorkDetail(data.liveWork);
+      $('readerScroll').scrollTop = 0;
+    } else if (data.liveSession !== undefined) {
+      const sess = (live.activeWork?.sessions || [])[Number(data.liveSession)];
+      if (sess) {
+        live.selectedSessionId = live.selectedSessionId === sess.session_id ? null : sess.session_id;
+        renderLiveReader();
+        if (live.selectedSessionId) {
+          const matchTurn = (live.activeWork?.turns || []).find(t => t.session_id === sess.session_id);
+          if (matchTurn) scrollToTurn(matchTurn.turn_id, sess.session_id);
+        }
+      }
+    } else if (data.liveHit !== undefined) {
+      const hit = live.searchHits[Number(data.liveHit)];
+      if (hit) openSearchHit(hit);
+    } else if (data.filter) {
+      live.sourceFilter = normalizeSearchScope(data.filter);
+      if (live.query.trim()) {
+        clearTimeout(searchTimer);
+        searchTimer = null;
+        executeLiveSearch(live.query);
+      } else {
+        renderWorkList();
+        renderPalette();
+      }
+    } else if (data.liveCite !== undefined) {
+      const turn = (live.activeWork?.turns || [])[Number(data.liveCite)];
+      if (turn) addCitationFromTurn(turn, true);
+    } else if (data.liveDraftTurn !== undefined) {
+      const turn = (live.activeWork?.turns || [])[Number(data.liveDraftTurn)];
+      if (turn) {
+        addCitationFromTurn(turn, true);
+        setTimeout(() => $('draftNote').focus(), 20);
+      }
+    } else if (data.liveRemoveCite !== undefined) {
+      const idx = Number(data.liveRemoveCite);
+      if (!Number.isNaN(idx)) {
+        live.draft.citations.splice(idx, 1);
+        live.lastResult = null;
+        live.lastError = null;
+        renderDraft();
+        renderLiveReader();
+      }
+    } else if (data.livePanelPreview !== undefined) {
+      const hit = live.searchHits[Number(data.livePanelPreview)];
+      if (hit) {
+        openSearchHit(hit);
+        expandMain();
+      }
+    } else if (data.livePanelCite !== undefined) {
+      const hit = live.searchHits[Number(data.livePanelCite)];
+      if (hit) addCitationFromHit(hit);
+    } else if (data.livePanelWork) {
+      loadWorkDetail(data.livePanelWork);
+      expandMain();
+    } else if (data.livePanelWs) {
+      live.allWorks = false;
+      live.selectedWorkspaceId = data.livePanelWs;
+      const first = visibleWorks()[0] || null;
+      if (first) loadWorkDetail(first.work_id);
+      else {
+        live.activeWorkId = null;
+        live.activeWork = null;
+        resetDraftForWork(null);
+      }
+      expandMain();
+    } else if (data.liveAction) {
+      openDraft(data.liveAction);
+    } else if (data.clearSearch) {
+      scheduleSearch('');
+      (live.view === 'panel' ? $('panelSearch') : $('mainSearch')).focus();
+    } else if (b.id === 'searchForReferences') {
+      if (live.view === 'panel') {
+        live.panelDraft = false;
+        syncDraftLocation();
+        $('panelSearch').focus();
+      } else {
+        $('mainSearch').focus();
+      }
+    } else if (b.id === 'copyDraftMarkdown') {
+      const md = live.lastResult?.type === 'draft' ? live.lastResult.data?.markdown || '' : '';
+      if (md) copyTextWithFeedback(md, $('copyDraftStatus'));
+    } else if (b.id === 'retryPairHandoff') {
+      live.draft.pairIfOffline = true;
+      $('handoffPairIfOffline').checked = true;
+      submitDraft();
+    } else if (b.id === 'reconcilePendingHandoff') {
+      reconcilePendingHandoffs();
+    } else if (b.id === 'retrySnapshotButton') {
+      refreshSnapshot({ refresh: true });
+    } else if (b.id === 'retrySearchButton') {
+      executeLiveSearch(live.query);
+    }
+  });
+
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      if (live.view === 'panel') closePanel();
+      else openPanel();
+    }
+    if (e.key === 'Escape') {
+      if (live.view === 'panel') closePanel();
+      else if (live.draftOpen && !live.busy) {
+        live.draftOpen = false;
+        syncDraftLocation();
+      } else if (live.query) scheduleSearch('');
+    }
+    if (e.key === 'Tab' && live.view === 'panel') {
+      const focusable = [...$('palette').querySelectorAll('button,input,textarea,select,summary')].filter(el => !el.disabled && el.getClientRects().length);
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable.at(-1);
+      if (e.shiftKey && (document.activeElement === first || !$('palette').contains(document.activeElement))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (document.activeElement === last || !$('palette').contains(document.activeElement))) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  });
+
+  applyStaticLiveChrome();
+  render();
+  refreshSnapshot({ refresh: false });
+}
+
+if (isLiveMode) {
+  createLiveController();
+} else {
+  createOfflineController();
+}
+</script>
+</body>
+</html>

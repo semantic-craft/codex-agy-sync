@@ -34,6 +34,7 @@ from _workbench_sandbox import (
     validate_run_dir,
     write_json,
 )
+from codex_agy_sync.workbench.lease import default_workbench_ui_path
 
 
 DOM_VIEW_JS = (
@@ -64,6 +65,7 @@ class WorkbenchRunner:
     prototype: Path
     ab_bin: str
     timeout_s: int
+    prototype_override: Path | None = None
     env: dict[str, str] = field(default_factory=build_isolated_env)
     browser_session: str = ""
     browser_started: bool = False
@@ -74,6 +76,7 @@ class WorkbenchRunner:
     base_url: str = ""
     port: int = 0
     server_pid: int = 0
+    api_token: str = ""
 
     def __post_init__(self) -> None:
         self.browser_session = f"wb-{self.run_id}"
@@ -154,7 +157,11 @@ class WorkbenchRunner:
             self.scenarios.append(rec)
 
     def _spawn_server(self) -> dict[str, Any]:
-        argv = self.cli_args("serve", "--ui", str(self.prototype), "--port", "0", "--idle-timeout", "120")
+        argv = (
+            self.cli_args("serve", "--ui", str(self.prototype_override), "--port", "0", "--idle-timeout", "120")
+            if self.prototype_override is not None
+            else self.cli_args("serve", "--port", "0", "--idle-timeout", "120")
+        )
         self.server_proc = subprocess.Popen(
             argv, cwd=str(REPO_ROOT), env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
@@ -199,6 +206,7 @@ class WorkbenchRunner:
         m = re.search(r'<meta\s+name="workbench-token"\s+content="([^"]+)"', root_html)
         assert m, "Injected workbench token meta tag missing from /"
         token = m.group(1)
+        self.api_token = token
 
         st_send, send_body = http_call(
             f"{self.base_url}/api/send", method="POST",
@@ -340,6 +348,19 @@ class WorkbenchRunner:
         rec["checks"].append({"ime_guard_kept_hidden": ime_state["respHidden"], "draft_meta": draft_res["meta"]})
         self.capture_evidence("live-04-draft-copy", rec)
 
+    def _wait_for_receipt(self, label: str) -> dict[str, Any]:
+        res = self.wait_until(
+            label,
+            "(() => { const err = document.querySelector('#draftResponse .error-card');"
+            "if (err) return { error: err.textContent };"
+            "const card = document.querySelector('#draftResponse .receipt-card'); if (!card) return null;"
+            "const kvs = [...card.querySelectorAll('.receipt-key')].map((k,i)=>({k:k.textContent.trim(),v:card.querySelectorAll('.receipt-val')[i]?.textContent?.trim()}));"
+            "return { kvs, chips: document.querySelectorAll('#sessionChips [data-live-session]').length, hops: document.querySelectorAll('#liveHandoffChain .chain-hop').length }; })()",
+            timeout=20.0,
+        )
+        assert "error" not in res, f"Handoff returned UI error: {res}"
+        return res
+
     def scenario_05_handoff_and_refresh(self, rec: dict[str, Any]) -> None:
         self.ab("click", "#closeDrawer")
         self._select_workspace("repo-unpaired")
@@ -350,15 +371,30 @@ class WorkbenchRunner:
         unpaired_err = self.wait_until(
             "unpaired_workspace 422 error card",
             "(() => { const c = document.querySelector('#draftResponse .error-card'); const b = document.getElementById('retryPairHandoff');"
-            "return (c && b) ? { txt: c.textContent, hasRetry: !b.disabled } : null; })()",
+            "return (c && b) ? { txt: c.textContent, hasRetry: !b.disabled, btnText: b.textContent.trim() } : null; })()",
         )
-        assert "unpaired_workspace" in unpaired_err["txt"], unpaired_err
+        assert "unpaired_workspace" in unpaired_err["txt"] and unpaired_err["btnText"] == "自动配对并重试", unpaired_err
+
+        st_offline, body_offline = http_call(
+            f"{self.base_url}/api/handoff",
+            method="POST",
+            headers={"X-Workbench-Token": self.api_token, "Content-Type": "application/json"},
+            body=json.dumps({
+                "workspace": str(self.layout["ws_unpaired"]),
+                "source_id": "01960000-0000-7000-8000-00000000cc02",
+                "pair_if_offline": True,
+            }).encode("utf-8"),
+        )
+        offline_err = json.loads(body_offline)
+        assert st_offline == 409 and offline_err.get("error") == "sync_busy_lock", (st_offline, offline_err)
+
         self.ab("click", "#retryPairHandoff")
-        busy_err = self.wait_until(
-            "pair_if_offline retry hits active daemon lock guard",
-            "(() => { const c = document.querySelector('#draftResponse .error-card');"
-            "return (c && c.textContent.includes('sync_busy_lock')) ? { txt: c.textContent } : null; })()",
-        )
+        unpaired_receipt = self._wait_for_receipt("200 HandoffReceipt card on repo-unpaired via online CreateProject RPC")
+        unpaired_target_id = next((item["v"] for item in unpaired_receipt["kvs"] if item["k"] == "target_id"), "")
+        unpaired_pairing_mode = next((item["v"] for item in unpaired_receipt["kvs"] if item["k"] == "pairing_mode"), "")
+        assert unpaired_target_id and unpaired_target_id != "—", unpaired_receipt
+        assert unpaired_pairing_mode == "online_rpc", unpaired_receipt
+        assert (self.layout["agy_data_dir"] / "conversations" / f"{unpaired_target_id}.db").is_file()
 
         self.ab("click", "#closeDrawer")
         self._select_workspace("repo-paired")
@@ -370,16 +406,7 @@ class WorkbenchRunner:
         self.ab("fill", "#handoffTitle", "PKCE Stage1 Verified Handoff")
         self.ab("scrollintoview", "#submitDraft")
         self.ab("click", "#submitDraft")
-        receipt_view = self.wait_until(
-            "200 HandoffReceipt card in UI",
-            "(() => { const err = document.querySelector('#draftResponse .error-card');"
-            "if (err) return { error: err.textContent };"
-            "const card = document.querySelector('#draftResponse .receipt-card'); if (!card) return null;"
-            "const kvs = [...card.querySelectorAll('.receipt-key')].map((k,i)=>({k:k.textContent.trim(),v:card.querySelectorAll('.receipt-val')[i]?.textContent?.trim()}));"
-            "return { kvs, chips: document.querySelectorAll('#sessionChips [data-live-session]').length, hops: document.querySelectorAll('#liveHandoffChain .chain-hop').length }; })()",
-            timeout=20.0,
-        )
-        assert "error" not in receipt_view, f"Handoff returned UI error: {receipt_view}"
+        receipt_view = self._wait_for_receipt("200 HandoffReceipt card in UI")
         self.ab("scrollintoview", "#draftResponse")
         target_id = next((item["v"] for item in receipt_view["kvs"] if item["k"] == "target_id"), "")
         assert target_id and target_id != "—" and receipt_view["hops"] >= 2 and receipt_view["chips"] >= 3, receipt_view
@@ -389,7 +416,10 @@ class WorkbenchRunner:
         assert new_rec is not None and int(new_rec.get("chain_depth", 0)) >= 1, receipts
         rec["checks"].append({
             "unpaired_422_retry_present": unpaired_err["hasRetry"],
-            "retry_busy_lock_guard": "sync_busy_lock" in busy_err["txt"],
+            "unpaired_retry_button_text": unpaired_err["btnText"],
+            "strict_pair_if_offline_409_sync_busy_lock": offline_err.get("error") == "sync_busy_lock",
+            "unpaired_auto_pair_target_id": unpaired_target_id,
+            "unpaired_pairing_mode": unpaired_pairing_mode,
             "handoff_target_id": target_id,
             "chain_depth": new_rec["chain_depth"],
             "ui_session_chips": receipt_view["chips"],
@@ -433,7 +463,8 @@ class WorkbenchRunner:
 
 
 def _run_suite(args: argparse.Namespace) -> int:
-    ok_doc, doc_report = run_doctor_checks(args.prototype)
+    raw_proto = str(args.prototype) if args.prototype else str(default_workbench_ui_path())
+    ok_doc, doc_report = run_doctor_checks(raw_proto)
     if not ok_doc:
         print(json.dumps(doc_report, indent=2, ensure_ascii=False))
         return 2
@@ -457,9 +488,11 @@ def _run_suite(args: argparse.Namespace) -> int:
         },
     )
 
+    proto_resolved = Path(doc_report["prototype"]["path"])
     runner = WorkbenchRunner(
-        layout=layout, run_id=run_id, prototype=Path(doc_report["prototype"]["path"]),
+        layout=layout, run_id=run_id, prototype=proto_resolved,
         ab_bin=str(doc_report["agent_browser"]["path"]), timeout_s=max(15, int(args.timeout)),
+        prototype_override=proto_resolved if args.prototype else None,
     )
 
     def _handle_sig(_signum: int, _frame: Any) -> None:
@@ -468,7 +501,7 @@ def _run_suite(args: argparse.Namespace) -> int:
     prev_int, prev_term = signal.signal(signal.SIGINT, _handle_sig), signal.signal(signal.SIGTERM, _handle_sig)
     suite_status, failure_detail = "PASS", None
     try:
-        runner.rpc_stub = AgyLoopbackRpcStub(layout["agy_data_dir"])
+        runner.rpc_stub = AgyLoopbackRpcStub(layout["agy_data_dir"], layout["gemini_config_dir"])
         assert runner.rpc_stub.start() > 0
         runner.run_scenario("01-server-launch-status-and-security", runner.scenario_01_server_and_security)
         runner.run_scenario("02-live-hydration-and-exclusions", lambda r: runner.scenario_02_live_hydration_and_exclusions(r, seed_info))
@@ -523,9 +556,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify Stage-1 Local Workbench end-to-end.")
     sub = parser.add_subparsers(dest="command", required=True)
     p_doc = sub.add_parser("doctor", help="Read-only preflight check for live workbench verification.")
-    p_doc.add_argument("--prototype", required=True, help="External Main.html prototype artifact path.")
+    p_doc.add_argument("--prototype", required=False, default=None, help="Optional custom workbench HTML overriding the packaged default UI.")
     p_suite = sub.add_parser("suite", help="Run isolated end-to-end Stage-1 workbench suite.")
-    p_suite.add_argument("--prototype", required=True, help="External Main.html prototype artifact path.")
+    p_suite.add_argument("--prototype", required=False, default=None, help="Optional custom workbench HTML overriding the packaged default UI.")
     p_suite.add_argument("--run-dir", default=None, help="Non-existing run directory outside /tmp.")
     p_suite.add_argument("--timeout", type=int, default=60, help="Per-command timeout in seconds.")
     return parser
@@ -534,7 +567,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "doctor":
-        ok, report = run_doctor_checks(args.prototype)
+        raw_proto = str(args.prototype) if args.prototype else str(default_workbench_ui_path())
+        ok, report = run_doctor_checks(raw_proto)
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0 if ok else 2
     if args.command == "suite":

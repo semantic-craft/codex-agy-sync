@@ -188,7 +188,7 @@ def _add_handoff_subparser(subparsers: Any) -> None:
 def _add_serve_subparser(subparsers: Any) -> None:
     serve_p = subparsers.add_parser("serve", help="Start the Stage-1 read-only Local Workbench server.")
     serve_p.add_argument("--workspace", "-w", action="append", default=None, help="Seed workspace path or file:// URI (repeatable).")
-    serve_p.add_argument("--ui", type=Path, default=None, help="Path to standalone workbench HTML file.")
+    serve_p.add_argument("--ui", type=Path, default=None, help="Optional path to custom workbench HTML overriding the packaged default UI.")
     serve_p.add_argument("--port", type=int, default=8765, help="Loopback HTTP port (default: 8765; 0 picks an ephemeral port).")
     serve_p.add_argument("--idle-timeout", type=int, default=1800, help="Idle self-reclaim timeout in seconds (default: 1800; 0 disables).")
     serve_p.add_argument("--max-lifetime", type=int, default=14400, help="Maximum server lifetime in seconds (default: 14400; 0 disables).")
