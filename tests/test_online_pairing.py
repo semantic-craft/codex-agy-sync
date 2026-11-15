@@ -28,6 +28,8 @@ from codex_agy_sync import (
     TrajectoryLedger,
     TransportMode,
     diagnose_workspace_binding,
+    delete_agy_cascade_via_rpc,
+    delete_agy_project_via_rpc,
     encode_agy_create_project_request,
     execute_handoff,
     guarded_pair_workspace,
@@ -94,11 +96,13 @@ class _MockAgyServer:
         *,
         status_code: int = 200,
         on_create_project: object | None = None,
+        on_rpc: object | None = None,
     ) -> None:
         self.paths = paths
         self.secret = secret
         self.status_code = status_code
         self.on_create_project = on_create_project
+        self.on_rpc = on_rpc
         self.captured: list[dict[str, object]] = []
         self._httpd: http.server.ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -147,6 +151,15 @@ class _MockAgyServer:
                     self.end_headers()
                     self.wfile.write(resp)
                     return
+                prefix = "/exa.language_server_pb.LanguageServerService/"
+                if self.path.startswith(prefix):
+                    method = self.path[len(prefix):]
+                    if method in {"DeleteCascadeTrajectory", "JetboxDeleteSummary", "DeleteProject"}:
+                        code = int(parent.on_rpc(method, body)) if callable(parent.on_rpc) else 200
+                        self.send_response(code)
+                        self.send_header("Content-Type", "application/proto")
+                        self.end_headers()
+                        return
                 self.send_response(404)
                 self.end_headers()
 
@@ -643,3 +656,48 @@ class TestOnlinePairingRpc(unittest.TestCase):
         self.assertEqual(_req_name(srv4.captured[0]["body"]), "always-conflict")  # type: ignore[arg-type]
         self.assertEqual(_req_name(srv4.captured[1]["body"]), "always-conflict (clone-four)")  # type: ignore[arg-type]
         self.assertRegex(_req_name(srv4.captured[2]["body"]), r"^always-conflict \([0-9a-f]{8}\)$")  # type: ignore[arg-type]
+
+    def test_h_delete_agy_cascade_and_project_rpc(self) -> None:
+        cid = str(uuid.uuid4())
+        pid = str(uuid.uuid4())
+        assert self.paths.agy_cli_data_dir is not None
+        cli_brain = self.paths.agy_cli_data_dir / "brain" / cid
+        cli_brain.mkdir(parents=True)
+        (cli_brain / "note.txt").write_text("leftover", encoding="utf-8")
+
+        with _MockAgyServer(self.paths, "s-del-ok") as srv:
+            delete_agy_cascade_via_rpc(self.paths, cid)
+            delete_agy_project_via_rpc(self.paths, pid)
+
+        self.assertFalse(cli_brain.exists())
+        self.assertEqual(
+            [r["path"] for r in srv.captured],
+            [
+                "/exa.language_server_pb.LanguageServerService/DeleteCascadeTrajectory",
+                "/exa.language_server_pb.LanguageServerService/JetboxDeleteSummary",
+                "/exa.language_server_pb.LanguageServerService/DeleteProject",
+            ],
+        )
+        self.assertEqual(srv.captured[0]["body"], encode_string_field(1, cid))
+        self.assertEqual(srv.captured[1]["body"], encode_string_field(1, cid))
+        self.assertEqual(srv.captured[2]["body"], encode_string_field(1, pid))
+        self.assertTrue(all(r["csrf"] == "s-del-ok" for r in srv.captured))
+
+        with _MockAgyServer(
+            self.paths,
+            "s-del-idem",
+            on_rpc=lambda m, _b: 404 if m in {"DeleteCascadeTrajectory", "DeleteProject"} else 501,
+        ):
+            delete_agy_cascade_via_rpc(self.paths, cid)
+            delete_agy_project_via_rpc(self.paths, pid)
+
+        with _MockAgyServer(self.paths, "s-del-err", status_code=500):
+            with self.assertRaises(OnlineRpcUnavailableError):
+                delete_agy_cascade_via_rpc(self.paths, cid)
+            with self.assertRaises(OnlineRpcUnavailableError):
+                delete_agy_project_via_rpc(self.paths, pid)
+
+        with self.assertRaises(ValueError):
+            delete_agy_cascade_via_rpc(self.paths, "../escape")
+        with self.assertRaises(ValueError):
+            delete_agy_project_via_rpc(self.paths, "../escape")

@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import struct
 import time
@@ -22,6 +23,7 @@ from ..workspace import (
     WorkspacePath,
     WorkspaceRootUri,
     parse_workspace_identity,
+    validate_session_id,
 )
 from .paths_and_locks import (
     AgyDaemonEndpoint,
@@ -30,6 +32,7 @@ from .paths_and_locks import (
     PresenceWalGuard,
     has_live_unix_socket,
     unix_socket_connect_path,
+    validated_child_path,
 )
 from .store_catalog import find_readonly_agy_project_id
 
@@ -250,9 +253,23 @@ def _wait_for_agy_project_id(
         time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
 
 
-def _post_agy_create_project(endpoint: AgyDaemonEndpoint, payload: bytes, *, timeout: float) -> int:
+def _discover_agy_http_endpoint(paths: HostEnvironmentPaths) -> AgyDaemonEndpoint:
+    endpoint = PresenceWalGuard(paths).discover_agy_daemon()
+    if endpoint is None or endpoint.http_port <= 0:
+        raise OnlineRpcUnavailableError("No live Antigravity LanguageServer HTTP endpoint available.")
+    return endpoint
+
+
+def _post_agy_connect_rpc(
+    endpoint: AgyDaemonEndpoint,
+    method: str,
+    payload: bytes,
+    *,
+    timeout: float,
+    allow_codes: frozenset[int] = frozenset(),
+) -> int:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    url = f"http://127.0.0.1:{endpoint.http_port}/exa.language_server_pb.LanguageServerService/CreateProject"
+    url = f"http://127.0.0.1:{endpoint.http_port}/exa.language_server_pb.LanguageServerService/{method}"
     headers = {
         "Content-Type": "application/proto",
         "Connect-Protocol-Version": "1",
@@ -266,11 +283,17 @@ def _post_agy_create_project(endpoint: AgyDaemonEndpoint, payload: bytes, *, tim
     except urllib.error.HTTPError as exc:
         with contextlib.suppress(Exception):
             exc.close()
-        if exc.code == 409:
-            return 409
-        raise OnlineRpcUnavailableError(f"Antigravity CreateProject RPC failed with HTTP {exc.code}.") from None
+        if exc.code in allow_codes:
+            return exc.code
+        raise OnlineRpcUnavailableError(f"Antigravity {method} RPC failed with HTTP {exc.code}.") from None
     except (urllib.error.URLError, TimeoutError, OSError):
-        raise OnlineRpcUnavailableError("Antigravity CreateProject RPC connection failed.") from None
+        raise OnlineRpcUnavailableError(f"Antigravity {method} RPC connection failed.") from None
+
+
+def _post_agy_create_project(endpoint: AgyDaemonEndpoint, payload: bytes, *, timeout: float) -> int:
+    return _post_agy_connect_rpc(
+        endpoint, "CreateProject", payload, timeout=timeout, allow_codes=frozenset({409}),
+    )
 
 
 def _existing_agy_project_names(paths: HostEnvironmentPaths) -> set[str]:
@@ -310,9 +333,7 @@ def register_agy_project_via_rpc(
 ) -> str:
     """Register `workspace` in live Antigravity LanguageServer via `CreateProject` RPC."""
     ws_path, ws_uri = parse_workspace_identity(workspace)
-    endpoint = PresenceWalGuard(paths).discover_agy_daemon()
-    if endpoint is None or endpoint.http_port <= 0:
-        raise OnlineRpcUnavailableError("No live Antigravity LanguageServer HTTP endpoint available.")
+    endpoint = _discover_agy_http_endpoint(paths)
     existing = _lookup_agy_project(paths, ws_uri, registry)
     if existing is not None:
         return str(existing)
@@ -328,6 +349,27 @@ def register_agy_project_via_rpc(
         if concurrent_existing is not None:
             return str(concurrent_existing)
     raise OnlineRpcUnavailableError("Antigravity CreateProject RPC failed with HTTP 409.")
+
+
+def delete_agy_cascade_via_rpc(paths: HostEnvironmentPaths, cascade_id: str, *, timeout: float = 5.0) -> None:
+    """Delete an Antigravity cascade trajectory via official LanguageServer RPC and clean any CLI brain dir."""
+    cid = validate_session_id(cascade_id, label="cascade_id")
+    endpoint = _discover_agy_http_endpoint(paths)
+    payload = encode_string_field(1, cid)
+    _post_agy_connect_rpc(endpoint, "DeleteCascadeTrajectory", payload, timeout=timeout, allow_codes=frozenset({404}))
+    with contextlib.suppress(OnlineRpcUnavailableError):
+        _post_agy_connect_rpc(endpoint, "JetboxDeleteSummary", payload, timeout=timeout, allow_codes=frozenset({404, 501}))
+    if paths.agy_cli_data_dir is not None:
+        cli_brain = validated_child_path(paths.agy_cli_data_dir, "brain", cid, label="cascade_id")
+        if cli_brain.is_dir():
+            shutil.rmtree(cli_brain, ignore_errors=True)
+
+
+def delete_agy_project_via_rpc(paths: HostEnvironmentPaths, project_id: str, *, timeout: float = 5.0) -> None:
+    """Delete an Antigravity registered project via official `DeleteProject` LanguageServer RPC."""
+    pid = validate_session_id(project_id, label="project_id")
+    endpoint = _discover_agy_http_endpoint(paths)
+    _post_agy_connect_rpc(endpoint, "DeleteProject", encode_string_field(1, pid), timeout=timeout, allow_codes=frozenset({404}))
 
 
 def _codex_project_matches_workspace(project: Any, target_path: WorkspacePath) -> str | None:

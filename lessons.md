@@ -48,25 +48,6 @@
 - 验证点：运行 `./scripts/check`（核对 `test_3a` 与 `test_5b` 测试通过，并在本机只读探测 `PresenceWalGuard.discover_codex_daemon()` 命中软链套接字）。
 - 复发记录：Seen 1x (2026-11-12)，在全仓真实宿主库只读实测评审与 Unit 3/5 在线 RPC 联调时核实并固化。
 
-## 记录模板
-
-复制下列模板新增条目，已有同类条目则更新原条。未知的提交、原因或验收结果明确写“待核实”。
-同一事件的多次修复、测试重跑不增加复发次数，只统计有独立证据的再次发生。
-记录保留可复用的原因与证据定位，凭据、私人资料及完整日志留在各自获准的位置。
-
-```markdown
-### <教训标题>
-
-**<一句话说明下次应遵守的规则。>**
-
-- 标签：<#验收 #凭据 #交接 这类跨项目归类词，1 至 3 个>
-- 起因与后果：<触发条件、原因、用户可感知的影响，未知则写待核实。>
-- 修复与证据：<修复提交或 PR、回归检查与实际验收证据。>
-- 正确做法（Done right）：<下次的具体做法，关联防复发代码或检查。>
-- 验证点：<写明之后怎么核对这条已改到位。>
-- 复发记录：Seen <N>x (<YYYY-MM-DD>)，<每次独立发生的证据。>
-```
-
 ### Desktop 续聊必须在多轮真实上下文中验收
 
 - 2026-11-14 实测发现，Codex rollout 缺少 `session_meta.cli_version` 时原生 fork 拒绝导入；仅有 `response_item` 时模型历史存在，但 Desktop 的 `thread/read` 消息列表为空。编码时补版本和对应 `event_msg`，并以真实 app-server 回读验证。
@@ -109,7 +90,7 @@
 
 - 标签：#在线RPC #项目配对 #并发安全
 - 起因与后果：早期 `guarded_pair_workspace` 仅支持离线持锁写 `projects/<uuid>.json` 与 `state_5.sqlite` / `.codex-global-state.json`，任意一端 Desktop 打开时触发 `--pair-if-offline` 会因活跃守护进程锁直接返回 `409 sync_busy_lock`，导致工作台一键交接与日常开箱配对受阻。
-- 修复与证据：提交 `1a96450` 新增 `bridge/project_rpc.py`，对 Antigravity 编码 `exa.language_server_pb.CreateProjectRequest`（含 `exa.project_pb.Project` 与 `backend`）投递 `POST /exa.language_server_pb.LanguageServerService/CreateProject` 并轮询等待 `~/.gemini/config/projects/<uuid>.json` 落地（最长 0.25s）；对 Codex 通过 Unix Socket WebSocket 先分页调用 `project/list` 去重，未命中再调用 `project/create`（传 `idempotencyKey`、`name`、`roots: [{"path": ...}]`、`metadata: None`）。`registry.py` 引入 `pair_workspace_with_mode`（`pair` 与 `handoff --auto-pair` 默认在线优先，离线端再回退安全写盘），同时保留 `--pair-if-offline` 的严格离线语义（互斥且在线端被阻塞时仍报 `sync_busy_lock`）。由 `tests/test_online_pairing.py` 与真实双端 Desktop E2E（`$HOME/Projects/_artifacts/codex-agy-sync/verify-live-desktop-20261115T034055Z-live/summary.json`，`pairing_mode: "online_rpc"`）验证通过。临时验收项目在 Codex 侧通过宿主清理 RPC 回收的扩展用法待核实（当前 `project_rpc.py` 仅实现 `project/list` 与 `project/create`）。
+- 修复与证据：提交 `1a96450` 新增 `bridge/project_rpc.py`，对 Antigravity 编码 `exa.language_server_pb.CreateProjectRequest`（含 `exa.project_pb.Project` 与 `backend`）投递 `POST /exa.language_server_pb.LanguageServerService/CreateProject` 并轮询等待 `~/.gemini/config/projects/<uuid>.json` 落地（最长 0.25s）；对 Codex 通过 Unix Socket WebSocket 先分页调用 `project/list` 去重，未命中再调用 `project/create`（传 `idempotencyKey`、`name`、`roots: [{"path": ...}]`、`metadata: None`）。`registry.py` 引入 `pair_workspace_with_mode`（`pair` 与 `handoff --auto-pair` 默认在线优先，离线端再回退安全写盘），同时保留 `--pair-if-offline` 的严格离线语义（互斥且在线端被阻塞时仍报 `sync_busy_lock`）。由 `tests/test_online_pairing.py` 与真实双端 Desktop E2E（`$HOME/Projects/_artifacts/codex-agy-sync/verify-live-desktop-20261115T043314Z-live/summary.json`，`pairing_mode: "online_rpc"`）验证通过。同时已核实并补充双方官方清理 RPC 约定：Antigravity 通过 `LanguageServerService/DeleteCascadeTrajectory`（辅助尽最大努力 `JetboxDeleteSummary` 与 `agy_cli_data_dir/brain/<cid>` 清理，`delete_agy_cascade_via_rpc`）与 `LanguageServerService/DeleteProject`（`delete_agy_project_via_rpc`）回收；Codex 通过 `codex app-server` `thread/archive` 与 `project/delete` 回收。
 - 正确做法（Done right）：默认使用 `pair` 或 `handoff --auto-pair` 让活跃端走 RPC、离线端走持锁写盘，在 `HandoffReceipt.pairing_mode` 如实记录路径；严禁在桌面进程存活时退回裸写数据库。
 - 验证点：运行 `./scripts/check`（核对 `tests/test_online_pairing.py` 与 `tests/test_workbench_packaging.py`），并在 `workbench_verify.py` 场景 `05-one-click-handoff-and-refresh` 验证 `pair_if_offline: true` 返回 `409 sync_busy_lock` 而 `#retryPairHandoff` 通过在线 `CreateProject` RPC 返回 `200`（`pairing_mode == "online_rpc"`）。
 - 补充说明（重名工作区 409 自动消歧）：实测 Antigravity 在线 `LanguageServerService/CreateProject` 会对 `~/.gemini/config/projects/*.json` 中的 `project.name` 执行全局唯一校验；当 git worktree、同目录名克隆或临时 E2E 目录出现重名时服务端返回 `HTTP 409 already_exists`。`register_agy_project_via_rpc` 通过预扫描现有名称、按需追加父目录名或短 UUID 后缀自动消歧，并在收到 `409` 时优先复查并发写入的同工作区注册记录后再回退次选名称。
@@ -121,7 +102,7 @@
 
 - 标签：#交接恢复 #幂等 #安全清理
 - 起因与后果：`handoff` 为防重复生成第二份目标会话，在确认目标已就绪前先落盘 `pending` 收据。若传输或卸载等待期间进程中断、超时，后续重跑会在未创建新会话前拒绝并抛出 `handoff_pending`，用户需要一个既能认领已成功落盘的目标、又能安全清理失败残余的收敛入口。
-- 修复与证据：提交 `b62a407` 新增 `bridge/handoff_reconcile.py` 与 `handoff --reconcile`（支持 `--source-id` 过滤与 `--dry-run` 预览）及 `POST /api/handoff/reconcile` / UI `#reconcilePendingHandoff`。核对全程持 `open_handoff_lock`：对 AGY 目标比对 `GetCascadeTrajectory` RPC 步数与暂存 `.db` / `ledger_seed_fingerprint` 回合数（离线回退 `conversations/<id>.db` + `annotations/<id>.pbtxt`）；对 Codex 目标比对 `thread/read` RPC 或 rollout + `state_5.sqlite` `threads` 记录（无 `target_id` 时用 `_codex_orphan_matches_receipt` 排查匿名候选）。按结果分别执行 `"promoted"`（更新为 `status: "ready"` 并按 `_validated_staging_dir` 防越界清理暂存目录）、`"cleared"`（确认目标未生成后安全删除收据与暂存目录）或 `"unresolved"`（部分落盘、活跃 WAL 锁阻塞 RPC 或存在匿名候选时保留原 `pending` 收据，不引入伪造 `failed` 状态）。由 `tests/test_handoff_convergence.py` 验证通过。
+- 修复与证据：提交 `b62a407` 新增 `bridge/handoff_reconcile.py` 与 `handoff --reconcile`（支持 `--source-id` 过滤与 `--dry-run` 预览）及 `POST /api/handoff/reconcile` / UI `#reconcilePendingHandoff`。核对全程持 `open_handoff_lock`：对 AGY 目标比对 `GetCascadeTrajectory` RPC 步数与暂存 `.db` / `ledger_seed_fingerprint` 回合数（离线回退 `conversations/<id>.db` + `annotations/<id>.pbtxt`）；对 Codex 目标比对 `thread/read` RPC 或 rollout + `state_5.sqlite` `threads` 记录（无 `target_id` 时用 `_codex_orphan_matches_receipt` 排查匿名候选）。按结果分别执行 `"promoted"`（更新为 `status: "ready"` 并通过 `handoff_store.cleanup_handoff_staging_dir` 防越界清理暂存目录）、`"cleared"`（确认目标未生成后安全删除收据与暂存目录）或 `"unresolved"`（部分落盘、活跃 WAL 锁阻塞 RPC 或存在匿名候选时保留原 `pending` 收据，不引入伪造 `failed` 状态）。另外 `handoff.py` 在交接正常达成 `status == "ready"` 时也会自动调用 `cleanup_handoff_staging_dir` 清理 `handoffs/staging/<key>`，仅在 `status == "pending"` 失败恢复场景保留暂存目录供 `--reconcile` 核对。由 `tests/test_handoff_convergence.py` 与 `tests/test_desktop_handoff.py` 验证通过。
 - 正确做法（Done right）：先用 `--reconcile --dry-run` 或 UI `#reconcilePendingHandoff` 核对目标端真实状态；只有确认完整种子回合已就绪才晋升 `ready`，只有确认目标完全不存在才清理收据并做路径逃逸校验。
 - 验证点：运行 `./scripts/check`（核对 `tests/test_handoff_convergence.py` 与 `POST /api/handoff/reconcile` 回归）。
 - 复发记录：Seen 1x (2026-11-15)，在 `handoff` 失败恢复收敛中落地验证。

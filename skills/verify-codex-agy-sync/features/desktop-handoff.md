@@ -1,6 +1,6 @@
 # Desktop session handoff
 
-Desktop handoff exports completed history from one host into a brand-new Desktop session on the opposite host without mutating running SQLite stores, supporting automatic direction inference, `--latest` target selection, `--chain` multi-hop tracking, `--pick` interactive selection, `--auto-pair` (online-first RPC pairing) / `--pair-if-offline`, `--include-interrupted` stopped-turn rescue, `agy_cli_data_dir` transcript mirroring, `--reconcile` pending recovery, and structured JSON error reporting on exit code `2`.
+Desktop handoff exports completed history from one host into a brand-new Desktop session on the opposite host without mutating running SQLite stores, supporting automatic direction inference, `--latest` target selection, `--chain` multi-hop tracking, `--pick` interactive selection, `--auto-pair` (online-first RPC pairing) / `--pair-if-offline`, `--include-interrupted` stopped-turn rescue, `agy_cli_data_dir` transcript mirroring, `--reconcile` pending recovery, automatic `handoffs/staging/<key>` cleanup upon `status: "ready"`, and structured JSON error reporting on exit code `2`.
 
 ## Sub-features
 
@@ -10,7 +10,7 @@ Desktop handoff exports completed history from one host into a brand-new Desktop
 - `handoff-latest-and-chain` picks the newest non-subagent completed session that is not an untouched baton target (`--latest`) or advances/re-handoffs along the active workspace chain (`--chain`, returning `no_op` when neither target nor source advanced).
 - `handoff-pick-tty-guard` renders numbered choices solely on `stderr` in interactive TTY sessions so `stdout` remains pure JSON, and fails fast in non-TTY runs with flag guidance (`--latest`, `--chain`, `--source-id`, `--pick`).
 - `handoff-include-interrupted-and-cli-mirror` lets `--include-interrupted` rescue a stopped trailing interrupted turn (still rejecting active streaming turns), while AGY imports also mirror `brain/<id>/.system_generated/logs/transcript.jsonl` into `--agy-cli-data-dir` (`$ANTIGRAVITY_CLI_DATA_DIR` or sibling `~/.gemini/antigravity-cli` when present).
-- `handoff-reconcile` (`--reconcile [--source-id <uuid>] [--dry-run]`, or `POST /api/handoff/reconcile` / UI `#reconcilePendingHandoff`) verifies pending workspace receipts against target host RPC and read-only storage, reporting `promoted` (`status: "ready"` + staging cleanup), `cleared` (absent target receipt + validated staging cleanup), and `unresolved` (partial/locked/unattributed entries preserved intact).
+- `handoff-reconcile-and-staging-cleanup` automatically removes `handoffs/staging/<key>` when a handoff completes with `status: "ready"`, preserves staging only while `status == "pending"`, and exposes `--reconcile [--source-id <uuid>] [--dry-run]` (`POST /api/handoff/reconcile` / UI `#reconcilePendingHandoff`) to verify pending workspace receipts against target host RPC and read-only storage (`promoted` with staging cleanup, `cleared` with validated staging cleanup, or `unresolved` preserved intact).
 
 ## How to get to it (user POV)
 

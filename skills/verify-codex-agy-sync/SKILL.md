@@ -11,25 +11,14 @@ Run the repository gate `./scripts/check` alongside this skill whenever source o
 
 ## Live Stage-1 workbench route
 
-For the live Stage-1 Local Workbench (`codex-agy-sync serve`) using the packaged default UI (`src/codex_agy_sync/workbench/ui/index.html`, or an explicit external `--prototype <path>` override), follow [Live Stage-1 workbench](./features/live-workbench.md).
+For the live Stage-1 Local Workbench (`codex-agy-sync serve`) using the packaged default UI (`src/codex_agy_sync/workbench/ui/index.html`, or an explicit `--prototype <path>` custom UI HTML override), follow [Live Stage-1 workbench](./features/live-workbench.md).
 
 ```bash
 python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py doctor
 python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py suite
 ```
 
-Pass `--prototype "$PROTOTYPE"` only when verifying an external prototype HTML instead of the packaged UI. This isolated suite runs `./bin/codex-agy-sync serve`, validates token/loopback security gates (`401`/`404` and `0o600` token-free lease), seeds paired/unpaired/excluded sandbox stores plus an ephemeral loopback AGY Connect-RPC stub (`GetCascadeTrajectory` and `CreateProject`, `target_daemon_mode: "sandbox_loopback_rpc_stub"`), and drives cross-host search (with on-demand hydration), copy-only drafts, IME guards, and one-click handoff (including `422 unpaired_workspace` -> `auto_pair` `online_rpc` retry and `pair_if_offline` `409 sync_busy_lock` rejection) in `agent-browser` before `--stop` and sandbox cleanup. Visual semantics remain `REVIEW_REQUIRED` until screenshots are reviewed, and real Desktop apps remain `NOT_RUN` here (run a separate live-host pass when validating live Desktop apps).
-
-## UI prototype route
-
-For the external workspace HTML prototype, follow [UI prototype verification](./features/ui-prototype.md). Supply the artifact explicitly. It stays outside the repository.
-
-```bash
-python3 skills/verify-codex-agy-sync/scripts/ui_prototype_verify.py doctor --prototype "$PROTOTYPE"
-python3 skills/verify-codex-agy-sync/scripts/ui_prototype_verify.py suite --prototype "$PROTOTYPE"
-```
-
-This independent browser suite records simulated UI behavior. It runs independently of the CLI suite below. `./scripts/check` does not run this prototype end-to-end suite. After the run, the verification Agent reads the screenshots and records a separate visual review. The script leaves visual semantics as `REVIEW_REQUIRED`, and actual Desktop behavior and message delivery as `NOT_RUN`.
+Pass `--prototype "$CUSTOM_UI"` only when verifying a custom UI HTML file instead of the packaged UI. This isolated suite runs `./bin/codex-agy-sync serve`, validates token/loopback security gates (`401`/`404` and `0o600` token-free lease), seeds paired/unpaired/excluded sandbox stores plus an ephemeral loopback AGY Connect-RPC stub (`GetCascadeTrajectory` and `CreateProject`, `target_daemon_mode: "sandbox_loopback_rpc_stub"`), and drives cross-host search (with on-demand hydration), copy-only drafts, IME guards, and one-click handoff (including `422 unpaired_workspace` -> `auto_pair` `online_rpc` retry and `pair_if_offline` `409 sync_busy_lock` rejection) in `agent-browser` before `--stop` and sandbox cleanup. Visual semantics remain `REVIEW_REQUIRED` until screenshots are reviewed, and real Desktop apps remain `NOT_RUN` here (run a separate live-host pass when validating live Desktop apps).
 
 ## Quick suite
 
@@ -129,10 +118,6 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py cleanup --ru
 - `hold-lock --run-dir <dir> --cascade-id <id> --slug <slug> -- <codex-agy-sync args...>`
 - `cleanup --run-dir <dir>`
 - `suite [--run-dir <dir>] [--run-id <id>]`
-
-`skills/verify-codex-agy-sync/scripts/ui_prototype_verify.py` is an executable Python 3 script supporting two subcommands:
-- `doctor --prototype <path>`
-- `suite --prototype <path> [--run-dir <dir>] [--timeout <seconds>]`
 
 `skills/verify-codex-agy-sync/scripts/workbench_verify.py` (with helper `_workbench_sandbox.py`) is an executable Python 3 script for live Stage-1 workbench verification (`codex-agy-sync serve`) supporting two subcommands:
 - `doctor [--prototype <path>]`

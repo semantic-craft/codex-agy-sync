@@ -1,6 +1,6 @@
 # Architecture rationale (`codex-agy-sync`)
 
-This document describes the offline synchronization engine. For Desktop handoff through new native sessions, see [Desktop 按需交接](../README.md#desktop-按需交接). That path preserves tool history as text rather than replaying host runtime state.
+This document describes the architecture of `codex-agy-sync`, covering the `A2 + B2 + C1` bidirectional synchronization engine, Desktop handoff pipeline, online project registration and cleanup RPCs, and the Stage-1 Local Workbench (`codex-agy-sync serve`). Desktop handoff preserves visible history and flattened tool summaries across newly allocated native sessions rather than replaying host runtime state.
 
 ## Problem
 
@@ -54,7 +54,7 @@ The package under `src/codex_agy_sync/` is organized into a strict 6-tier downwa
 
 1. **Tier 0 (`_wire.py`, `workspace.py`, `payloads.py`): Wire Primitives, Workspace Identity, and Tool Payloads.**
    - `_wire.py` owns the strict 64-bit Protobuf varint encoder/decoder, length-delimited bounds checking, `UnknownWireField` preservation, and ISO-8601 `google.protobuf.Timestamp` helpers.
-   - `workspace.py` centralizes branded IDs (`CascadeId`, `CodexThreadId`, `WorkspacePath`, `WorkspaceRootUri`, `AgyProjectId`, `CodexProjectId`, `CodexLegacyProjectId`), `FORBIDDEN_AGY_PROJECT_IDS`, `HostKind`, `AgyGuiSafeSource`, `CsrfSecret` redaction, workspace canonicalization, and sensitive path exclusions.
+   - `workspace.py` centralizes branded IDs (`CascadeId`, `CodexThreadId`, `WorkspacePath`, `WorkspaceRootUri`, `AgyProjectId`, `CodexProjectId`, `CodexLegacyProjectId`), `FORBIDDEN_AGY_PROJECT_IDS`, `HostKind`, `AgyGuiSafeSource`, `CsrfSecret` redaction, workspace canonicalization, session ID validation (`validate_session_id`), and sensitive path exclusions.
    - `payloads.py` defines all 16 typed `CanonicalToolPayload` variants plus `OpaqueToolPayload` and `normalize_tool_file_path`.
 
 2. **Tier 1 (`events.py`, `ledger.py`): Canonical Event Model, Ledger, and `B2` Rescue.**
@@ -68,39 +68,20 @@ The package under `src/codex_agy_sync/` is organized into a strict 6-tier downwa
    - `rollout.py` and `rpc_thread.py` stream `.jsonl` and zstd-compressed `.jsonl.zst` Codex rollouts (`compress_zstd_rollout_bytes`, `decompress_zstd_rollout_bytes`) and decode `codex app-server` `thread/read` objects.
    - `projections.py` encodes and decodes `CascadeTrajectorySummary`, `TrajectoryMetadata`, `Annotations`, and `SummariesState` protobufs.
 
-4. **Tier 3 (`bridge/`): Dual-Mode `A2` Bridge Subpackage.**
-   - `paths_and_locks.py` resolves runtime host paths (`HostEnvironmentPaths`), discovers live daemons and symlinked macOS Codex Unix sockets (`PresenceWalGuard`, `is_pid_alive`), holds exclusive `flock` locks (`acquire_offline_write_locks`), and creates rollback-capable `BackupManifest` snapshots.
-   - `store_catalog.py` provides shared SQLite DDL helpers and read-only store/lineage/sidecar readers across hosts.
-   - `registry.py` manages `ProjectRegistry` pairing, `diagnose_workspace_binding`, `guarded_pair_workspace`, and read-only session discovery.
+4. **Tier 3 (`bridge/`): Dual-Mode `A2` Bridge, Online RPC, and Desktop Handoff Subpackage.**
+   - `paths_and_locks.py` resolves runtime host paths (`HostEnvironmentPaths`, including optional `agy_cli_data_dir`), discovers live daemons and symlinked macOS Codex Unix sockets (`PresenceWalGuard`, `is_pid_alive`, `is_sqlite_shm_wal_locked`), holds exclusive `flock` locks (`acquire_offline_write_locks`), and creates rollback-capable `BackupManifest` snapshots.
+   - `store_catalog.py` provides shared SQLite DDL helpers and read-only store, lineage, and sidecar readers across hosts.
+   - `registry.py` manages `ProjectRegistry` pairing (`pair_workspace_with_mode`, `guarded_pair_workspace`), `diagnose_workspace_binding`, and read-only session discovery.
+   - `rpc.py` implements proxy-free loopback Connect RPC `fetch_agy_trajectory_via_rpc` and Unix-socket WebSocket `UnixWebSocketClient` / `fetch_codex_thread_via_rpc`.
+   - `project_rpc.py` handles Antigravity `CreateProject` RPC (with pre-scan duplicate-name disambiguation on HTTP 409), official Antigravity cleanup RPCs (`delete_agy_cascade_via_rpc` calling `DeleteCascadeTrajectory` + best-effort `JetboxDeleteSummary` + `agy_cli_data_dir/brain/<cid>` cleanup, and `delete_agy_project_via_rpc` calling `DeleteProject`), and Codex `project/list` + `project/create` over `codex app-server`.
    - `state_machine.py` provides monotonic RFC 9562 `generate_uuid7()` and pure `CursorForkStateMachine.evaluate` transitions.
-   - `rpc.py` implements proxy-free loopback Connect RPC `fetch_agy_trajectory_via_rpc` and Unix-socket WebSocket `fetch_codex_thread_via_rpc`, plus `native_codex.py` rollout import.
-   - `transport.py`, `rescue_and_fork.py`, and `sync.py` implement `DefaultHostTransport`, single-pipeline transactional writes (`_execute_write_plan`), automatic `BackupManifest.restore()` rollback, `NoOpTransition` self-healing, and symmetric `FORK_NEW_SESSION` branching.
-   - `handoff_store.py`, `handoff.py`, and `handoff_resolve.py` handle receipt/candidate scanning, Desktop handoff publication, and shared request resolution (`execute_handoff`).
+   - `native_codex.py` handles Codex rollout import and lifecycle orchestration over `codex app-server` (`thread/fork`, project assignment, unsubscribe, and unload wait).
+   - `transport.py`, `rescue_and_fork.py`, and `sync.py` implement `DefaultHostTransport`, single-pipeline transactional writes, automatic `BackupManifest.restore()` rollback, `NoOpTransition` self-healing, and symmetric `FORK_NEW_SESSION` branching (`SyncBridge`).
+   - `handoff_store.py`, `handoff.py`, `handoff_resolve.py`, and `handoff_reconcile.py` manage receipt/candidate scanning, staging cleanup helpers (`validated_handoff_staging_dir`, `cleanup_handoff_staging_dir`, auto-called on `status == "ready"` while preserved when `pending`), Desktop handoff publication (`handoff_session`), shared request resolution (`execute_handoff`), and pending-receipt reconciliation (`reconcile_workspace_handoffs`).
 
-5. **Tier 4 (`workbench/`) & Tier 5 (`cli.py`, `__init__.py`, `__main__.py`): Local Workbench and `C1` CLI.**
-   - `workbench/` implements local workspace discovery (`discovery.py`), SQLite/rollout FTS indexing (`indexer.py`), `0o600` lease lifecycle (`lease.py`), token-authenticated loopback HTTP handlers (`handler.py`), and `WorkbenchService`/`WorkbenchServer` delegating Desktop handoff to `execute_handoff`.
-   - `cli.py`, `__init__.py`, and `bin/codex-agy-sync` expose `C1` subcommands (`pair`, `status`, `inspect`, `sync-session`, `sync-workspace`, `handoff`, `serve`).
-
-## Synthesis decision
-
-Two structurally distinct candidates were evaluated during Arena Phase B by an independent Cross-Judge (`flash` subagent `c8dcd101-0a6e-4fdd-aed0-59b9de60b69e`).
-
-| Rubric Criterion | Candidate 1 (`pro`) Turn-Aggregate | Candidate 2 (`inherit`) Event-Ledger & Codec Table | Verdict & Key Difference |
-| --- | :---: | :---: | --- |
-| 1. Domain & Invariant Encoding | 6 / 10 | **10 / 10** | C2 brands all 12 IDs/indices via `NewType`, redacts `CsrfSecret`, omits CLI source `17` from `AgyGuiSafeSource`, and enforces `CodexThreadSummaryProjection(archived=0, preview != '')`. |
-| 2. Project Pairing Completeness | 7 / 10 | **10 / 10** | C2 models all 3 project IDs (`AgyProjectId`, `CodexProjectId`, `CodexLegacyProjectId`) and canonicalizes `(WorkspacePath, WorkspaceRootUri)`. |
-| 3. Trajectory IR & Companion Fidelity | 7 / 10 | **10 / 10** | C2's 4-index `TrajectoryLedger` resolves 1-to-N (`step 15` -> N `step 132`) fanout in O(1) while preserving exact `StepIndex` for `transcript.jsonl` coalescing. |
-| 4. Dual-Mode Sync & Fork State Machine | 8 / 10 | **9 / 10** | C2 models `flock(LOCK_EX \| LOCK_NB)` on `presence/<id>.lock` and PID liveness, while C1 contributed `BackupManifest` and pre-planned fork slices. |
-| 5. Interface Depth & Boundary Discipline | 7 / 10 | **10 / 10** | C2's 4-method `SyncBridge` hides 6 stores and keeps wire envelopes private to `codecs/` and `bridge/`. |
-| 6. Reader Load & Agent-Safety | 7 / 10 | **10 / 10** | C2 eliminates hand-synced `if/elif` chains via `STEP_WIRE_TABLE` and `TOOL_CODEC_TABLE`. |
-| **Total** | **42 / 60** | **59 / 60** | **Base Selected Is Candidate 2** |
-
-Five grafts from Candidate 1 were folded into the Candidate 2 base.
-1. **Lossless Wire Envelopes.** `UnknownWireField` and `HostExtensionEnvelope` preserve unrecognized protobuf tags and Codex `encrypted_content` / `world_state` blobs across round-trips.
-2. **Deterministic Multi-Store Title Resolver.** `resolve_canonical_title` enforces `sidebar_visibility_rules.json` precedence across `.pbtxt`, summary protobufs, SQLite tables, checkpoints, and first user queries.
-3. **Transactional `BackupManifest`.** `PresenceWalGuard.create_offline_backup` records SHA-256 checksums, created-file targets, and `restore()` rollback hooks before every offline mutation.
-4. **Pre-Planned Fork Slice.** `DivergedConflictTransition` carries `common_ancestor_watermark`, `preallocated_fork_session_id`, and `fork_events_to_apply`.
-5. **Rich Tool Payloads and Offline Hub Summary Rebuild.** `CanonicalToolPayload` covers all 16 `exa.cortex.core.tools.*` messages and `SummariesStateProjection` rebuilds `agyhub_summaries_proto.pb` when Hub is offline.
+5. **Tier 4 (`workbench/`) & Tier 5 (`cli.py`, `__init__.py`, `__main__.py`): Stage-1 Local Workbench and `C1` CLI.**
+   - `workbench/` implements domain models (`models.py`), union-find workspace discovery (`discovery.py`), single-pass preloaded SQLite host catalog scanning (`catalog.py`), tiered on-demand search indexing with WAL-aware `(mtime_ns, size, wal_mtime_ns, wal_size)` caching (`indexer.py`), `0o600` token-free lease persistence & packaged UI resolution (`lease.py`), service orchestration (`service.py`), token/loopback HTTP dispatch (`handler.py`), loopback HTTP daemon (`server.py`), and packaged built-in live UI (`ui/index.html`).
+   - `cli.py`, `__init__.py`, `__main__.py`, and `bin/codex-agy-sync` expose `C1` subcommands (`pair`, `status`, `inspect`, `sync-session`, `sync-workspace`, `handoff`, `serve`) and structured exit-code-2 JSON diagnostics.
 
 ## Tradeoffs accepted
 
@@ -117,14 +98,11 @@ Five grafts from Candidate 1 were folded into the Candidate 2 base.
 
 ## Implementation reconciliation
 
-All six implementation units are reconciled with the modular package layout and enforced by `./scripts/check`.
-- **Unit 1 (`_wire.py`, `payloads.py`, `ledger.py`).** Consolidated all Protobuf wire primitives into `_wire.py` (`< 220` LOC) and purified `ledger.py` summary projections.
-- **Unit 2 (`codecs/`).** Split the codec layer into focused submodules (`< 700` LOC each) with true `(encode_fn, decode_fn)` dispatch, lossless `scope_items` / `thinking_signature` / `step_type = 17` preservation, and `.jsonl.zst` streaming.
-- **Unit 3 (`ledger.py`, `bridge/registry.py`, `bridge/sync.py`, `cli.py`).** Tightened orthogonal `SubagentLineage.is_subagent` detection and added `B2` `--include-interrupted` turn sealing with peer sync-back cursor reconciliation.
-- **Unit 4 (`bridge/paths_and_locks.py`, `bridge/state_machine.py`, `bridge/transport.py`, `bridge/sync.py`, `bridge/rescue_and_fork.py`).** Added held `flock` write critical sections, automatic `BackupManifest.restore()` rollback, `NoOpTransition` companion self-heal (including `antigravity-cli/brain`), and single-call symmetric UUIDv7 `FORK_NEW_SESSION` branching.
-- **Unit 5 (`bridge/rpc.py`, `codecs/rpc_thread.py`, `bridge/paths_and_locks.py`, `bridge/state_machine.py`, `bridge/transport.py`, `bridge/sync.py`).** Implemented `A2` loopback Connect RPC (`GetCascadeTrajectory`) and Unix-socket WebSocket JSON-RPC (`codex app-server` `thread/read`), active-run deferral (`cascade_run_status in {2, 3, 4}`, active Codex threads, and POSIX `F_GETLK` `-shm` WAL locks), honest `SyncReceipt.transport_used` reporting, and `C1` CLI documentation alignment.
-- **Unit 6 (`tests/`, `skills/verify-codex-agy-sync/`, `scripts/check`).** Decomposed the test suite into modular `< 800` LOC files, added the 7-scenario isolated sandbox `suite` runner, and hardened all 9 multi-model adversarial review edge cases.
-- **Architectural Coherence Refactor.** Extracted Tier 0 `workspace.py`, Tier 1 `events.py`, `bridge/store_catalog.py`, and `bridge/handoff_store.py`; promoted `workbench/{discovery,lease,handler}.py` and shared `execute_handoff` / `compress_zstd_rollout_bytes` / `is_pid_alive`; reconciled Codex sidebar rules to `cwd_non_empty` (`schema/sidebar_visibility_rules.json`); and added the 5-part AST coherence gate in `scripts/check_architecture.py` plus `tests/test_architecture_coherence.py`.
+The modular 6-tier package layout is enforced by `./scripts/check` (`scripts/check_architecture.py` and `tests/test_architecture_coherence.py`):
+- **Core wire & codec layers (Tiers 0-2):** `_wire.py` (`< 220` LOC), `workspace.py`, `payloads.py`, `events.py`, `ledger.py`, and `codecs/*` (`< 700` LOC per submodule) unify table-driven protobuf codecs (`STEP_WIRE_TABLE`, `TOOL_CODEC_TABLE`), `.jsonl`/`.jsonl.zst` compression/streaming, and companion projections.
+- **Bridge, pairing, and handoff convergence (Tier 3):** `bridge/*` (`< 700` LOC per submodule, `< 450` LOC for `rpc.py`) separates read-only catalog inspection (`store_catalog.py`), lock guards and backups (`paths_and_locks.py`), offline/hybrid/online project registration and cleanup RPCs (`registry.py`, `project_rpc.py`), offline incremental sync (`state_machine.py`, `transport.py`, `rescue_and_fork.py`, `sync.py`), and Desktop handoff + pending reconciliation + automatic ready-stage cleanup (`handoff_store.py`, `handoff.py`, `handoff_resolve.py`, `handoff_reconcile.py`, `native_codex.py`).
+- **Stage-1 Local Workbench & CLI (Tiers 4-5):** `workbench/` pairs single-pass catalog scanning (`catalog.py`, `discovery.py`) and tiered search indexing (`indexer.py`) with loopback token auth (`handler.py`, `server.py`, `lease.py`), packaged live UI (`workbench/ui/index.html`, with mock prototype fallback removed), and `cli.py` structured exit-code-2 JSON diagnostics.
+- **Verification & hygiene gates:** `./scripts/check` validates schema parity, `?mode=ro` read-only real-host decoding, AST module/tier boundaries, zero hardcoded home paths, zero CSRF leaks, and full unit/integration regressions alongside isolated sandbox verification suites (`control_sync_verify.py` and `workbench_verify.py`).
 
 ## Open questions and risks
 

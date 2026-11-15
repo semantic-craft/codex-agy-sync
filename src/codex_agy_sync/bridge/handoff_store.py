@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 from typing import AbstractSet, Any, Iterator, Literal, Sequence
 
@@ -560,3 +561,26 @@ def resolve_chain_tip(
     win_tip, win_nodes = max(components, key=lambda c: (c[0][0].created_at_iso, c[0][1], c[0][0].chain_depth, c[0][2]))
     _raise_if_nodes_pending(win_nodes, by_src, by_tgt)
     return win_tip[0]
+
+
+def validated_handoff_staging_dir(staging_root: Path, staging_path_str: str) -> Path | None:
+    """Resolve and validate a staging directory path inside `staging_root`, or return `None`."""
+    if not staging_path_str:
+        return None
+    raw = Path(staging_path_str)
+    resolved_root = staging_root.resolve(strict=False)
+    resolved_stage = raw.resolve(strict=False)
+    if resolved_stage == resolved_root or not resolved_stage.is_relative_to(resolved_root):
+        return None
+    rel = resolved_stage.relative_to(resolved_root)
+    return validated_child_path(resolved_root, *rel.parts, label="staging_path")
+
+
+def cleanup_handoff_staging_dir(staging_root: Path, staging_path_str: str) -> bool:
+    """Best-effort delete a validated staging directory; return `True` if removed."""
+    safe_stage = validated_handoff_staging_dir(staging_root, staging_path_str)
+    if safe_stage is not None and safe_stage.exists():
+        with contextlib.suppress(OSError):
+            shutil.rmtree(safe_stage)
+        return not safe_stage.exists()
+    return False

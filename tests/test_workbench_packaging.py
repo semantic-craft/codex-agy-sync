@@ -39,7 +39,6 @@ class WorkbenchPackagingTest(unittest.TestCase):
             "handoffIncludeInterrupted",
             "reconcilePendingHandoff",
             "createLiveController",
-            "createOfflineController",
             "auto_pair",
             "include_interrupted",
             "/api/handoff/reconcile",
@@ -47,6 +46,9 @@ class WorkbenchPackagingTest(unittest.TestCase):
             "preserveDraftState: true",
         ):
             self.assertIn(token, html_text)
+
+        for retired in ("createOfflineController", "Atlas", "Orbit", "模拟发送给 AGY"):
+            self.assertNotIn(retired, html_text)
 
         self.assertNotIn("/Users/", html_text)
         urls = re.findall(r"https?://[^\s\"'<>]+", html_text)
