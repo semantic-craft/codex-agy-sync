@@ -102,3 +102,36 @@
 - 正确做法（Done right）：所有只读 SQLite 探针通过 `run_readonly_sqlite_query` 在纯连接查询窗口内校验文件指纹，默认样本挑选以主库与 `-wal` 静默超过 120 秒为优先，禁止让只读完整性快照跨越后续 CPU 解码或磁盘伴生文件读取。
 - 验证点：连续两次运行 `./scripts/check`（核对 `[2/5]` 只读无损解码与 `readonly_integrity` 字段均为 `True` 且全量 5 步检查通过）。
 - 复发记录：Seen 2x (2026-11-14, 2026-11-15)，在活跃宿主会话并发写入期间执行只读探针及 `./scripts/check` 时暴露竞态误报。
+
+### 运行中宿主的跨端项目配对应优先走在线注册 RPC 并区分配对模式
+
+**当 Antigravity 或 Codex Desktop 处于运行态且持有活跃 WAL 锁时，项目配对必须通过宿主在线注册 RPC（`LanguageServerService/CreateProject` 与 `codex app-server` `project/list` + `project/create`）完成，并区分 `already_paired` / `online_rpc` / `hybrid` / `offline_locked` 四类模式。**
+
+- 标签：#在线RPC #项目配对 #并发安全
+- 起因与后果：早期 `guarded_pair_workspace` 仅支持离线持锁写 `projects/<uuid>.json` 与 `state_5.sqlite` / `.codex-global-state.json`，任意一端 Desktop 打开时触发 `--pair-if-offline` 会因活跃守护进程锁直接返回 `409 sync_busy_lock`，导致工作台一键交接与日常开箱配对受阻。
+- 修复与证据：提交 `1a96450` 新增 `bridge/project_rpc.py`，对 Antigravity 编码 `exa.language_server_pb.CreateProjectRequest`（含 `exa.project_pb.Project` 与 `backend`）投递 `POST /exa.language_server_pb.LanguageServerService/CreateProject` 并轮询等待 `~/.gemini/config/projects/<uuid>.json` 落地（最长 0.25s）；对 Codex 通过 Unix Socket WebSocket 先分页调用 `project/list` 去重，未命中再调用 `project/create`（传 `idempotencyKey`、`name`、`roots: [{"path": ...}]`、`metadata: None`）。`registry.py` 引入 `pair_workspace_with_mode`（`pair` 与 `handoff --auto-pair` 默认在线优先，离线端再回退安全写盘），同时保留 `--pair-if-offline` 的严格离线语义（互斥且在线端被阻塞时仍报 `sync_busy_lock`）。由 `tests/test_online_pairing.py` 与真实双端 Desktop E2E（`$HOME/Projects/_artifacts/codex-agy-sync/verify-live-desktop-20261115T034055Z-live/summary.json`，`pairing_mode: "online_rpc"`）验证通过。临时验收项目在 Codex 侧通过宿主清理 RPC 回收的扩展用法待核实（当前 `project_rpc.py` 仅实现 `project/list` 与 `project/create`）。
+- 正确做法（Done right）：默认使用 `pair` 或 `handoff --auto-pair` 让活跃端走 RPC、离线端走持锁写盘，在 `HandoffReceipt.pairing_mode` 如实记录路径；严禁在桌面进程存活时退回裸写数据库。
+- 验证点：运行 `./scripts/check`（核对 `tests/test_online_pairing.py` 与 `tests/test_workbench_packaging.py`），并在 `workbench_verify.py` 场景 `05-one-click-handoff-and-refresh` 验证 `pair_if_offline: true` 返回 `409 sync_busy_lock` 而 `#retryPairHandoff` 通过在线 `CreateProject` RPC 返回 `200`（`pairing_mode == "online_rpc"`）。
+- 复发记录：Seen 1x (2026-11-15)，在 Day-1 可用性收敛与工作台一键配对重试联调中补齐。
+
+### 滞留 `pending` 交接收据须经目标存活性与种子核对后晋升或清理
+
+**当交接在导入或等待确认阶段中断并遗留 `status: "pending"` 收据时，不得盲目覆写或忽略，而应通过 `handoff --reconcile` / `POST /api/handoff/reconcile` 核对目标宿主 RPC 与磁盘状态后再决定晋升、清理或保留。**
+
+- 标签：#交接恢复 #幂等 #安全清理
+- 起因与后果：`handoff` 为防重复生成第二份目标会话，在确认目标已就绪前先落盘 `pending` 收据。若传输或卸载等待期间进程中断、超时，后续重跑会在未创建新会话前拒绝并抛出 `handoff_pending`，用户需要一个既能认领已成功落盘的目标、又能安全清理失败残余的收敛入口。
+- 修复与证据：提交 `b62a407` 新增 `bridge/handoff_reconcile.py` 与 `handoff --reconcile`（支持 `--source-id` 过滤与 `--dry-run` 预览）及 `POST /api/handoff/reconcile` / UI `#reconcilePendingHandoff`。核对全程持 `open_handoff_lock`：对 AGY 目标比对 `GetCascadeTrajectory` RPC 步数与暂存 `.db` / `ledger_seed_fingerprint` 回合数（离线回退 `conversations/<id>.db` + `annotations/<id>.pbtxt`）；对 Codex 目标比对 `thread/read` RPC 或 rollout + `state_5.sqlite` `threads` 记录（无 `target_id` 时用 `_codex_orphan_matches_receipt` 排查匿名候选）。按结果分别执行 `"promoted"`（更新为 `status: "ready"` 并按 `_validated_staging_dir` 防越界清理暂存目录）、`"cleared"`（确认目标未生成后安全删除收据与暂存目录）或 `"unresolved"`（部分落盘、活跃 WAL 锁阻塞 RPC 或存在匿名候选时保留原 `pending` 收据，不引入伪造 `failed` 状态）。由 `tests/test_handoff_convergence.py` 验证通过。
+- 正确做法（Done right）：先用 `--reconcile --dry-run` 或 UI `#reconcilePendingHandoff` 核对目标端真实状态；只有确认完整种子回合已就绪才晋升 `ready`，只有确认目标完全不存在才清理收据并做路径逃逸校验。
+- 验证点：运行 `./scripts/check`（核对 `tests/test_handoff_convergence.py` 与 `POST /api/handoff/reconcile` 回归）。
+- 复发记录：Seen 1x (2026-11-15)，在 `handoff` 失败恢复收敛中落地验证。
+
+### 宿主机规模多工作区扫描必须单次预加载表并实行分层按需水合
+
+**工作台快照构建在 100+ 工作区规模下严禁按工作区 `O(W * N)` 重复扫描 `state_5.sqlite` / `conversation_summaries.db` 或全量解压 rollout / PB，必须采用单次预加载分桶与 `eager_turn_budget` 分层按需水合。**
+
+- 标签：#性能 #只读索引 #架构
+- 起因与后果：早期 `WorkbenchIndexer` 为每个工作区逐一重复查询全库并全量解析所有会话回合（含 Codex `.jsonl.zst` 解压与 Antigravity Protobuf 解码）。在本机真实规模（实测 109 个工作区、409 个工作项、`state_5.sqlite` `threads` 5334 行、`conversation_summaries.db` `conversation_summaries` 1466 行）下，按工作区乘以全库会话数的重复扫描与全量解码会造成工作台冷启动严重卡顿甚至数十分钟级阻塞。
+- 修复与证据：提交 `89b6280` 新增 `workbench/catalog.py` 并重构 `workbench/discovery.py` 与 `workbench/indexer.py`：`load_preloaded_host_tables` 在单次快照内仅以 `?mode=ro` 各打开一次 `state_5.sqlite` 与 `conversation_summaries.db`；`scan_host_catalog` 单次扫描按工作区桶归并，跳过非当前工作区 DB、子代理与已索引 rollout 避免重复解压缩，并以 `(mtime_ns, size)` 缓存 Antigravity 元数据；`WorkbenchIndexer` 默认 `eager_turn_budget=24` 优先水合多端聚簇、含交接收据、种子工作区及最新 24 条独立工作区卡片，其余卡片生成 `_build_unhydrated_work_card` 元数据骨架，待调用 `get_work(work_id)`、`get_snapshot(workspace_id=...)` 或 `get_snapshot_for_search(workspace_id=..., scope=...)` 时再并行按需水合并缓存。本机实测冷启动 `WorkbenchIndexer(paths).get_snapshot()` 降至约 `3.10s`，并由 `tests/test_indexer_scalability.py` 锁定 SQLite 打开次数与懒水合全覆盖语义。
+- 正确做法（Done right）：全局扫描逻辑集中在 `catalog.py` 与 `discovery.py` 的单次 `O(1)` 表预加载 + `O(N)` 分桶中，列表冷启动只解码预算内最新回合，详情/单工作区/全文搜索再按需水合，禁止把工作区循环写回全量表读或全量 rollout 解码路径。
+- 验证点：运行 `python3 -m unittest tests.test_indexer_scalability -v` 及 `./scripts/check`，并可在真实宿主执行只读 `WorkbenchIndexer(HostEnvironmentPaths.discover()).get_snapshot()` 核对秒级冷启动。
+- 复发记录：Seen 1x (2026-11-15)，在真实宿主机大规模工作区工作台冷启动实测中发现并重构根治。
