@@ -133,3 +133,14 @@
 - 正确做法（Done right）：所有 `.app` 产物先在沙盒/暂存目录完成 `Info.plist` 键完整性与 `codesign` 校验再做原子交换；复用型 `NSWindow` 的事件监听器绑定 AppKit 窗口通知而非仅靠 SwiftUI `onDisappear`。
 - 验证点：运行 `./scripts/check` 与 `python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py suite`（核对 `bundle_id`、`AppIcon.icns` 及活跃 Key Window 设置页截图）。
 - 复发记录：Seen 1x (2026-11-16)，由三模型 `/interrogate` 对抗审查在 `4a5a6a9` 捕获并修复。
+
+### 性能优化改动必须守住流式异常边界、PEP 562 命名空间、连接隔离与 `kill(pid, SIGKILL)` 进程组守卫
+
+**Zstd 流式读取须将 `EOFError`/`ZstdError` 归一化为 `ValueError` 并开启跨帧读取，PEP 562 `__getattr__` 须同时映射子模块名且 CLI 异常匹配不能依赖 `sys.modules.get`，回环 `HTTPConnection` 与非阻塞子进程收割须严格隔离线程并校验 `pid > 0`。**
+
+- 标签：#性能 #流式契约 #并发安全
+- 起因与后果：PR `#15` 至 `#17` 的三模型 `/interrogate` 对抗审查实测复现了四类隐蔽回归：（1）`compression.zstd.open` 在空文件或损坏 `.jsonl.zst` 上抛出 `EOFError` 或 `ZstdError` 而非 `(OSError, ValueError)`，会导致 `menubar-feed` 与 `WorkbenchIndexer` 整路崩溃；（2）root/`bridge`/`workbench` `__init__.py` 改用 PEP 562 `__getattr__` 后漏掉 `_LAZY_SUBMODULES`，导致 `codex_agy_sync.bridge` 等常规属性访问报 `AttributeError`，且 `cli.py` 依赖 `sys.modules.get` 匹配异常会让 `EmptySessionError` 等 `ValueError` 子类退化为 `invalid_argument`；（3）`_post_agy_proto` 在复用 Keep-Alive socket 上把 `TimeoutError`（属 `OSError` 子类）重连重试成双倍阻塞，且线程间传递可变 `HTTPConnection` 破坏线程独占；（4）Swift `AsyncProcessCoordinator` 在 `process.processIdentifier == 0` 时调用 `kill(0, SIGKILL)` 会误杀调用方整个进程组，子孙进程继承管道写端还会让 `terminationHandler` 后继续阻塞至全局超时。
+- 修复与证据：PR `#17`（提交 `9ab6f4b`）在 `codecs/rollout.py` 统一捕获 zstd 错误转为 `ValueError` 并传入 `read_across_frames=True`；在三个 `__init__.py` 补充 `_LAZY_SUBMODULES` 并在 `cli.py` 改用 `_load_attr` + MRO 匹配结构化异常；在 `bridge/rpc.py` 先拦截并直接重抛 `TimeoutError`，在 `workbench/menubar_feed.py` 为批量 `GetAllCascadeTrajectories` 工作线程传入 `conn=None`；在 `macos/Sources/CodexAgyHandoffCore/CLIClient.swift` 对 `runProcessAsync` 与 `runProcessSync` 统一加 `pid > 0` 守卫及进程退出后有界 `drainGraceSeconds` 管道收尾，并补充回归测试后通过 `./scripts/check`（`168` Python + `27/27` Swift XCTest）与 `menubar_verify.py suite`。
+- 正确做法（Done right）：每次流式/懒加载/连接池/异步进程性能优化后，必须用真实损坏流、包属性遍历、超时复现和 3 模型 `/interrogate` 验过边界再合并。
+- 验证点：运行 `./scripts/check`（核对 `test_wire_and_ledger.py`、`test_workbench_packaging.py`、`test_menubar_rpc_batch.py` 及 `MenubarViewModelTests.testRunProcessAsyncDrainGraceCompletesPromptlyWithGrandchildHoldingStdout`）。
+- 复发记录：Seen 1x (2026-11-16)，由 PR `#15`–`#17` 全量性能波次的三模型 `/interrogate` 审查捕获并修复。
