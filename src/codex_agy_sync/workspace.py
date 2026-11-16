@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import functools
 import os
 from pathlib import Path
 import re
@@ -132,28 +133,52 @@ def _lexical_abs(path: Path) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(path))))
 
 
-def _is_path_equal_or_under(cand: Path, root: Path) -> bool:
+@functools.lru_cache(maxsize=32)
+def _excluded_roots_for_home(home_str: str) -> tuple[tuple[Path, tuple[str, ...]], ...]:
+    home_path = Path(home_str)
+    home_lex = _lexical_abs(home_path)
+    home_res = home_path.resolve(strict=False)
+    is_darwin = sys.platform == "darwin"
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for sub in ("Archive", ".private_keys"):
+        for base in (home_lex, home_res):
+            raw_root = base / sub
+            for root in (raw_root, raw_root.resolve(strict=False)):
+                if root not in seen:
+                    seen.add(root)
+                    roots.append(root)
+    return tuple((r, tuple(p.casefold() for p in r.parts) if is_darwin else ()) for r in roots)
+
+
+def _is_path_under_precomputed(
+    cand: Path,
+    cand_folded: tuple[str, ...],
+    root: Path,
+    root_folded: tuple[str, ...],
+) -> bool:
     if cand == root or cand.is_relative_to(root):
         return True
     if sys.platform == "darwin":
-        cand_parts = tuple(p.casefold() for p in cand.parts)
-        root_parts = tuple(p.casefold() for p in root.parts)
-        return len(cand_parts) >= len(root_parts) and cand_parts[: len(root_parts)] == root_parts
+        if not cand_folded:
+            cand_folded = tuple(p.casefold() for p in cand.parts)
+        if not root_folded:
+            root_folded = tuple(p.casefold() for p in root.parts)
+        return len(cand_folded) >= len(root_folded) and cand_folded[: len(root_folded)] == root_folded
     return False
+
+
+def _candidate_variants_for_exclusion(candidate: Path) -> tuple[tuple[Path, tuple[str, ...]], ...]:
+    lex = _lexical_abs(candidate)
+    res = candidate.resolve(strict=False)
+    variants = (lex,) if res == lex else (lex, res)
+    is_darwin = sys.platform == "darwin"
+    return tuple((p, tuple(part.casefold() for part in p.parts) if is_darwin else ()) for p in variants)
 
 
 def is_sensitive_excluded_path(candidate: Path, home_dir: Path) -> bool:
     """Return `True` when `candidate` or its resolved target sits under `Archive` or `.private_keys`."""
-    cand_variants = (_lexical_abs(candidate), candidate.resolve(strict=False))
-    home_abs = _lexical_abs(home_dir)
-    for sub in ("Archive", ".private_keys"):
-        raw_root = home_abs / sub
-        res_root = raw_root.resolve(strict=False)
-        for root in (raw_root, res_root):
-            for cand in cand_variants:
-                if _is_path_equal_or_under(cand, root):
-                    return True
-    return False
+    return is_excluded_for_homes(candidate, (home_dir,))
 
 
 def candidate_home_dirs(paths_or_codex_home: Any = None) -> tuple[Path, ...]:
@@ -206,7 +231,16 @@ def raw_spec_to_candidate_path(raw: str | Path) -> Path | None:
 
 
 def is_excluded_for_homes(candidate: Path, homes: Sequence[Path]) -> bool:
-    return any(is_sensitive_excluded_path(candidate, home) for home in homes)
+    if not homes:
+        return False
+    cand_variants = _candidate_variants_for_exclusion(candidate)
+    for home in homes:
+        home_key = str(home) if home.is_absolute() and "~" not in str(home) else str(_lexical_abs(home))
+        for root, root_folded in _excluded_roots_for_home(home_key):
+            for cand, cand_folded in cand_variants:
+                if _is_path_under_precomputed(cand, cand_folded, root, root_folded):
+                    return True
+    return False
 
 
 __all__ = [
