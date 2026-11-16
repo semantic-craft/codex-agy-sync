@@ -138,7 +138,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let store = PreferencesStore(defaults: defaults, loginItemManager: loginMock)
 
         XCTAssertEqual(store.preferences.customCLIPath, "/custom/legacy/codex-agy-sync")
-        XCTAssertEqual(store.preferences.menuBarIconStyle, .relayBridge)
+        XCTAssertTrue(store.preferences.showAttentionDotOnStatusIcon)
         XCTAssertEqual(store.preferences.hotKey, .defaultShortcut)
         XCTAssertEqual(store.preferences.hotKey.keyCode, 4)
         XCTAssertEqual(store.preferences.hotKey.carbonModifiers, 6144)
@@ -146,7 +146,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertTrue(store.preferences.activateTargetAppAfterHandoff)
         XCTAssertEqual(store.preferences.recentFeedLimit, 6)
 
-        store.setMenuBarIconStyle(.pulseBolt)
         store.setShowAttentionDot(false)
         store.setHotKeyBehavior(.togglePanelOnly)
         store.setActivateTargetAppAfterHandoff(false)
@@ -163,16 +162,16 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(customShortcut.displayString, "⌃⇧K")
         store.setHotKey(customShortcut)
 
-        XCTAssertEqual(defaults.string(forKey: PreferencesStore.menuBarIconStyleDefaultsKey), "pulse_bolt")
-
         let reloaded = PreferencesStore(defaults: defaults, loginItemManager: loginMock)
-        XCTAssertEqual(reloaded.preferences.menuBarIconStyle, .pulseBolt)
         XCTAssertFalse(reloaded.preferences.showAttentionDotOnStatusIcon)
         XCTAssertEqual(reloaded.preferences.hotKey, customShortcut)
         XCTAssertEqual(reloaded.preferences.hotKeyBehavior, .togglePanelOnly)
         XCTAssertFalse(reloaded.preferences.activateTargetAppAfterHandoff)
         XCTAssertEqual(reloaded.preferences.recentFeedLimit, 8)
         XCTAssertEqual(reloaded.preferences.localRepoPathForSync, "/repos/codex-agy-sync")
+
+        reloaded.setShowAttentionDot(true)
+        XCTAssertTrue(reloaded.preferences.showAttentionDotOnStatusIcon)
 
         reloaded.resetCustomCLIPath()
         XCTAssertNil(reloaded.preferences.customCLIPath)
@@ -196,49 +195,39 @@ final class PreferencesAndUpdateTests: XCTestCase {
         )
     }
 
-    func testMenuBarIconRendererDrawsAllFourStylesAndAttentionDot() throws {
-        var styleSignatures = Set<[UInt8]>()
+    func testMenuBarIconRendererDrawsForwardProgressIconAndAttentionDot() throws {
+        let img = MenuBarIconRenderer.image(showAttentionDot: false)
+        XCTAssertTrue(img.isTemplate)
+        XCTAssertEqual(img.size, NSSize(width: 18, height: 18))
+        XCTAssertEqual(img.accessibilityDescription, "对话接力")
 
-        for style in MenuBarIconStyle.allCases {
-            let img = MenuBarIconRenderer.image(for: style, showAttentionDot: false)
-            XCTAssertTrue(img.isTemplate)
-            XCTAssertEqual(img.size, NSSize(width: 18, height: 18))
+        let baseRep = try XCTUnwrap(
+            MenuBarIconRenderer.renderBitmap(showAttentionDot: false, pixelSize: 36)
+        )
+        let dotRep = try XCTUnwrap(
+            MenuBarIconRenderer.renderBitmap(showAttentionDot: true, pixelSize: 36)
+        )
 
-            let baseRep = try XCTUnwrap(
-                MenuBarIconRenderer.renderBitmap(for: style, showAttentionDot: false, pixelSize: 36)
-            )
-            let dotRep = try XCTUnwrap(
-                MenuBarIconRenderer.renderBitmap(for: style, showAttentionDot: true, pixelSize: 36)
-            )
-
-            var opaqueCount = 0
-            var signature: [UInt8] = []
-            signature.reserveCapacity(36 * 36)
-
-            for y in 0..<36 {
-                for x in 0..<36 {
-                    let alpha = UInt8(((baseRep.colorAt(x: x, y: y)?.alphaComponent ?? 0) * 255.0).rounded())
-                    signature.append(alpha)
-                    if alpha > 24 {
-                        opaqueCount += 1
-                    }
+        var opaqueCount = 0
+        for y in 0..<36 {
+            for x in 0..<36 {
+                let alpha = UInt8(((baseRep.colorAt(x: x, y: y)?.alphaComponent ?? 0) * 255.0).rounded())
+                if alpha > 24 {
+                    opaqueCount += 1
                 }
             }
-
-            XCTAssertGreaterThan(opaqueCount, 60, "Style \(style.rawValue) rendered too few pixels")
-            styleSignatures.insert(signature)
-
-            // NSBitmapImageRep.colorAt(x:y:) uses top-down Y (0 = top, 35 = bottom).
-            // Unflipped point (14.6, 3.4) maps to pixel x ≈ 29, y ≈ 36 - 7 = 29.
-            let dotCenterAlpha = dotRep.colorAt(x: 29, y: 29)?.alphaComponent ?? 0
-            XCTAssertGreaterThan(dotCenterAlpha, 0.85, "Attention dot missing at bottom-right for \(style.rawValue)")
-
-            // Halo at radius ~3.0pt from (14.6, 3.4), e.g. point (11.7, 3.4) -> pixel x = 23, y = 29.
-            let haloAlpha = dotRep.colorAt(x: 23, y: 29)?.alphaComponent ?? 1.0
-            XCTAssertLessThan(haloAlpha, 0.15, "Clear halo not cut around dot for \(style.rawValue)")
         }
 
-        XCTAssertEqual(styleSignatures.count, MenuBarIconStyle.allCases.count)
+        XCTAssertGreaterThan(opaqueCount, 60, "Forward progress icon rendered too few pixels")
+
+        // NSBitmapImageRep.colorAt(x:y:) uses top-down Y (0 = top, 35 = bottom).
+        // Unflipped point (14.6, 3.4) maps to pixel x ≈ 29, y ≈ 36 - 7 = 29.
+        let dotCenterAlpha = dotRep.colorAt(x: 29, y: 29)?.alphaComponent ?? 0
+        XCTAssertGreaterThan(dotCenterAlpha, 0.85, "Attention dot missing at bottom-right")
+
+        // Halo at radius ~3.0pt from (14.6, 3.4), e.g. point (11.7, 3.4) -> pixel x = 23, y = 29.
+        let haloAlpha = dotRep.colorAt(x: 23, y: 29)?.alphaComponent ?? 1.0
+        XCTAssertLessThan(haloAlpha, 0.15, "Clear halo not cut around dot")
     }
 
     @MainActor

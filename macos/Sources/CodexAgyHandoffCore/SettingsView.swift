@@ -4,7 +4,6 @@ import SwiftUI
 
 public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
     case general
-    case appearance
     case updates
 
     public var id: String { rawValue }
@@ -13,8 +12,6 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .general:
             return "常规与接力"
-        case .appearance:
-            return "图标与外观"
         case .updates:
             return "版本与同步更新"
         }
@@ -24,8 +21,6 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .general:
             return "slider.horizontal.3"
-        case .appearance:
-            return "sparkles.rectangle.stack"
         case .updates:
             return "arrow.triangle.2.circlepath.circle"
         }
@@ -64,8 +59,6 @@ public struct SettingsView: View {
                 switch selectedTab {
                 case .general:
                     generalTab
-                case .appearance:
-                    appearanceTab
                 case .updates:
                     updatesTab
                 }
@@ -358,44 +351,6 @@ public struct SettingsView: View {
                         }
                     }
                 }
-            }
-        }
-    }
-
-    private var appearanceTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            settingsCard {
-                HStack(spacing: 14) {
-                    Image(nsImage: NSApp.applicationIconImage)
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: 48, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: 11))
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("CodexAgyHandoff")
-                            .font(.system(size: 15, weight: .semibold))
-                        Text("v\(updateViewModel.appVersion) · 双轨接力桥应用图标与自适应单色模板状态栏图标")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }
-            }
-
-            settingsCard {
-                Text("菜单栏状态图标样式")
-                    .font(.system(size: 13, weight: .semibold))
-
-                let columns = [
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10),
-                ]
-                LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(MenuBarIconStyle.allCases) { style in
-                        iconStyleCard(style)
-                    }
-                }
 
                 Divider()
 
@@ -421,70 +376,6 @@ public struct SettingsView: View {
                     .accessibilityLabel("存在未完成回复或待确认对话时显示状态栏圆点")
                 }
             }
-        }
-    }
-
-    private func iconStyleCard(_ style: MenuBarIconStyle) -> some View {
-        let isSelected = preferencesStore.preferences.menuBarIconStyle == style
-        let previewImage = MenuBarIconRenderer.image(
-            for: style,
-            showAttentionDot: preferencesStore.preferences.showAttentionDotOnStatusIcon
-        )
-
-        return Button {
-            preferencesStore.setMenuBarIconStyle(style)
-        } label: {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(width: 36, height: 36)
-                    Image(nsImage: previewImage)
-                        .resizable()
-                        .interpolation(.high)
-                        .renderingMode(.template)
-                        .foregroundStyle(.primary)
-                        .frame(width: 20, height: 20)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 5) {
-                        Text(style.displayName)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.primary)
-                        if isSelected {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Color.accentColor)
-                        }
-                    }
-                    Text(style.subtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 0)
-            }
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected ? Color.accentColor.opacity(0.11) : Color.primary.opacity(0.035))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(
-                        isSelected ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.10),
-                        lineWidth: isSelected ? 1.4 : 0.8
-                    )
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(FlatSurfaceButtonStyle())
-        .focusEffectDisabled()
-        .accessibilityLabel("菜单栏图标：\(style.displayName)")
-        .accessibilityAction {
-            preferencesStore.setMenuBarIconStyle(style)
         }
     }
 

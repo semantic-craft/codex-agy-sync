@@ -22,7 +22,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private var keyMonitor: Any?
     private var layoutRefreshScheduled = false
     private var panelLayoutRefreshScheduled = false
-    private var lastIconState: (style: MenuBarIconStyle, showDot: Bool)?
+    private var lastShowAttentionDot: Bool?
     private var lastToolTip: String?
     private var cancellables = Set<AnyCancellable>()
 
@@ -361,17 +361,13 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private func updateStatusButtonAppearance() {
         guard let button = statusItem.button else { return }
         let prefs = viewModel.preferencesStore.preferences
-        let style = prefs.menuBarIconStyle
         let showDot = prefs.showAttentionDotOnStatusIcon && viewModel.needsAttentionBadge
-        if button.image == nil || lastIconState?.style != style || lastIconState?.showDot != showDot {
-            let icon = MenuBarIconRenderer.image(
-                for: style,
-                showAttentionDot: showDot
-            )
+        if button.image == nil || lastShowAttentionDot != showDot {
+            let icon = MenuBarIconRenderer.image(showAttentionDot: showDot)
             icon.accessibilityDescription = "对话接力"
             button.image = icon
             button.setAccessibilityLabel("对话接力")
-            lastIconState = (style: style, showDot: showDot)
+            lastShowAttentionDot = showDot
         }
         let shortcutSuffix = prefs.hotKey.isEnabled ? " (\(prefs.hotKey.displayString))" : ""
         let newToolTip = "对话接力\(shortcutSuffix)"

@@ -3,45 +3,6 @@ import Carbon.HIToolbox
 import Foundation
 import ServiceManagement
 
-public enum MenuBarIconStyle: String, Codable, CaseIterable, Sendable, Identifiable {
-    case relayBridge = "relay_bridge"
-    case pulseBolt = "pulse_bolt"
-    case twinArrows = "twin_arrows"
-    case syncOrbit = "sync_orbit"
-
-    public var id: String { rawValue }
-
-    public var displayName: String {
-        switch self {
-        case .relayBridge:
-            return "接力双轨"
-        case .pulseBolt:
-            return "切端闪电"
-        case .twinArrows:
-            return "双向穿梭"
-        case .syncOrbit:
-            return "同频双环"
-        }
-    }
-
-    public var subtitle: String {
-        switch self {
-        case .relayBridge:
-            return "双竖轨与S弯接力桥"
-        case .pulseBolt:
-            return "极速切端与无缝续接"
-        case .twinArrows:
-            return "双端互导对向箭头"
-        case .syncOrbit:
-            return "双宿主交叠同频环"
-        }
-    }
-
-    public var accessibilityDescription: String {
-        "对话接力（\(displayName)）"
-    }
-}
-
 public enum HotKeyBehavior: String, Codable, CaseIterable, Sendable, Identifiable {
     case togglePanelOnly = "toggle_panel"
     case instantPrimaryRescue = "instant_rescue"
@@ -198,7 +159,6 @@ public struct HotKeyShortcut: Codable, Equatable, Sendable {
 public struct AppPreferences: Codable, Equatable, Sendable {
     public static let supportedFeedLimits: [Int] = [4, 6, 8]
 
-    public var menuBarIconStyle: MenuBarIconStyle
     public var showAttentionDotOnStatusIcon: Bool
     public var hotKey: HotKeyShortcut
     public var hotKeyBehavior: HotKeyBehavior
@@ -208,7 +168,6 @@ public struct AppPreferences: Codable, Equatable, Sendable {
     public var localRepoPathForSync: String?
 
     public init(
-        menuBarIconStyle: MenuBarIconStyle = .relayBridge,
         showAttentionDotOnStatusIcon: Bool = true,
         hotKey: HotKeyShortcut = .defaultShortcut,
         hotKeyBehavior: HotKeyBehavior = .instantPrimaryRescue,
@@ -217,7 +176,6 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         customCLIPath: String? = nil,
         localRepoPathForSync: String? = nil
     ) {
-        self.menuBarIconStyle = menuBarIconStyle
         self.showAttentionDotOnStatusIcon = showAttentionDotOnStatusIcon
         self.hotKey = hotKey
         self.hotKeyBehavior = hotKeyBehavior
@@ -229,7 +187,6 @@ public struct AppPreferences: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.menuBarIconStyle = try container.decodeIfPresent(MenuBarIconStyle.self, forKey: .menuBarIconStyle) ?? .relayBridge
         self.showAttentionDotOnStatusIcon = try container.decodeIfPresent(Bool.self, forKey: .showAttentionDotOnStatusIcon) ?? true
         self.hotKey = try container.decodeIfPresent(HotKeyShortcut.self, forKey: .hotKey) ?? .defaultShortcut
         self.hotKeyBehavior = try container.decodeIfPresent(HotKeyBehavior.self, forKey: .hotKeyBehavior) ?? .instantPrimaryRescue
@@ -297,7 +254,6 @@ public final class NoOpLoginItemManager: LoginItemManaging, @unchecked Sendable 
 @MainActor
 public final class PreferencesStore: ObservableObject {
     public nonisolated static let preferencesDefaultsKey = "appPreferences"
-    public nonisolated static let menuBarIconStyleDefaultsKey = "menuBarIconStyle"
     public nonisolated static let prefsSuiteEnvKey = "MENUBAR_PREFS_SUITE"
     public nonisolated static let disableLoginItemEnvKey = "MENUBAR_DISABLE_LOGIN_ITEM"
 
@@ -363,7 +319,6 @@ public final class PreferencesStore: ObservableObject {
         var next = preferences
         transform(&next)
         next = AppPreferences(
-            menuBarIconStyle: next.menuBarIconStyle,
             showAttentionDotOnStatusIcon: next.showAttentionDotOnStatusIcon,
             hotKey: next.hotKey,
             hotKeyBehavior: next.hotKeyBehavior,
@@ -375,10 +330,6 @@ public final class PreferencesStore: ObservableObject {
         guard next != preferences else { return }
         preferences = next
         persist(next)
-    }
-
-    public func setMenuBarIconStyle(_ style: MenuBarIconStyle) {
-        update { $0.menuBarIconStyle = style }
     }
 
     public func setShowAttentionDot(_ enabled: Bool) {
@@ -468,7 +419,6 @@ public final class PreferencesStore: ObservableObject {
         {
             defaults.set(jsonObject, forKey: Self.preferencesDefaultsKey)
         }
-        defaults.set(value.menuBarIconStyle.rawValue, forKey: Self.menuBarIconStyleDefaultsKey)
         if let cliPath = value.customCLIPath, !cliPath.isEmpty {
             defaults.set(cliPath, forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
         } else {

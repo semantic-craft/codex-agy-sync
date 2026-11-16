@@ -100,7 +100,7 @@ for sym in ("__version__", "OnlineRpcUnavailableError", "AgyRpcReadResult", "Cod
 pyproject_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("pyproject.toml").read_text(encoding="utf-8"), re.M)
 assert pyproject_match is not None, "Missing version in pyproject.toml"
 pyproject_ver = pyproject_match.group(1)
-assert pkg.__version__ == pyproject_ver == "0.4.0", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
+assert pkg.__version__ == pyproject_ver == "0.4.1", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
 build_sh_src = pathlib.Path("scripts/build_menubar_app.sh").read_text(encoding="utf-8")
 assert f"\"CFBundleShortVersionString\": \"{pyproject_ver}\"" not in build_sh_src and f"\"{pyproject_ver}\"" not in build_sh_src, "build_menubar_app.sh must not hardcode CFBundleShortVersionString"
 assert "pyproject.toml" in build_sh_src and "CFBundleIconFile" in build_sh_src, "build_menubar_app.sh must derive version from pyproject.toml and set CFBundleIconFile"

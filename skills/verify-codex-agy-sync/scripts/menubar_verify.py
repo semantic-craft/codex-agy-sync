@@ -493,16 +493,10 @@ def _verify_search_filter(pid: int, wid: int, state: dict[str, Any], session_nam
     )
 
 
-def _read_persisted_icon_style(prefs_suite: str) -> str:
-    """Read menuBarIconStyle from the isolated UserDefaults suite."""
-    proc = _run_cmd(["defaults", "read", prefs_suite, "menuBarIconStyle"], check=False, timeout=5.0)
-    return proc.stdout.strip() if proc.returncode == 0 else ""
-
-
 def _drive_settings_gui(
     pid: int, panel_wid: int, shots_dir: Path, session_name: str, prefs_suite: str, release_stub: MockReleaseHttpStub
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Open Settings window, verify live icon switching + persistence, and verify version alignment + update check."""
+    """Open Settings window, verify general settings tab, and verify version alignment + update check."""
     _click_until(
         pid, panel_wid, "打开设置", session_name,
         lambda: any(w.get("title") == SETTINGS_TITLE for w in _cua_call("list_windows", {"pid": pid, "session": session_name}).get("windows", [])),
@@ -514,13 +508,12 @@ def _drive_settings_gui(
         st = _cua_call("get_window_state", {"pid": pid, "window_id": swid, "tree_format": "both", "include_screenshot": False, "session": session_name})
         return _find_element(st.get("elements", []), needle) is not None or needle in str(st.get("tree_markdown") or "")
 
-    _click_until(pid, swid, "设置分栏：图标与外观", session_name, lambda: _has_settings_el("菜单栏图标：切端闪电"))
-    _click_until(pid, swid, "菜单栏图标：切端闪电", session_name, lambda: _read_persisted_icon_style(prefs_suite) == "pulse_bolt")
+    _click_until(pid, swid, "设置分栏：常规与接力", session_name, lambda: _has_settings_el("存在未完成回复或待确认对话时显示状态栏圆点"))
     _cua_call("bring_to_front", {"pid": pid, "window_id": swid, "session": session_name})
-    icons_shot = shots_dir / "03-settings-icons.png"
-    _cua_call("get_window_state", {"pid": pid, "window_id": swid, "tree_format": "elements", "session": session_name}, screenshot_out=icons_shot)
-    if not icons_shot.is_file() or icons_shot.stat().st_size <= 0:
-        raise RuntimeError("03-settings-icons.png was not written.")
+    general_shot = shots_dir / "03-settings-general.png"
+    _cua_call("get_window_state", {"pid": pid, "window_id": swid, "tree_format": "elements", "session": session_name}, screenshot_out=general_shot)
+    if not general_shot.is_file() or general_shot.stat().st_size <= 0:
+        raise RuntimeError("03-settings-general.png was not written.")
 
     _click_until(pid, swid, "设置分栏：版本与同步更新", session_name, lambda: _has_settings_el("检查更新"))
     deadline = time.monotonic() + 10.0
@@ -541,8 +534,8 @@ def _drive_settings_gui(
     _cua_call("get_window_state", {"pid": pid, "window_id": swid, "tree_format": "elements", "session": session_name}, screenshot_out=update_shot)
     if not update_shot.is_file() or update_shot.stat().st_size <= 0:
         raise RuntimeError("04-settings-update.png was not written.")
-    checks = {"persisted_icon_style": _read_persisted_icon_style(prefs_suite), "release_api_hits": len(release_stub.requests)}
-    return {"settings_icons": str(icons_shot), "settings_update": str(update_shot)}, checks
+    checks = {"release_api_hits": len(release_stub.requests)}
+    return {"settings_general": str(general_shot), "settings_update": str(update_shot)}, checks
 
 
 def _drive_qa_gui(
