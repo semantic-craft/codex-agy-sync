@@ -1046,9 +1046,9 @@ final class MenubarViewModelTests: XCTestCase {
         _ = try makeExec(in: py39Bin)
         let py312CLI = try makeExec(in: py312Bin)
 
-        let suiteName = "dev.semanticcraft.codex-agy-sync.cli.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
+        let isolated = makeIsolatedTestDefaultsSuite(label: "cli")
+        defer { isolated.cleanup() }
+        let defaults = isolated.defaults
 
         let pyBins = SubprocessCLIClient.userPythonBinDirectories(homeDirectory: fakeHome)
         XCTAssertEqual(
@@ -1152,9 +1152,9 @@ final class MenubarViewModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: pathBin, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let suiteName = "dev.semanticcraft.codex-agy-sync.parity.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
+        let isolated = makeIsolatedTestDefaultsSuite(label: "parity")
+        defer { isolated.cleanup() }
+        let defaults = isolated.defaults
 
         let pyBins = SubprocessCLIClient.userPythonBinDirectories(homeDirectory: dir)
         let env: [String: String] = ["PATH": pathBin.path]
@@ -1196,7 +1196,7 @@ final class MenubarViewModelTests: XCTestCase {
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
 
-        let client = SubprocessCLIClient(environment: env, defaultsSuiteName: suiteName)
+        let client = SubprocessCLIClient(environment: env, defaultsSuiteName: isolated.suiteName)
         let snap = try await client.fetchFeed(limit: 5)
         XCTAssertEqual(snap.recent.count, 1)
         XCTAssertEqual(snap.recent.first?.title.count, 140_000)
@@ -1282,9 +1282,9 @@ final class MenubarViewModelTests: XCTestCase {
             )
         }
 
-        let suiteName = "dev.semanticcraft.codex-agy-sync.lang-vm.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
+        let isolated = makeIsolatedTestDefaultsSuite(label: "lang-vm")
+        defer { isolated.cleanup() }
+        let defaults = isolated.defaults
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
 
@@ -1425,9 +1425,9 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(installFailure.text(in: .zhHans), AppCopy.text(.updatesErrInstallationInProgress, in: .zhHans))
         XCTAssertEqual(installFailure.text(in: .en), AppCopy.text(.updatesErrInstallationInProgress, in: .en))
 
-        let suiteName = "dev.semanticcraft.codex-agy-sync.guard.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
+        let isolated = makeIsolatedTestDefaultsSuite(label: "guard")
+        defer { isolated.cleanup() }
+        let defaults = isolated.defaults
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
         let hero = makeItem(sessionId: "cid-guard", state: .completedReady)
