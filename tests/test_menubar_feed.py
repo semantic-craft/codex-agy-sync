@@ -104,8 +104,7 @@ class MenubarFeedTest(unittest.TestCase):
         self.transport.apply_to_codex(
             binding, CodexThreadId(tid), events, ledger, locks, TransportMode.OFFLINE_STORAGE, lineage=lineage,
         )
-        rollout_dir = self.paths.codex_home_dir / "sessions" / "2026" / "11" / "15"
-        cand = next(rollout_dir.glob(f"*{tid}.jsonl*"))
+        cand = next((self.paths.codex_home_dir / "sessions").rglob(f"*{tid}.jsonl*"))
         os.utime(cand, (mtime, mtime))
         state_db = self.paths.codex_home_dir / "state_5.sqlite"
         with closing(sqlite3.connect(state_db)) as conn, conn:
