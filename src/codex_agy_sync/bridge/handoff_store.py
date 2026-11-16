@@ -79,7 +79,7 @@ class HandoffPendingError(RuntimeError):
         self.receipt = receipt
         super().__init__(
             f"Handoff remains pending; target={receipt.target_id or 'unknown'}. Run "
-            f"`codex-agy-sync handoff --reconcile` or inspect {receipt_path} before retrying; "
+            f"`codex-agy-sync sync --reconcile` or inspect {receipt_path} before retrying; "
             f"no new session was allocated on retry. Cause: {receipt.error or 'Previous operation did not finish.'}"
         )
 
@@ -94,9 +94,9 @@ def open_handoff_lock(paths: HostEnvironmentPaths, workspace_path: Path) -> Iter
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise SyncBusyLockError(
-                "Another handoff operation is currently running; wait and retry.",
+                "Another sync operation is currently running; wait and retry.",
                 host="handoff",
-                remediation=(f'Wait for the active handoff to finish, then retry: codex-agy-sync handoff -w "{workspace_path}"',),
+                remediation=(f'Wait for the active sync to finish, then retry: codex-agy-sync sync -w "{workspace_path}"',),
             ) from exc
         try:
             yield state

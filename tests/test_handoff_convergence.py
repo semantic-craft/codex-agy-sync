@@ -217,7 +217,7 @@ class HandoffConvergenceTest(unittest.TestCase):
         with mock.patch("codex_agy_sync.bridge.paths_and_locks.PresenceWalGuard.discover_agy_daemon", return_value=fake_agy_ep), \
                 mock.patch("codex_agy_sync.bridge.paths_and_locks.PresenceWalGuard.discover_codex_daemon", return_value=None), \
                 mock.patch("codex_agy_sync.bridge.rpc.fetch_agy_trajectory_via_rpc", side_effect=lambda ep, cid, **kw: AgyRpcReadResult(tuple(self.transport.read_persisted_agy_steps(self.paths.agy_data_dir / "conversations" / f"{cid}.db")), 1)):
-            rc, out, err = self._run_cli(["handoff", "-w", str(self.workspace), "--latest", "--include-interrupted"])
+            rc, out, err = self._run_cli(["sync", "-w", str(self.workspace), "--latest", "--include-interrupted"])
             self.assertEqual((rc, err), (0, ""))
             rec = json.loads(out)
             self.assertEqual(rec["status"], "ready")
@@ -280,7 +280,7 @@ class HandoffConvergenceTest(unittest.TestCase):
                 mock.patch("codex_agy_sync.bridge.rpc.fetch_agy_trajectory_via_rpc", side_effect=RuntimeError("rpc timeout")):
             with self.assertRaises(HandoffPendingError) as pend_ctx:
                 handoff_session(self.paths, self.workspace, direction=SyncDirection.CODEX_TO_AGY, source_id=str(tid))
-        self.assertIn("--reconcile", str(pend_ctx.exception))
+        self.assertIn("codex-agy-sync sync --reconcile", str(pend_ctx.exception))
 
         state_dir = self.paths.sync_state_dir / "handoffs"
         outside_keep = self.root / "outside-keep"
@@ -379,7 +379,7 @@ class HandoffConvergenceTest(unittest.TestCase):
         binding = self.bridge.pair_workspace(self.workspace)
         tid = self._seed_codex(binding, "01970000-0000-7000-8000-000000000401", _turn_pair(HostKind.CODEX, "t1", "2026-11-15T01:00:00Z", "S1", "A1"))
         with self._mock_daemons():
-            self._run_cli(["handoff", "-w", str(self.workspace), "--source-id", str(tid), "--chain"])
+            self._run_cli(["sync", "-w", str(self.workspace), "--source-id", str(tid), "--chain"])
 
         tid_pend = self._seed_codex(binding, "01970000-0000-7000-8000-000000000402", _turn_pair(HostKind.CODEX, "tp1", "2026-11-15T01:02:00Z", "Pend", "Turn"))
         state_dir = self.paths.sync_state_dir / "handoffs"
@@ -400,24 +400,22 @@ class HandoffConvergenceTest(unittest.TestCase):
         self.assertEqual(status_json["pending_handoffs"][0]["title"], "Pending Item")
         self.assertNotIn("csrfToken", out_st)
 
-        # CLI help labeling check
         out_h = io.StringIO()
         with contextlib.redirect_stdout(out_h), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as h_exc:
             cli_main([*self._base_cli_args(), "--help"])
         self.assertEqual(h_exc.exception.code, 0)
         self.assertIn("[Advanced/Offline]", out_h.getvalue())
+        self.assertNotIn("handoff", out_h.getvalue().lower())
 
-        # CLI flag conflict validations
         for bad_flags in (
-            ["handoff", "-w", str(self.workspace), "--dry-run"],
-            ["handoff", "-w", str(self.workspace), "--reconcile", "--latest"],
-            ["handoff", "-w", str(self.workspace), "--auto-pair", "--pair-if-offline", "--latest"],
+            ["sync", "-w", str(self.workspace), "--dry-run"],
+            ["sync", "-w", str(self.workspace), "--reconcile", "--latest"],
+            ["sync", "-w", str(self.workspace), "--auto-pair", "--pair-if-offline", "--latest"],
         ):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as sys_exc:
                 self._run_cli(bad_flags)
             self.assertEqual(sys_exc.exception.code, 2)
 
-        # Structured JSON errors (zero raw tracebacks)
         rc_fnf, out_fnf, err_fnf = self._run_cli(["inspect", "-w", str(self.workspace), "--codex-thread-id", "01970000-0000-7000-8000-000000009999"])
         self.assertEqual((rc_fnf, out_fnf), (2, ""))
         self.assertNotIn("Traceback", err_fnf)
@@ -427,24 +425,23 @@ class HandoffConvergenceTest(unittest.TestCase):
         self.assertEqual((rc_inv, out_inv), (2, ""))
         self.assertEqual(json.loads(err_inv)["error"], "invalid_argument")
 
-        rc_pnd, out_pnd, err_pnd = self._run_cli(["handoff", "-w", str(self.workspace), "--source-id", str(tid_pend)])
+        rc_pnd, out_pnd, err_pnd = self._run_cli(["sync", "-w", str(self.workspace), "--source-id", str(tid_pend)])
         self.assertEqual((rc_pnd, out_pnd), (2, ""))
         pnd_json = json.loads(err_pnd)
         self.assertEqual((pnd_json["error"], pnd_json["status"]), ("handoff_pending", "pending"))
-        self.assertIn("--reconcile", pnd_json["message"])
+        self.assertIn("codex-agy-sync sync --reconcile", pnd_json["message"])
 
         empty_cid = self._seed_agy(binding, "44444444-4444-4444-8444-444444440403", [], title="Empty")
         rc_emp, out_emp, err_emp = self._run_cli(["sync-session", "-w", str(self.workspace), "--cascade-id", str(empty_cid), "--direction", "agy_to_codex"])
         self.assertEqual((rc_emp, out_emp), (2, ""))
         self.assertEqual(json.loads(err_emp)["error"], "empty_session")
 
-        # Subprocess CLI offline test verifying clean stderr single-object JSON and auto-pair fallback
         unpaired_ws = self.root / "unpaired-ws"
         unpaired_ws.mkdir()
         codex_only = self.bridge.registry.ensure_codex_binding(unpaired_ws)
         self._seed_codex(codex_only, "01970000-0000-7000-8000-000000000450", _turn_pair(HostKind.CODEX, "ut1", "2026-11-15T01:00:00Z", "Unpaired", "Turn"))
         proc = subprocess.run(
-            [sys.executable, "-m", "codex_agy_sync", *self._base_cli_args(), "handoff", "-w", str(unpaired_ws), "--latest"],
+            [sys.executable, "-m", "codex_agy_sync", *self._base_cli_args(), "sync", "-w", str(unpaired_ws), "--latest"],
             cwd=str(self.repo_root),
             env={**os.environ, "PYTHONPATH": str(self.repo_root / "src")},
             capture_output=True, text=True, check=False,
@@ -457,7 +454,7 @@ class HandoffConvergenceTest(unittest.TestCase):
             "codex_agy_sync.bridge.registry.register_agy_project_via_rpc",
             side_effect=lambda *a, **kw: self.bridge.registry.ensure_agy_binding(unpaired_ws).agy_project_id,
         ):
-            rc_ap, out_ap, err_ap = self._run_cli(["handoff", "-w", str(unpaired_ws), "--latest", "--auto-pair"])
+            rc_ap, out_ap, err_ap = self._run_cli(["sync", "-w", str(unpaired_ws), "--latest", "--auto-pair"])
         self.assertEqual((rc_ap, err_ap), (0, ""))
         ap_json = json.loads(out_ap)
         self.assertEqual((ap_json["status"], ap_json["pairing_mode"]), ("ready", "online_rpc"))
@@ -627,7 +624,7 @@ class HandoffConvergenceTest(unittest.TestCase):
             title="Missing Target Daemon",
         )
 
-        rc_cli, _, err_cli = self._run_cli(["handoff", "-w", str(self.workspace), "--source-id", str(tid), "--direction", "codex_to_agy"])
+        rc_cli, _, err_cli = self._run_cli(["sync", "-w", str(self.workspace), "--source-id", str(tid), "--direction", "codex_to_agy"])
         self.assertEqual(rc_cli, 2)
         self.assertEqual(json.loads(err_cli)["error"], "online_rpc_unavailable")
 

@@ -28,7 +28,16 @@ from _suite import run_verification_suite  # noqa: E402
 REPO_ROOT = SCRIPTS_DIR.parents[2]
 CLI_BIN = REPO_ROOT / "bin" / "codex-agy-sync"
 OWNER_MARKER = "codex-agy-sync-verify-sandbox"
-REQUIRED_SUBCOMMANDS = ("pair", "status", "inspect", "sync-session", "sync-workspace")
+REQUIRED_SUBCOMMANDS = (
+    "pair",
+    "status",
+    "inspect",
+    "sync-session",
+    "sync",
+    "sync-workspace",
+    "serve",
+    "menubar-feed",
+)
 
 
 def _now_iso() -> str:
@@ -231,8 +240,17 @@ def _execute_doctor(run_dir: Path) -> tuple[bool, dict[str, Any]]:
         text=True,
         check=False,
     )
-    cli_help_ok = help_proc.returncode == 0 and all(
-        sub in help_proc.stdout for sub in REQUIRED_SUBCOMMANDS
+    advertised_subcommands = {
+        tok.strip()
+        for group in re.findall(r"\{([^}]+)\}", help_proc.stdout)
+        for tok in group.split(",")
+        if tok.strip()
+    }
+    cli_help_ok = (
+        help_proc.returncode == 0
+        and set(REQUIRED_SUBCOMMANDS).issubset(advertised_subcommands)
+        and "handoff" not in advertised_subcommands
+        and "handoff" not in help_proc.stdout.lower()
     )
 
     import_env = dict(os.environ)
