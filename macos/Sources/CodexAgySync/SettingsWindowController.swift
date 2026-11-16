@@ -1,5 +1,5 @@
 import AppKit
-import CodexAgyHandoffCore
+import CodexAgySyncCore
 import Combine
 import SwiftUI
 

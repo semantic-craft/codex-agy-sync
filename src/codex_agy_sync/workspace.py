@@ -11,7 +11,7 @@ import sys
 from typing import Any, NewType, Sequence
 from urllib.parse import unquote, urlsplit
 
-PACKAGE_VERSION: str = "0.4.1"
+PACKAGE_VERSION: str = "0.4.2"
 
 SessionId = NewType("SessionId", str)
 CascadeId = NewType("CascadeId", str)

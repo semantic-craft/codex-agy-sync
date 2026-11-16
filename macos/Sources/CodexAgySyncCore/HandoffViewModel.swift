@@ -400,14 +400,9 @@ public final class HandoffViewModel: ObservableObject {
                 unresolved += summary.unresolved.count
             } else {
                 let pendingWorkspaces = deduplicatedPendingWorkspaces()
-                if pendingWorkspaces.isEmpty {
-                    let summary = try await cli.reconcilePending()
+                for ws in pendingWorkspaces {
+                    let summary = try await cli.reconcilePending(workspacePath: ws)
                     unresolved += summary.unresolved.count
-                } else {
-                    for ws in pendingWorkspaces {
-                        let summary = try await cli.reconcilePending(workspacePath: ws)
-                        unresolved += summary.unresolved.count
-                    }
                 }
             }
 

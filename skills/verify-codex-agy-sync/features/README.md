@@ -1,6 +1,6 @@
 # codex-agy-sync verification map
 
-This directory is the maintained source for verifying the user-facing CLI, native macOS menu bar app (`CodexAgyHandoff.app`), frozen Stage-1 workbench, and multi-store behavior of `codex-agy-sync`. Read this index before driving the CLI, then follow the matching feature file or run `menubar_verify.py suite` / `control_sync_verify.py suite` / `workbench_verify.py suite` for isolated sandbox smoke gates.
+This directory is the maintained source for verifying the user-facing CLI, native macOS menu bar app (`CodexAgySync.app`), frozen Stage-1 workbench, and multi-store behavior of `codex-agy-sync`. Read this index before driving the CLI, then follow the matching feature file or run `menubar_verify.py suite` / `control_sync_verify.py suite` / `workbench_verify.py suite` for isolated sandbox smoke gates.
 
 ## Baseline preconditions
 
@@ -40,5 +40,5 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 - [Bidirectional sync and companion stores](./bidirectional-sync-and-companion-stores.md) covers `sync-session` initial import in both directions, `transport_used` attribution (`A2`), sidebar visibility invariants, companion projections, and immediate re-run `no_op` idempotency.
 - [Incremental append and divergence policy](./incremental-append-and-divergence-policy.md) covers completed-turn cursor advancement, `B2` `--include-interrupted` stopped-turn rescue (`agy-interrupted`), and `halt_on_divergence`, `fork_new_session`, and `backup_and_overwrite_target` conflict resolution.
 - [Subagent isolation and lock deferral](./subagent-isolation-and-lock-deferral.md) covers `status` and `sync-workspace` subagent filtering (`--include-subagents`), active `presence/<id>.lock` deferral, and `online_rpc` write-guard deferral.
-- [Desktop session handoff](./desktop-handoff.md) covers `handoff` unpaired diagnosis (`exit 2`), `--auto-pair` / `--pair-if-offline`, `--source-id` direction auto-inference, `--latest`, `--chain`, `--pick` TTY behavior, `--include-interrupted`, `--reconcile`, and automatic staging cleanup on `ready`.
+- [Desktop session sync](./desktop-handoff.md) covers `sync` unpaired diagnosis (`exit 2`), `--auto-pair` / `--pair-if-offline`, `--source-id` direction auto-inference, `--latest`, `--chain`, `--pick` TTY behavior, `--include-interrupted`, `--reconcile`, and automatic staging cleanup on `ready`.
 - [Live Stage-1 workbench](./live-workbench.md) covers `codex-agy-sync serve` with the packaged `workbench/ui/index.html` UI, token/loopback security gates, excluded workspace filtering, cross-host search/locate, Stage-1 copy-only Markdown drafts with IME-safe submit, and real one-click handoff in an isolated browser session.

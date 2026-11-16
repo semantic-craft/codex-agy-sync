@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated end-to-end QA verifier for the CodexAgyHandoff macOS menu bar app."""
+"""Isolated end-to-end QA verifier for the CodexAgySync macOS menu bar app."""
 from __future__ import annotations
 
 import argparse
@@ -42,11 +42,11 @@ from codex_agy_sync.bridge import diagnose_workspace_binding, ensure_codex_state
 from codex_agy_sync.events import AssistantTextEvent, CascadeId, EventOriginAnchor, ThinkingEvent, ToolCallEvent, ToolCallId, TurnId, UserInputEvent  # noqa: E402
 from codex_agy_sync.payloads import RunCommandPayload  # noqa: E402
 
-QA_BUNDLE_ID = "dev.semanticcraft.codex-agy-handoff.qa"
+QA_BUNDLE_ID = "dev.semanticcraft.codex-agy-sync.qa"
 CTA_LABEL = "用 Codex 继续"
 DONE_BANNER = "已在 Codex 打开对话"
-SETTINGS_TITLE = "CodexAgyHandoff 设置"
-SETTINGS_TITLE_EN = "CodexAgyHandoff Settings"
+SETTINGS_TITLE = "CodexAgySync 设置"
+SETTINGS_TITLE_EN = "CodexAgySync Settings"
 BUILD_SCRIPT = REPO_ROOT / "scripts" / "build_menubar_app.sh"
 PACKAGE_VERSION = str(tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
 _VER_PARTS = PACKAGE_VERSION.split(".")
@@ -143,6 +143,8 @@ def _verify_app_bundle_assets(app_bundle: Path) -> dict[str, Any]:
     info = plistlib.loads(plist_path.read_bytes())
     if info.get("CFBundleIdentifier") != QA_BUNDLE_ID:
         raise AssertionError(f"Expected CFBundleIdentifier={QA_BUNDLE_ID!r}, got {info.get('CFBundleIdentifier')!r}")
+    if info.get("CFBundleExecutable") != "CodexAgySync":
+        raise AssertionError(f"Expected CFBundleExecutable='CodexAgySync', got {info.get('CFBundleExecutable')!r}")
     if info.get("CFBundleIconFile") != "AppIcon":
         raise AssertionError(f"Expected CFBundleIconFile='AppIcon', got {info.get('CFBundleIconFile')!r}")
     if info.get("CFBundleShortVersionString") != PACKAGE_VERSION:
@@ -226,7 +228,7 @@ def _launch_qa_app(app_bundle: Path, env: dict[str, str]) -> int:
     """Launch isolated QA .app bundle via macOS open -n -F with sandbox env vars."""
     argv = ["open", "-n", "-F", *[x for k, v in env.items() for x in ("--env", f"{k}={v}")], str(app_bundle)]
     run_cmd(argv, check=True, timeout=20.0)
-    exe_path, deadline = str(app_bundle / "Contents" / "MacOS" / "CodexAgyHandoff"), time.monotonic() + 15.0
+    exe_path, deadline = str(app_bundle / "Contents" / "MacOS" / "CodexAgySync"), time.monotonic() + 15.0
     while time.monotonic() < deadline:
         if pids := _find_pids_for_exe(exe_path):
             return pids[-1]
@@ -298,8 +300,8 @@ def _drive_settings_gui(
     def _has_el(needle: str) -> bool:
         return has_window_element(pid, swid, needle, session_name)
 
-    click_until(pid, swid, "设置分栏：常规与接力", session_name, lambda: _has_el("存在未完成回复或待确认对话时显示状态栏圆点"))
-    if not _has_el("展开并自动接力首个对话") or not _has_el("简体中文") or not _has_el("English"):
+    click_until(pid, swid, "设置分栏：常规与同步", session_name, lambda: _has_el("存在未完成回复或待确认对话时显示状态栏圆点"))
+    if not _has_el("展开并自动同步首个对话") or not _has_el("简体中文") or not _has_el("English"):
         raise RuntimeError("Settings General tab missing expected hotkey or language controls.")
     cua_call("bring_to_front", {"pid": pid, "window_id": swid, "session": session_name})
     general_shot = shots_dir / "03-settings-general.png"
@@ -307,7 +309,7 @@ def _drive_settings_gui(
     if not general_shot.is_file() or general_shot.stat().st_size <= 0:
         raise RuntimeError("03-settings-general.png was not written.")
 
-    click_until(pid, swid, "设置分栏：版本与同步更新", session_name, lambda: _has_el("检查更新"))
+    click_until(pid, swid, "设置分栏：版本与更新", session_name, lambda: _has_el("检查更新"))
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         if _has_el("双端已同频") and _has_el(f"v{PACKAGE_VERSION}"):
@@ -339,32 +341,32 @@ def _drive_settings_gui(
     if not update_shot.is_file() or update_shot.stat().st_size <= 0:
         raise RuntimeError("04-settings-update.png was not written.")
 
-    click_until(pid, swid, "设置分栏：常规与接力", session_name, lambda: _has_el("界面语言：English"))
+    click_until(pid, swid, "设置分栏：常规与同步", session_name, lambda: _has_el("界面语言：English"))
     click_until(
         pid,
         swid,
         "界面语言：English",
         session_name,
-        lambda: _has_el("Settings tab: General & Handoff") and _has_el("Open & Continue Top Session"),
+        lambda: _has_el("Settings tab: General & Sync") and _has_el("Open & Sync Top Session"),
         wait_s=4.0,
     )
     wait_for_window_title(pid, swid, SETTINGS_TITLE_EN, session_name)
     _assert_popover_language(pid, panel_wid, session_name, ("Filter projects or session titles", "Open Settings"))
 
-    click_until(pid, swid, "Settings tab: Updates & Sync", session_name, lambda: _has_el("Check Only") and _has_el("Aligned"))
+    click_until(pid, swid, "Settings tab: Version & Updates", session_name, lambda: _has_el("Check Only") and _has_el("Aligned"))
     cua_call("bring_to_front", {"pid": pid, "window_id": swid, "session": session_name})
     english_shot = shots_dir / "05-settings-english.png"
     cua_call("get_window_state", {"pid": pid, "window_id": swid, "tree_format": "elements", "session": session_name}, screenshot_out=english_shot)
     if not english_shot.is_file() or english_shot.stat().st_size <= 0:
         raise RuntimeError("05-settings-english.png was not written.")
 
-    click_until(pid, swid, "Settings tab: General & Handoff", session_name, lambda: _has_el("Language: 简体中文"))
+    click_until(pid, swid, "Settings tab: General & Sync", session_name, lambda: _has_el("Language: 简体中文"))
     click_until(
         pid,
         swid,
         "Language: 简体中文",
         session_name,
-        lambda: _has_el("设置分栏：常规与接力") and _has_el("展开并自动接力首个对话"),
+        lambda: _has_el("设置分栏：常规与同步") and _has_el("展开并自动同步首个对话"),
         wait_s=4.0,
     )
     wait_for_window_title(pid, swid, SETTINGS_TITLE, session_name)
@@ -390,7 +392,7 @@ def _drive_qa_gui(
     release_stub: MockReleaseHttpStub,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     """Drive popover handoff and Settings tabs end-to-end, capturing visual receipts."""
-    wid = wait_for_window(pid, "CodexAgyHandoff", session_name, 15.0)
+    wid = wait_for_window(pid, "CodexAgySync", session_name, 15.0)
     vstate = cua_call(
         "verify_state",
         {
@@ -478,7 +480,7 @@ def _teardown_suite(ctx: dict[str, Any]) -> dict[str, Any]:
         with contextlib.suppress(OSError):
             os.close(ctx["lock_fd"])
     if isinstance(app_bundle := ctx.get("app_bundle"), Path):
-        pids = set(_find_pids_for_exe(str(app_bundle / "Contents" / "MacOS" / "CodexAgyHandoff"))) | ({int(ctx["qa_pid"])} if ctx.get("qa_pid") else set())
+        pids = set(_find_pids_for_exe(str(app_bundle / "Contents" / "MacOS" / "CodexAgySync"))) | ({int(ctx["qa_pid"])} if ctx.get("qa_pid") else set())
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for pid in sorted(pids):
                 if run_cmd(["ps", "-p", str(pid), "-o", "comm="], check=False).stdout.strip().startswith(str(app_bundle)):
@@ -521,7 +523,7 @@ def cmd_suite(raw_run_dir: str | None) -> int:
         "sandbox": dirs["sandbox"],
         "app_dir": dirs["app_dir"],
         "sock_path": dirs["sock_path"],
-        "app_bundle": dirs["app_dir"] / "CodexAgyHandoff.app",
+        "app_bundle": dirs["app_dir"] / "CodexAgySync.app",
         "prefs_suite": prefs_suite,
         "release_stub": release_stub,
     }
@@ -568,8 +570,8 @@ def cmd_suite(raw_run_dir: str | None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint for CodexAgyHandoff verification."""
-    parser = argparse.ArgumentParser(description="Verify CodexAgyHandoff menu bar app in an isolated sandbox.")
+    """CLI entrypoint for CodexAgySync verification."""
+    parser = argparse.ArgumentParser(description="Verify CodexAgySync menu bar app in an isolated sandbox.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="Check Swift, Cua Driver permissions, CLI feed command, and build script.")
     suite_p = sub.add_parser("suite", help="Run full isolated GUI handoff verification.")

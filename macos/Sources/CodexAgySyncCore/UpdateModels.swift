@@ -301,7 +301,7 @@ public struct GitHubReleaseInfo: Equatable, Sendable {
                 && $0.name.hasPrefix("codex_agy_sync-")
                 && $0.name.hasSuffix(".whl")
         }
-        let appZip = assets.first { $0.name == "CodexAgyHandoff-macos.zip" }
+        let appZip = assets.first { $0.name == "CodexAgySync-macos.zip" }
             ?? assets.first { !isSignatureAssetName($0.name) && $0.name.lowercased().hasSuffix("-macos.zip") }
         let checksums = assets.first { $0.name == "SHA256SUMS" }
             ?? assets.first { !isSignatureAssetName($0.name) && $0.name.uppercased().contains("SHA256SUM") }
@@ -467,7 +467,7 @@ public enum UpdatePathGuard {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
         let root = appSupport
-            .appendingPathComponent("CodexAgyHandoff", isDirectory: true)
+            .appendingPathComponent("CodexAgySync", isDirectory: true)
             .appendingPathComponent("updates", isDirectory: true)
         return try validateNonTemporaryURL(root)
     }

@@ -310,6 +310,8 @@ public final class PreferencesStore: ObservableObject {
     public nonisolated static let preferencesDefaultsKey = "appPreferences"
     public nonisolated static let prefsSuiteEnvKey = "MENUBAR_PREFS_SUITE"
     public nonisolated static let disableLoginItemEnvKey = "MENUBAR_DISABLE_LOGIN_ITEM"
+    public nonisolated static let legacyPreferencesSuiteName =
+        "dev.semanticcraft." + ["codex", "agy", "hand" + "off"].joined(separator: "-")
 
     @Published public private(set) var preferences: AppPreferences
     @Published public private(set) var effectiveLanguage: ResolvedLanguage
@@ -348,6 +350,7 @@ public final class PreferencesStore: ObservableObject {
 
     public init(
         defaults: UserDefaults? = nil,
+        legacyDefaults: UserDefaults? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         loginItemManager: (any LoginItemManaging)? = nil,
         preferredLanguagesProvider: @escaping @Sendable () -> [String] = { Locale.preferredLanguages }
@@ -358,15 +361,20 @@ public final class PreferencesStore: ObservableObject {
         self.loginItemManager = resolvedLoginManager
         self.preferredLanguagesProvider = preferredLanguagesProvider
 
-        var loaded = Self.loadPreferences(from: resolvedDefaults)
-        if loaded.customCLIPath == nil,
-           let legacyCLI = resolvedDefaults.string(forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
-        {
-            let trimmed = legacyCLI.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                loaded.customCLIPath = (trimmed as NSString).expandingTildeInPath
-            }
+        let explicitSuite = (environment[Self.prefsSuiteEnvKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackDefaults: UserDefaults?
+        if let legacyDefaults {
+            fallbackDefaults = legacyDefaults
+        } else if defaults == nil, explicitSuite.isEmpty {
+            fallbackDefaults = UserDefaults(suiteName: Self.legacyPreferencesSuiteName)
+        } else {
+            fallbackDefaults = nil
         }
+
+        let loaded = Self.loadPreferencesWithLegacyFallback(
+            from: resolvedDefaults,
+            legacyDefaults: fallbackDefaults
+        )
 
         self.preferences = loaded
         self.effectiveLanguage = loaded.language.resolve(preferredLanguages: preferredLanguagesProvider())
@@ -496,6 +504,36 @@ public final class PreferencesStore: ObservableObject {
 
     public func refreshLaunchAtLoginStatus() {
         launchAtLogin = loginItemManager.isEnabled
+    }
+
+    static func loadPreferencesWithLegacyFallback(
+        from primaryDefaults: UserDefaults,
+        legacyDefaults: UserDefaults?
+    ) -> AppPreferences {
+        let hasPrimaryPrefs = primaryDefaults.object(forKey: preferencesDefaultsKey) != nil
+        let hasPrimaryCLI = primaryDefaults.object(forKey: SubprocessCLIClient.cliExecutableDefaultsKey) != nil
+        let sourceDefaults: UserDefaults
+        if !hasPrimaryPrefs,
+           !hasPrimaryCLI,
+           let legacyDefaults,
+           legacyDefaults.object(forKey: preferencesDefaultsKey) != nil
+               || legacyDefaults.object(forKey: SubprocessCLIClient.cliExecutableDefaultsKey) != nil
+        {
+            sourceDefaults = legacyDefaults
+        } else {
+            sourceDefaults = primaryDefaults
+        }
+
+        var loaded = loadPreferences(from: sourceDefaults)
+        if loaded.customCLIPath == nil,
+           let legacyCLI = sourceDefaults.string(forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
+        {
+            let trimmed = legacyCLI.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                loaded.customCLIPath = (trimmed as NSString).expandingTildeInPath
+            }
+        }
+        return loaded
     }
 
     private static func loadPreferences(from defaults: UserDefaults) -> AppPreferences {

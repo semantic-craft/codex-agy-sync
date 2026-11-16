@@ -78,8 +78,8 @@ class HandoffPendingError(RuntimeError):
     def __init__(self, receipt: HandoffReceipt, receipt_path: Path) -> None:
         self.receipt = receipt
         super().__init__(
-            f"Handoff remains pending; target={receipt.target_id or 'unknown'}. Run "
-            f"`codex-agy-sync handoff --reconcile` or inspect {receipt_path} before retrying; "
+            f"Sync remains pending; target={receipt.target_id or 'unknown'}. Run "
+            f"`codex-agy-sync sync --reconcile` or inspect {receipt_path} before retrying; "
             f"no new session was allocated on retry. Cause: {receipt.error or 'Previous operation did not finish.'}"
         )
 
@@ -94,9 +94,9 @@ def open_handoff_lock(paths: HostEnvironmentPaths, workspace_path: Path) -> Iter
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise SyncBusyLockError(
-                "Another handoff operation is currently running; wait and retry.",
+                "Another sync operation is currently running; wait and retry.",
                 host="handoff",
-                remediation=(f'Wait for the active handoff to finish, then retry: codex-agy-sync handoff -w "{workspace_path}"',),
+                remediation=(f'Wait for the active sync to finish, then retry: codex-agy-sync sync -w "{workspace_path}"',),
             ) from exc
         try:
             yield state
@@ -112,7 +112,7 @@ def load_handoff_receipt(path: Path) -> HandoffReceipt:
     """Parse a persisted handoff receipt JSON file while preserving legacy schema compatibility."""
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise ValueError(f"Invalid handoff receipt payload in {path}: expected JSON object.")
+        raise ValueError(f"Invalid sync receipt payload in {path}: expected JSON object.")
     return HandoffReceipt(**{key: value for key, value in raw.items() if key in _RECEIPT_FIELDS})
 
 

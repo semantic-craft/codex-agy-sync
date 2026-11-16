@@ -100,11 +100,12 @@ for sym in ("__version__", "OnlineRpcUnavailableError", "AgyRpcReadResult", "Cod
 pyproject_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("pyproject.toml").read_text(encoding="utf-8"), re.M)
 assert pyproject_match is not None, "Missing version in pyproject.toml"
 pyproject_ver = pyproject_match.group(1)
-assert pkg.__version__ == pyproject_ver == "0.4.1", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
+assert pkg.__version__ == pyproject_ver == "0.4.2", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
 build_sh_src = pathlib.Path("scripts/build_menubar_app.sh").read_text(encoding="utf-8")
 assert f"\"CFBundleShortVersionString\": \"{pyproject_ver}\"" not in build_sh_src and f"\"{pyproject_ver}\"" not in build_sh_src, "build_menubar_app.sh must not hardcode CFBundleShortVersionString"
 assert "pyproject.toml" in build_sh_src and "CFBundleIconFile" in build_sh_src, "build_menubar_app.sh must derive version from pyproject.toml and set CFBundleIconFile"
 assert "\"CFBundleIdentifier\": bundle_id" in build_sh_src, "build_menubar_app.sh must write CFBundleIdentifier from bundle_id"
+assert "APP_NAME=\"CodexAgySync\"" in build_sh_src and "BUNDLE_ID=\"dev.semanticcraft.codex-agy-sync\"" in build_sh_src, "build_menubar_app.sh must default to CodexAgySync and dev.semanticcraft.codex-agy-sync"
 assert pathlib.Path("scripts/generate_app_icon.swift").is_file(), "Missing scripts/generate_app_icon.swift"
 for mod_path in sorted(pathlib.Path("src/codex_agy_sync").rglob("*.py")):
     mod_src = mod_path.read_text(encoding="utf-8")
@@ -154,12 +155,39 @@ print("  Domain architecture verified: 7 step specs, 16 tool codecs, sidebar inv
 '
 PYTHONPATH=src python3 scripts/check_architecture.py
 
-echo "[4/5] Scanning tracked and untracked repo files (excluding out/) for hardcoded home paths or CSRF token leaks..."
-python3 -c '
-import pathlib, re, subprocess, sys
+echo "[4/5] Scanning repo files for hardcoded home paths, legacy naming, CLI subcommand contract, and CSRF token leaks..."
+PYTHONPATH=src python3 - <<'PY'
+import argparse
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from codex_agy_sync.cli import _build_parser
 
 repo = pathlib.Path(".")
 home_str = str(pathlib.Path.home())
+forbidden_legacy_names = (
+    "codexagy" + "handoff",
+    "codex-agy-" + "handoff",
+)
+forbidden_legacy_cli = "codex-agy-sync " + "handoff"
+naming_scan_roots = {"src", "macos", "scripts", "bin", "skills", "docs", "tests"}
+naming_scan_files = {"README.md", "AGENTS.md", "NOTES.md"}
+legacy_cli_scan_roots = {"src", "macos", "scripts", "skills", "docs"}
+legacy_cli_scan_files = {"README.md", "AGENTS.md", "NOTES.md"}
+
+daemon_tokens = []
+daemon_dir = pathlib.Path.home() / ".gemini" / "antigravity" / "daemon"
+if daemon_dir.is_dir():
+    for hf in daemon_dir.glob("hub_*.json"):
+        try:
+            tok = json.loads(hf.read_text()).get("csrfToken", "")
+            if tok and len(tok) > 8:
+                daemon_tokens.append((hf.name, tok))
+        except Exception:
+            pass
+
 bad = []
 for p in repo.rglob("*"):
     if not p.is_file():
@@ -174,27 +202,89 @@ for p in repo.rglob("*"):
     ):
         continue
     txt = p.read_text(encoding="utf-8", errors="ignore")
-    if rel.parts[0] in ("scripts", "src", "docs", "tests", "bin", "skills", "macos"):
+    check_home = rel.parts[0] in ("scripts", "src", "docs", "tests", "bin", "skills", "macos")
+    check_naming = rel != pathlib.Path("lessons.md") and (
+        rel.parts[0] in naming_scan_roots
+        or str(rel) in naming_scan_files
+        or len(rel.parts) == 1
+    )
+    check_legacy_cli = rel != pathlib.Path("scripts/check") and (
+        rel.parts[0] in legacy_cli_scan_roots
+        or str(rel) in legacy_cli_scan_files
+    )
+    if check_home or check_naming or check_legacy_cli:
         for line_no, line in enumerate(txt.splitlines(), start=1):
-            if home_str in line:
+            if check_home and home_str in line:
                 bad.append(f"{rel}:{line_no}: hardcoded home path {home_str}")
-    # Check for actual CSRF token uuid values from active daemon hub_*.json if any exist
-    daemon_dir = pathlib.Path.home() / ".gemini" / "antigravity" / "daemon"
-    if daemon_dir.is_dir():
-        for hf in daemon_dir.glob("hub_*.json"):
-            try:
-                import json
-                tok = json.loads(hf.read_text()).get("csrfToken", "")
-                if tok and len(tok) > 8 and tok in txt:
-                    bad.append(f"{rel}: leaked live csrfToken from {hf.name}")
-            except Exception:
-                pass
+            low_line = line.lower()
+            if check_naming:
+                for legacy_tok in forbidden_legacy_names:
+                    if legacy_tok in low_line:
+                        bad.append(f"{rel}:{line_no}: forbidden legacy identifier {legacy_tok}")
+            if check_legacy_cli and forbidden_legacy_cli in low_line:
+                bad.append(f"{rel}:{line_no}: forbidden legacy CLI invocation {forbidden_legacy_cli!r}")
+    for hf_name, tok in daemon_tokens:
+        if tok in txt:
+            bad.append(f"{rel}: leaked live csrfToken from {hf_name}")
+
+parser = _build_parser()
+sub_actions = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+parser_subcommands = set(sub_actions[0].choices.keys()) if sub_actions else set()
+expected_subcommands = {
+    "pair",
+    "status",
+    "inspect",
+    "sync-session",
+    "sync",
+    "sync-workspace",
+    "serve",
+    "menubar-feed",
+}
+if parser_subcommands != expected_subcommands:
+    bad.append(f"CLI subcommand set mismatch: got {sorted(parser_subcommands)}, expected {sorted(expected_subcommands)}")
+
+for help_argv in (["./bin/codex-agy-sync", "--help"], ["./bin/codex-agy-sync", "sync", "--help"]):
+    help_proc = subprocess.run(help_argv, capture_output=True, text=True, check=False)
+    if help_proc.returncode != 0 or "handoff" in help_proc.stdout.lower():
+        bad.append(f"{' '.join(help_argv)} failed naming gate (rc={help_proc.returncode})")
+
+legacy_cmd_proc = subprocess.run(
+    ["./bin/codex-agy-sync", "handoff"],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+if legacy_cmd_proc.returncode != 2:
+    bad.append(f"bin/codex-agy-sync handoff must exit 2, got {legacy_cmd_proc.returncode}")
+
+swift_files = sorted(pathlib.Path("macos/Sources").rglob("*.swift"))
+if not swift_files:
+    bad.append("No Swift source files found under macos/Sources")
+swift_tok_re = re.compile(
+    r'//[^\n]*|/\*[\s\S]*?\*/|(#+)"""[\s\S]*?"""\1|(#+)"[\s\S]*?"\2|"""[\s\S]*?"""|"(?:[^"\\]|\\.)*"'
+)
+allowed_swift_literals = {"handoffs", "handoff_pending"}
+for swift_file in swift_files:
+    swift_src = swift_file.read_text(encoding="utf-8")
+    for match in swift_tok_re.finditer(swift_src):
+        tok = match.group(0)
+        if tok.startswith("//") or tok.startswith("/*"):
+            continue
+        stripped = tok.lstrip("#").rstrip("#")
+        inner = stripped[3:-3] if stripped.startswith('"""') else stripped[1:-1]
+        if inner in allowed_swift_literals:
+            continue
+        low_inner = inner.lower()
+        if "handoff" in low_inner or "hand off" in low_inner or "接力" in inner or "交接" in inner:
+            line_no = swift_src.count("\n", 0, match.start()) + 1
+            bad.append(f"{swift_file}:{line_no}: forbidden handoff Swift literal {inner!r}")
+
 if bad:
     for b in bad:
         print("SECURITY/HYGIENE FAIL:", b, file=sys.stderr)
     sys.exit(1)
-print("  Hygiene & credential isolation check passed (0 hardcoded user paths in scripts/src/docs/tests/bin/skills/macos, 0 csrfToken leaks).")
-'
+print("  Hygiene, naming unification & credential isolation check passed (0 hardcoded user paths, 0 legacy app/bundle names, CLI sync contract verified, 0 csrfToken leaks).")
+PY
 
 echo "[5/5] Running behavioral test suite..."
 PYTHONPATH=src python3 -m unittest discover -s tests -v

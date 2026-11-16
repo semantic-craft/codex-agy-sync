@@ -125,17 +125,17 @@ def read_handoff_source(
             active = rpc_res.is_active
             rpc_verified_inactive = rpc_res.cascade_run_status == 1
         if active:
-            raise ValueError("Source session is active. Finish the turn before handoff.")
+            raise ValueError("Source session is active. Finish the turn before sync.")
         ledger, _, _ = transport.read_agy_ledger_with_meta(binding, CascadeId(source_id), locks, TransportMode.OFFLINE_STORAGE)
     if active or ledger.has_inflight_turn:
         if not ledger.has_inflight_turn or not include_interrupted:
-            raise ValueError("Source session is active or has an incomplete turn. Finish the turn before handoff.")
+            raise ValueError("Source session is active or has an incomplete turn. Finish the turn before sync.")
         host = HostKind.CODEX if to_agy else HostKind.ANTIGRAVITY
         if active or (not rpc_verified_inactive and is_source_actively_running(host, ledger, locks, rpc_active=active)):
-            raise ValueError("Source session is active. Finish the turn before handoff.")
+            raise ValueError("Source session is active. Finish the turn before sync.")
         ledger, _ = rescue_interrupted_ledger(ledger)
     if ledger.latest_watermark() is None:
-        raise ValueError("Source session has no completed history to hand off.")
+        raise ValueError("Source session has no completed history to sync.")
     return ledger
 
 
@@ -248,7 +248,7 @@ def _import_agy(paths: HostEnvironmentPaths, binding: WorkspaceProjectBinding, l
     endpoint = PresenceWalGuard(paths).discover_agy_daemon()
     result = rpc.fetch_agy_trajectory_via_rpc(endpoint, CascadeId(target_id), timeout_s=30.0)
     if len(result.raw_steps) != len(DefaultHostTransport(dataclasses.replace(paths, agy_data_dir=stage)).read_persisted_agy_steps(files[-1])):
-        raise RuntimeError("Antigravity did not load all staged steps; handoff remains pending.")
+        raise RuntimeError("Antigravity did not load all staged steps; sync remains pending.")
     loaded = decode_agy_trajectory(binding.workspace_path, binding.workspace_uri, result.raw_steps)
     _verify_context(ledger, loaded)
     return target_id
@@ -340,7 +340,7 @@ def _handoff_locked(
     _ensure_no_pending_sibling(state, receipt_path, binding.workspace_path, source_host, source_id)
     guard = PresenceWalGuard(paths)
     if (guard.discover_agy_daemon() if to_agy else guard.discover_codex_daemon()) is None:
-        raise rpc.OnlineRpcUnavailableError("Open the target Desktop app before handoff.")
+        raise rpc.OnlineRpcUnavailableError("Open the target Desktop app before sync.")
     handed = handoff_ledger(ledger, title)
     seed_turns, seed_digest = ledger_seed_fingerprint(handed)
     eff_chain_id, eff_from_source, eff_depth = chain_id, chained_from_source_id, chain_depth
@@ -385,7 +385,7 @@ def handoff_session(
 ) -> HandoffReceipt:
     """Create a new Desktop session once per completed source history."""
     if direction not in (SyncDirection.CODEX_TO_AGY, SyncDirection.AGY_TO_CODEX):
-        raise ValueError("Handoff requires an explicit direction.")
+        raise ValueError("Sync requires an explicit direction.")
     validate_session_id(source_id, label="source_id")
     ws_path, _ = parse_workspace_identity(workspace)
     eff_binding = binding if (binding is not None and binding.workspace_path == ws_path) else _require_binding(paths, workspace)

@@ -166,7 +166,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sync_s.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID.")
     sync_s.add_argument("--source-tag", choices=[s.name.lower() for s in AgyGuiSafeSource], default="cascade_client", help="Antigravity GUI-safe trajectory source tag.")
 
-    _add_handoff_subparser(subparsers)
+    _add_sync_subparser(subparsers)
 
     sync_w = subparsers.add_parser(
         "sync-workspace",
@@ -181,21 +181,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_handoff_subparser(subparsers: Any) -> None:
-    handoff = subparsers.add_parser("handoff", help="Hand completed history to a new Desktop session; does not append to an existing target.")
-    handoff.add_argument("--workspace", "-w", default=None, help="Workspace path or file:// URI, already registered on both hosts.")
-    handoff.add_argument("--direction", "-d", choices=["codex_to_agy", "agy_to_codex"], default=None, help="Optional explicit handoff direction; inferred automatically when omitted.")
-    handoff.add_argument("--source-id", default=None, help="Source Codex thread or Antigravity cascade UUID.")
-    handoff.add_argument("--title", default=None, help="Title for the new Desktop session, defaulting to the source title.")
-    handoff.add_argument("--latest", action="store_true", help="Select the newest completed non-untouched-target session in the workspace.")
-    handoff.add_argument("--chain", action="store_true", help="Advance or re-handoff along the workspace's active handoff chain.")
-    handoff.add_argument("--pick", action="store_true", help="Interactively choose a candidate session via stderr menu (requires TTY).")
-    handoff.add_argument("--pair-if-offline", action="store_true", help="Automatically pair missing offline host registrations before handoff.")
-    handoff.add_argument("--auto-pair", action="store_true", help="Automatically pair missing host registrations via online RPC, falling back to locked offline pairing.")
-    handoff.add_argument("--include-interrupted", action="store_true", help="Rescue and hand off a stopped trailing interrupted turn (never active streaming turns).")
-    handoff.add_argument("--reconcile", action="store_true", help="Verify pending handoff receipts for the workspace and promote ready or clear absent entries.")
-    handoff.add_argument("--dry-run", action="store_true", help="Preview --reconcile changes without modifying handoff receipts or staging directories.")
-    handoff.add_argument("--json", action="store_true", help="Emit JSON output (stdout output is JSON by default).")
+def _add_sync_subparser(subparsers: Any) -> None:
+    sync_p = subparsers.add_parser("sync", help="Sync completed history to a new Desktop session; does not append to an existing target.")
+    sync_p.add_argument("--workspace", "-w", default=None, help="Workspace path or file:// URI, already registered on both hosts.")
+    sync_p.add_argument("--direction", "-d", choices=["codex_to_agy", "agy_to_codex"], default=None, help="Optional explicit sync direction; inferred automatically when omitted.")
+    sync_p.add_argument("--source-id", default=None, help="Source Codex thread or Antigravity cascade UUID.")
+    sync_p.add_argument("--title", default=None, help="Title for the new Desktop session, defaulting to the source title.")
+    sync_p.add_argument("--latest", action="store_true", help="Select the newest completed non-untouched-target session in the workspace.")
+    sync_p.add_argument("--chain", action="store_true", help="Advance or re-sync along the workspace's active sync chain.")
+    sync_p.add_argument("--pick", action="store_true", help="Interactively choose a candidate session via stderr menu (requires TTY).")
+    sync_p.add_argument("--pair-if-offline", action="store_true", help="Automatically pair missing offline host registrations before sync.")
+    sync_p.add_argument("--auto-pair", action="store_true", help="Automatically pair missing host registrations via online RPC, falling back to locked offline pairing.")
+    sync_p.add_argument("--include-interrupted", action="store_true", help="Rescue and sync a stopped trailing interrupted turn (never active streaming turns).")
+    sync_p.add_argument("--reconcile", action="store_true", help="Verify pending sync receipts for the workspace and promote ready or clear absent entries.")
+    sync_p.add_argument("--dry-run", action="store_true", help="Preview --reconcile changes without modifying sync receipts or staging directories.")
+    sync_p.add_argument("--json", action="store_true", help="Emit JSON output (stdout output is JSON by default).")
 
 
 def _add_serve_subparser(subparsers: Any) -> None:
@@ -211,7 +211,7 @@ def _add_serve_subparser(subparsers: Any) -> None:
 
 
 def _add_menubar_feed_subparser(subparsers: Any) -> None:
-    feed_p = subparsers.add_parser("menubar-feed", help="Emit a fast JSON snapshot of recent handoff candidates for the menubar app.")
+    feed_p = subparsers.add_parser("menubar-feed", help="Emit a fast JSON snapshot of recent sync candidates for the menubar app.")
     feed_p.add_argument("--workspace", "-w", action="append", default=None, help="Optional workspace path or file:// URI filter (repeatable).")
     feed_p.add_argument("--limit", type=int, default=6, help="Maximum recent items excluding hero (1..50, default: 6).")
 
@@ -328,7 +328,7 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         if int(args.max_lifetime) < 0:
             parser.error("--max-lifetime must be >= 0.")
         return
-    if args.subcommand != "handoff":
+    if args.subcommand != "sync":
         return
     if args.dry_run and not args.reconcile:
         parser.error("--dry-run requires --reconcile.")
@@ -382,7 +382,7 @@ def _run_menubar_feed_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace)
     return 0
 
 
-def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
+def _run_sync_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
     if args.reconcile:
         result = _load_attr(".bridge", "reconcile_workspace_handoffs")(
             bridge.paths,
@@ -442,7 +442,7 @@ def _exception_to_error_payload(exc: Exception, subcommand: str) -> dict[str, An
         if _matches_exc(exc, rel_mod, attr):
             return {"error": code, "message": str(exc)}
     if isinstance(exc, ValueError):
-        code = "invalid_handoff_request" if subcommand == "handoff" else "invalid_argument"
+        code = "invalid_handoff_request" if subcommand == "sync" else "invalid_argument"
         return {"error": code, "message": str(exc)}
     return {"error": "runtime_error", "message": str(exc)}
 
@@ -463,8 +463,8 @@ def _dispatch_subcommand(args: argparse.Namespace, paths: HostEnvironmentPaths) 
     if args.subcommand == "inspect":
         print(json.dumps(_run_inspect_cmd(bridge, workspace_arg, args), ensure_ascii=False, indent=2))
         return 0
-    if args.subcommand == "handoff":
-        return _run_handoff_cmd(bridge, workspace_arg, args)
+    if args.subcommand == "sync":
+        return _run_sync_cmd(bridge, workspace_arg, args)
     if args.subcommand in ("sync-session", "sync-workspace"):
         sync_direction_cls = _load_attr(".bridge", "SyncDirection")
         fork_policy_cls = _load_attr(".bridge", "ForkResolutionPolicy")

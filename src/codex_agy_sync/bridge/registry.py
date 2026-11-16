@@ -113,7 +113,7 @@ class WorkspaceBindingDiagnosis:
 
 
 class UnpairedWorkspaceError(ValueError):
-    """Raised when `handoff` requires bidirectional pairing that has not yet completed."""
+    """Raised when `sync` requires bidirectional pairing that has not yet completed."""
 
     def __init__(self, diagnosis: WorkspaceBindingDiagnosis, message: str | None = None) -> None:
         self.diagnosis = diagnosis
@@ -420,8 +420,8 @@ def build_workspace_binding_diagnosis(
     if codex_pid is None and codex_active:
         steps.append(f'Open "{ws_path}" in Codex Desktop so it registers natively, or quit Codex Desktop before offline pairing.')
     if agy_pid is None or codex_pid is None:
-        steps.append(f'Retry handoff with automatic online/offline pairing: codex-agy-sync handoff -w "{ws_path}" --auto-pair')
-        steps.append(f'Or retry with offline-only pairing: codex-agy-sync handoff -w "{ws_path}" --pair-if-offline')
+        steps.append(f'Retry sync with automatic online/offline pairing: codex-agy-sync sync -w "{ws_path}" --auto-pair')
+        steps.append(f'Or retry with offline-only pairing: codex-agy-sync sync -w "{ws_path}" --pair-if-offline')
         steps.append(f'Or pair explicitly: codex-agy-sync pair -w "{ws_path}"')
     return WorkspaceBindingDiagnosis(
         ws_path, ws_uri, ws_path.name or "workspace",

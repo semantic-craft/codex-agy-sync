@@ -1,5 +1,5 @@
 import Carbon
-import CodexAgyHandoffCore
+import CodexAgySyncCore
 import Foundation
 
 private final class HotKeyCallbackBox: @unchecked Sendable {

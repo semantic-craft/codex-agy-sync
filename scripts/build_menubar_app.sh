@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-APP_NAME="CodexAgyHandoff"
-BUNDLE_ID="dev.semanticcraft.codex-agy-handoff"
+APP_NAME="CodexAgySync"
+BUNDLE_ID="dev.semanticcraft.codex-agy-sync"
 OUTPUT_DIR=""
 ARCHIVE_ZIP=""
 INSTALL=0
@@ -15,8 +15,8 @@ usage() {
 Usage: build_menubar_app.sh [options]
 
 Options:
-  --output-dir <dir>    Target directory for CodexAgyHandoff.app (default: $REPO_ROOT/out/app)
-  --bundle-id <id>      CFBundleIdentifier (default: dev.semanticcraft.codex-agy-handoff)
+  --output-dir <dir>    Target directory for CodexAgySync.app (default: $REPO_ROOT/out/app)
+  --bundle-id <id>      CFBundleIdentifier (default: dev.semanticcraft.codex-agy-sync)
   --archive-zip <path>  Package signed .app into <path> via ditto and write <path>.sha256
   --install             Output to $HOME/Applications and register with LaunchServices
   -h, --help            Show this help text
@@ -205,6 +205,15 @@ fi
 
 if [[ "$INSTALL" -eq 1 ]]; then
     LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    LEGACY_NAME="CodexAgy""Handoff"
+    LEGACY_BUNDLE="$OUTPUT_DIR/$LEGACY_NAME.app"
+    if [[ -d "$LEGACY_BUNDLE" ]]; then
+        pkill -f "$LEGACY_BUNDLE/Contents/MacOS/$LEGACY_NAME" >/dev/null 2>&1 || true
+        if [[ -x "$LSREGISTER" ]]; then
+            "$LSREGISTER" -u "$LEGACY_BUNDLE" >/dev/null 2>&1 || true
+        fi
+        rm -rf "$LEGACY_BUNDLE"
+    fi
     if [[ -x "$LSREGISTER" ]]; then
         "$LSREGISTER" -f "$APP_BUNDLE" >/dev/null 2>&1 || true
     fi

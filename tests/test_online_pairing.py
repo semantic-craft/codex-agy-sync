@@ -549,6 +549,8 @@ class TestOnlinePairingRpc(unittest.TestCase):
         )
         diag = diagnose_workspace_binding(self.paths, self.workspace)
         diag_text = "\n".join(diag.remediation_steps)
+        self.assertIn("codex-agy-sync sync -w", diag_text)
+        self.assertNotIn("codex-agy-sync handoff", diag_text)
         self.assertIn("--auto-pair", diag_text)
         self.assertIn("--pair-if-offline", diag_text)
         self.assertIn("codex-agy-sync pair -w", diag_text)

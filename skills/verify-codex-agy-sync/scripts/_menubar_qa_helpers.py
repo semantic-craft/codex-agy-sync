@@ -199,7 +199,7 @@ class MockReleaseHttpStub:
                             "browser_download_url": f"{base}/pkg.whl",
                             "size": 64,
                         },
-                        {"name": "CodexAgyHandoff-macos.zip", "browser_download_url": f"{base}/app.zip", "size": 64},
+                        {"name": "CodexAgySync-macos.zip", "browser_download_url": f"{base}/app.zip", "size": 64},
                     ],
                 }
                 body = json.dumps(payload).encode("utf-8")

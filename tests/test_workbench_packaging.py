@@ -31,7 +31,7 @@ class WorkbenchPackagingTest(unittest.TestCase):
     def test_package_data_and_importlib_resources_hygiene(self) -> None:
         pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
         pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-        self.assertEqual(pyproject["project"]["version"], "0.4.1")
+        self.assertEqual(pyproject["project"]["version"], "0.4.2")
         pkg_data = pyproject["tool"]["setuptools"]["package-data"]["codex_agy_sync"]
         self.assertIn("workbench/ui/*.html", pkg_data)
 

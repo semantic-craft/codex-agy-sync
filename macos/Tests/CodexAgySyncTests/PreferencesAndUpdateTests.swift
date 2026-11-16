@@ -3,7 +3,7 @@ import Carbon.HIToolbox
 import Combine
 import Foundation
 import XCTest
-@testable import CodexAgyHandoffCore
+@testable import CodexAgySyncCore
 
 private final class FailingLoginItemManager: LoginItemManaging, @unchecked Sendable {
     struct MockError: LocalizedError {
@@ -60,6 +60,7 @@ private final class StubHTTPFetcher: ReleaseHTTPFetching, @unchecked Sendable {
     private let lock = NSLock()
     private var routes: [URL: (Data, Int)]
     private(set) var requestedURLs: [URL] = []
+    private(set) var requestedHeaders: [[String: String]] = []
 
     init(routes: [URL: (Data, Int)]) {
         self.routes = routes
@@ -78,6 +79,7 @@ private final class StubHTTPFetcher: ReleaseHTTPFetching, @unchecked Sendable {
     ) async throws -> (data: Data, statusCode: Int) {
         let match = lock.withLock { () -> (Data, Int)? in
             requestedURLs.append(url)
+            requestedHeaders.append(headers)
             return routes[url]
         }
         guard let match else {
@@ -146,7 +148,7 @@ private final class RecordingActivator: AppActivating, @unchecked Sendable {
 
 final class PreferencesAndUpdateTests: XCTestCase {
     private func makeIsolatedDefaults() -> (UserDefaults, String) {
-        let suiteName = "dev.semanticcraft.codex-agy-handoff.tests.\(UUID().uuidString)"
+        let suiteName = "dev.semanticcraft.codex-agy-sync.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         return (defaults, suiteName)
@@ -224,7 +226,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let img = MenuBarIconRenderer.image(showAttentionDot: false)
         XCTAssertTrue(img.isTemplate)
         XCTAssertEqual(img.size, NSSize(width: 18, height: 18))
-        XCTAssertEqual(img.accessibilityDescription, "对话接力")
+        XCTAssertEqual(img.accessibilityDescription, "会话同步")
 
         let baseRep = try XCTUnwrap(
             MenuBarIconRenderer.renderBitmap(showAttentionDot: false, pixelSize: 36)
@@ -363,6 +365,31 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertThrowsError(try UpdatePathGuard.validateNonTemporaryURL(URL(fileURLWithPath: "/tmp/stage")))
         XCTAssertThrowsError(try UpdatePathGuard.validateNonTemporaryURL(URL(fileURLWithPath: "/private/tmp/stage")))
         XCTAssertNoThrow(try UpdatePathGuard.validateNonTemporaryURL(FileManager.default.temporaryDirectory))
+        let stagingRoot = try UpdatePathGuard.defaultStagingRootURL()
+        XCTAssertTrue(stagingRoot.path.hasSuffix("/Application Support/CodexAgySync/updates"))
+        XCTAssertTrue(
+            UpdateServiceError.missingUpdateAssets.localizedMessage(in: .zhHans).contains("CodexAgySync-macos.zip")
+        )
+        XCTAssertTrue(
+            UpdateServiceError.missingUpdateAssets.localizedMessage(in: .en).contains("CodexAgySync-macos.zip")
+        )
+
+        let extractTemp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-agy-extract-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: extractTemp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: extractTemp) }
+        let singleFallback = extractTemp.appendingPathComponent("CustomRenamed.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: singleFallback, withIntermediateDirectories: true)
+        XCTAssertEqual(
+            UpdateViewModel.resolveExtractedAppBundle(in: extractTemp).standardizedFileURL,
+            singleFallback.standardizedFileURL
+        )
+        let preferredBundle = extractTemp.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: preferredBundle, withIntermediateDirectories: true)
+        XCTAssertEqual(
+            UpdateViewModel.resolveExtractedAppBundle(in: extractTemp).standardizedFileURL,
+            preferredBundle.standardizedFileURL
+        )
     }
 
     @MainActor
@@ -390,7 +417,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let apiURL = URL(string: "http://127.0.0.1:19999/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:19999/download/SHA256SUMS")!
         let wheelURL = URL(string: "http://127.0.0.1:19999/download/codex_agy_sync-0.4.0-py3-none-any.whl")!
-        let zipURL = URL(string: "http://127.0.0.1:19999/download/CodexAgyHandoff-macos.zip")!
+        let zipURL = URL(string: "http://127.0.0.1:19999/download/CodexAgySync-macos.zip")!
 
         let releaseJSON = """
         {
@@ -400,14 +427,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
             {"name": "codex_agy_sync-0.4.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
-            {"name": "CodexAgyHandoff-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
         """
 
         let validSums = """
         \(wheelSHA)  codex_agy_sync-0.4.0-py3-none-any.whl
-        \(zipSHA)  CodexAgyHandoff-macos.zip
+        \(zipSHA)  CodexAgySync-macos.zip
         """
 
         let runner = StubCommandRunner { exe, args in
@@ -424,7 +451,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("installed\n".utf8), stderr: Data())
             }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
-                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
@@ -436,7 +463,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
 
         let badSums = """
         \(String(repeating: "0", count: 64))  codex_agy_sync-0.4.0-py3-none-any.whl
-        \(zipSHA)  CodexAgyHandoff-macos.zip
+        \(zipSHA)  CodexAgySync-macos.zip
         """
         let badFetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
@@ -504,6 +531,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(vmGood.availability, .upToDate(currentVersion: "0.4.0"))
         XCTAssertEqual(vmGood.alignment, .aligned(version: "0.4.0"))
         XCTAssertTrue(vmGood.canRelaunchApp)
+        XCTAssertFalse(badFetcher.requestedHeaders.isEmpty)
+        XCTAssertTrue(badFetcher.requestedHeaders.allSatisfy { $0["User-Agent"] == "CodexAgySync/0.3.0" })
+        XCTAssertFalse(goodFetcher.requestedHeaders.isEmpty)
+        XCTAssertTrue(goodFetcher.requestedHeaders.allSatisfy { $0["User-Agent"] == "CodexAgySync/0.4.0" })
+        XCTAssertEqual(
+            vmGood.currentBundleIdentifier,
+            Bundle.main.bundleIdentifier ?? "dev.semanticcraft.codex-agy-sync"
+        )
     }
 
     @MainActor
@@ -543,7 +578,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                outIdx + 1 < args.count
             {
                 let outApp = URL(fileURLWithPath: args[outIdx + 1])
-                    .appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+                    .appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: outApp, withIntermediateDirectories: true)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(outApp.path.utf8), stderr: Data())
             }
@@ -613,7 +648,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "body": "Hardened release decoding",
           "assets": [
             {"name": "SHA256SUMS.asc", "browser_download_url": "https://example.com/SHA256SUMS.asc", "size": 64},
-            {"name": "CodexAgyHandoff-macos.zip.sha256", "browser_download_url": "https://example.com/app.sha256", "size": 96},
+            {"name": "CodexAgySync-macos.zip.sha256", "browser_download_url": "https://example.com/app.sha256", "size": 96},
             {"name": "other_pkg-0.4.2-py3-none-any.whl", "browser_download_url": "https://example.com/other.whl", "size": 64},
             {"name": "codex_agy_sync-0.4.2-py3-none-any.whl.sig", "browser_download_url": "https://example.com/wheel.sig", "size": 64},
             {"name": "codex_agy_sync-0.4.2-py3-none-any.whl", "browser_download_url": "https://example.com/wheel.whl", "size": 128}
@@ -621,7 +656,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         }
         """
         let decoded = try GitHubReleaseInfo.decode(from: Data(releaseJSON.utf8))
-        XCTAssertEqual(decoded.checksumsAsset?.name, "CodexAgyHandoff-macos.zip.sha256")
+        XCTAssertEqual(decoded.checksumsAsset?.name, "CodexAgySync-macos.zip.sha256")
         XCTAssertEqual(decoded.wheelAsset?.name, "codex_agy_sync-0.4.2-py3-none-any.whl")
     }
 
@@ -675,7 +710,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
         let readOnlyParent = tempRoot.appendingPathComponent("readonly-apps", isDirectory: true)
-        let appInReadOnly = readOnlyParent.appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+        let appInReadOnly = readOnlyParent.appendingPathComponent("CodexAgySync.app", isDirectory: true)
 
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: appInReadOnly, withIntermediateDirectories: true)
@@ -767,12 +802,12 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let zipBytes = Data("zip-v0.4.0".utf8)
         let sums = """
         \(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.4.0-py3-none-any.whl
-        \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgyHandoff-macos.zip
+        \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip
         """
         let apiURL = URL(string: "http://127.0.0.1:29999/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:29999/SHA256SUMS")!
         let wheelURL = URL(string: "http://127.0.0.1:29999/codex_agy_sync-0.4.0-py3-none-any.whl")!
-        let zipURL = URL(string: "http://127.0.0.1:29999/CodexAgyHandoff-macos.zip")!
+        let zipURL = URL(string: "http://127.0.0.1:29999/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
           "tag_name": "v0.4.0",
@@ -780,7 +815,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
             {"name": "codex_agy_sync-0.4.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
-            {"name": "CodexAgyHandoff-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
         """
@@ -794,7 +829,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
             }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
-                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
@@ -802,7 +837,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                let outIdx = args.firstIndex(of: "--output-dir"),
                outIdx + 1 < args.count
             {
-                let outApp = URL(fileURLWithPath: args[outIdx + 1]).appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+                let outApp = URL(fileURLWithPath: args[outIdx + 1]).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: outApp, withIntermediateDirectories: true)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
@@ -880,12 +915,12 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let zipBytes = Data("zip-040".utf8)
         let sums = """
         \(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.4.0-py3-none-any.whl
-        \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgyHandoff-macos.zip
+        \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip
         """
         let apiURL = URL(string: "http://127.0.0.1:30001/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:30001/SHA256SUMS")!
         let wheelURL = URL(string: "http://127.0.0.1:30001/codex_agy_sync-0.4.0-py3-none-any.whl")!
-        let zipURL = URL(string: "http://127.0.0.1:30001/CodexAgyHandoff-macos.zip")!
+        let zipURL = URL(string: "http://127.0.0.1:30001/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
           "tag_name": "v0.4.0",
@@ -893,7 +928,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
             {"name": "codex_agy_sync-0.4.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
-            {"name": "CodexAgyHandoff-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
         """
@@ -908,7 +943,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
             }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
-                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
@@ -1133,19 +1168,25 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(reloaded.preferences.autoUpdatePolicy, .autoStage)
         XCTAssertEqual(reloaded.effectiveLanguage, .en)
 
-        XCTAssertEqual(HotKeyBehavior.instantPrimaryRescue.displayName(in: .zhHans), "展开并自动接力首个对话")
-        XCTAssertEqual(HotKeyBehavior.instantPrimaryRescue.displayName(in: .en), "Open & Continue Top Session")
+        XCTAssertEqual(HotKeyBehavior.instantPrimaryRescue.displayName(in: .zhHans), "展开并自动同步首个对话")
+        XCTAssertEqual(HotKeyBehavior.instantPrimaryRescue.displayName(in: .en), "Open & Sync Top Session")
         XCTAssertFalse(HotKeyBehavior.togglePanelOnly.helperDescription(in: .en).isEmpty)
         XCTAssertFalse(HotKeyBehavior.instantPrimaryRescue.helperDescription(in: .zhHans).isEmpty)
 
-        XCTAssertEqual(MenuBarIconRenderer.image(showAttentionDot: false, language: .en).accessibilityDescription, "Session Handoff")
-        XCTAssertEqual(MenuBarIconRenderer.image(showAttentionDot: false, language: .zhHans).accessibilityDescription, "对话接力")
+        XCTAssertEqual(MenuBarIconRenderer.image(showAttentionDot: false, language: .en).accessibilityDescription, "Session Sync")
+        XCTAssertEqual(MenuBarIconRenderer.image(showAttentionDot: false, language: .zhHans).accessibilityDescription, "会话同步")
 
         let zhMenu = AppMenuBuilder.buildMainMenu(language: .zhHans, target: nil, settingsAction: Selector(("openSettings:")))
         let enMenu = AppMenuBuilder.buildMainMenu(language: .en, target: nil, settingsAction: Selector(("openSettings:")))
+        XCTAssertEqual(zhMenu.items.first?.submenu?.title, "CodexAgySync")
         XCTAssertEqual(zhMenu.items.first?.submenu?.items.first?.title, "设置…")
+        XCTAssertEqual(zhMenu.items.first?.submenu?.items.last?.title, "退出 CodexAgySync")
         XCTAssertEqual(enMenu.items.first?.submenu?.items.first?.title, "Settings…")
+        XCTAssertEqual(enMenu.items.first?.submenu?.items.last?.title, "Quit CodexAgySync")
         XCTAssertEqual(enMenu.items.last?.submenu?.title, "Edit")
+        XCTAssertEqual(SettingsWindowIdentity.identifier.rawValue, "dev.semanticcraft.codex-agy-sync.settings")
+        XCTAssertEqual(AppCopy.text(.settingsWindowTitle, in: .zhHans), "CodexAgySync 设置")
+        XCTAssertEqual(AppCopy.text(.settingsWindowTitle, in: .en), "CodexAgySync Settings")
     }
 
     @MainActor
@@ -1340,12 +1381,12 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let zipBytes = Data("staged-zip-050".utf8)
         let sums = """
         \(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.5.0-py3-none-any.whl
-        \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgyHandoff-macos.zip
+        \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip
         """
         let apiURL = URL(string: "http://127.0.0.1:30012/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:30012/SHA256SUMS")!
         let wheelURL = URL(string: "http://127.0.0.1:30012/codex_agy_sync-0.5.0-py3-none-any.whl")!
-        let zipURL = URL(string: "http://127.0.0.1:30012/CodexAgyHandoff-macos.zip")!
+        let zipURL = URL(string: "http://127.0.0.1:30012/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
           "tag_name": "v0.5.0",
@@ -1353,7 +1394,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
             {"name": "codex_agy_sync-0.5.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
-            {"name": "CodexAgyHandoff-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
         """
@@ -1367,7 +1408,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
             }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
-                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
                 try "v0.5.0".write(to: appDir.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
@@ -1434,7 +1475,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: legacyStale.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: existingStagedOld.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: updatesRoot.appendingPathComponent("staged/0.5.0/stage-manifest.json").path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: updatesRoot.appendingPathComponent("staged/0.5.0/CodexAgyHandoff-macos.zip").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: updatesRoot.appendingPathComponent("staged/0.5.0/CodexAgySync-macos.zip").path))
 
         let vmReloaded = UpdateViewModel(
             preferencesStore: prefs,
@@ -1462,7 +1503,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             .appendingPathComponent("codex-agy-install-staged-\(UUID().uuidString)", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
         let updatesRoot = tempRoot.appendingPathComponent("updates", isDirectory: true)
-        let installedApp = tempRoot.appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+        let installedApp = tempRoot.appendingPathComponent("CodexAgySync.app", isDirectory: true)
         try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
         try "v0.4.1".write(to: installedApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -1474,12 +1515,12 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let zipBytes = Data("staged-zip-050".utf8)
         let sums = """
         \(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.5.0-py3-none-any.whl
-        \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgyHandoff-macos.zip
+        \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip
         """
         let apiURL = URL(string: "http://127.0.0.1:30013/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:30013/SHA256SUMS")!
         let wheelURL = URL(string: "http://127.0.0.1:30013/codex_agy_sync-0.5.0-py3-none-any.whl")!
-        let zipURL = URL(string: "http://127.0.0.1:30013/CodexAgyHandoff-macos.zip")!
+        let zipURL = URL(string: "http://127.0.0.1:30013/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
           "tag_name": "v0.5.0",
@@ -1487,7 +1528,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
             {"name": "codex_agy_sync-0.5.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
-            {"name": "CodexAgyHandoff-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
         """
@@ -1503,7 +1544,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
             }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
-                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
                 try "v0.5.0".write(to: appDir.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
@@ -2321,10 +2362,10 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-skipreplace-\(UUID().uuidString)", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
-        let installedApp = tempRoot.appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+        let installedApp = tempRoot.appendingPathComponent("CodexAgySync.app", isDirectory: true)
         let updatesRoot = tempRoot.appendingPathComponent("updates", isDirectory: true)
         let staged050 = updatesRoot.appendingPathComponent("staged/0.5.0", isDirectory: true)
-        let extractedApp = staged050.appendingPathComponent("extracted/CodexAgyHandoff.app", isDirectory: true)
+        let extractedApp = staged050.appendingPathComponent("extracted/CodexAgySync.app", isDirectory: true)
         try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: extractedApp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
@@ -2344,7 +2385,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             notesSummary: "",
             wheelFileName: wheelName,
             wheelSHA256: SHA256Verifier.sha256Hex(of: wheelBytes),
-            appBundleName: "CodexAgyHandoff.app",
+            appBundleName: "CodexAgySync.app",
             stagedAtEpoch: 1_795_000_000
         )
         try JSONEncoder().encode(manifest).write(to: staged050.appendingPathComponent("stage-manifest.json"))
@@ -2404,5 +2445,203 @@ final class PreferencesAndUpdateTests: XCTestCase {
         } else {
             XCTFail("Expected .failed after relaunch failure")
         }
+    }
+
+    @MainActor
+    func testLegacyUserDefaultsOneTimeMigrationSeedsEmptyPrimaryOnlyOnce() throws {
+        let (primary, primarySuite) = makeIsolatedDefaults()
+        let (legacy, legacySuite) = makeIsolatedDefaults()
+        defer {
+            primary.removePersistentDomain(forName: primarySuite)
+            legacy.removePersistentDomain(forName: legacySuite)
+        }
+
+        let expectedLegacyDomain = "dev.semanticcraft." + ["codex", "agy", "hand" + "off"].joined(separator: "-")
+        XCTAssertEqual(PreferencesStore.legacyPreferencesSuiteName, expectedLegacyDomain)
+
+        let seededLegacyPrefs = AppPreferences(
+            showAttentionDotOnStatusIcon: false,
+            hotKey: .defaultShortcut,
+            hotKeyBehavior: .togglePanelOnly,
+            activateTargetAppAfterHandoff: false,
+            recentFeedLimit: 10,
+            customCLIPath: nil,
+            localRepoPathForSync: "/repos/migrated-sync",
+            language: .en,
+            autoUpdatePolicy: .autoStage
+        )
+        let encoded = try JSONEncoder().encode(seededLegacyPrefs)
+        let jsonObj = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.set(jsonObj, forKey: PreferencesStore.preferencesDefaultsKey)
+        legacy.set("/opt/legacy-bin/codex-agy-sync", forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
+
+        let migrated = PreferencesStore(
+            defaults: primary,
+            legacyDefaults: legacy,
+            loginItemManager: NoOpLoginItemManager()
+        )
+        XCTAssertFalse(migrated.preferences.showAttentionDotOnStatusIcon)
+        XCTAssertEqual(migrated.preferences.hotKeyBehavior, .togglePanelOnly)
+        XCTAssertFalse(migrated.preferences.activateTargetAppAfterHandoff)
+        XCTAssertEqual(migrated.preferences.recentFeedLimit, 10)
+        XCTAssertEqual(migrated.preferences.localRepoPathForSync, "/repos/migrated-sync")
+        XCTAssertEqual(migrated.preferences.language, .en)
+        XCTAssertEqual(migrated.preferences.autoUpdatePolicy, .autoStage)
+        XCTAssertEqual(migrated.preferences.customCLIPath, "/opt/legacy-bin/codex-agy-sync")
+        XCTAssertNotNil(primary.object(forKey: PreferencesStore.preferencesDefaultsKey))
+        XCTAssertEqual(
+            primary.string(forKey: SubprocessCLIClient.cliExecutableDefaultsKey),
+            "/opt/legacy-bin/codex-agy-sync"
+        )
+
+        migrated.setRecentFeedLimit(5)
+        var mutatedLegacy = jsonObj
+        mutatedLegacy["recentFeedLimit"] = 12
+        legacy.set(mutatedLegacy, forKey: PreferencesStore.preferencesDefaultsKey)
+
+        let reloaded = PreferencesStore(
+            defaults: primary,
+            legacyDefaults: legacy,
+            loginItemManager: NoOpLoginItemManager()
+        )
+        XCTAssertEqual(reloaded.preferences.recentFeedLimit, 5)
+    }
+
+    @MainActor
+    func testBundleResolutionRejectsPlainFileAndSymlinkAndRenamesLegacyBundleOnReplace() async throws {
+        let (defaults, suiteName) = makeIsolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-agy-hardening-\(UUID().uuidString)", isDirectory: true)
+        let extractDir = tempRoot.appendingPathComponent("extract", isDirectory: true)
+        let outsideDir = tempRoot.appendingPathComponent("outside", isDirectory: true)
+        let outsideApp = outsideDir.appendingPathComponent("OutsideReal.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideApp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let fakeFileApp = extractDir.appendingPathComponent("Fake.app", isDirectory: false)
+        try Data("not-a-directory".utf8).write(to: fakeFileApp)
+        XCTAssertFalse(UpdateViewModel.isRealAppBundleDirectory(fakeFileApp, inside: extractDir))
+        XCTAssertEqual(
+            UpdateViewModel.resolveExtractedAppBundle(in: extractDir).lastPathComponent,
+            "CodexAgySync.app"
+        )
+        try FileManager.default.removeItem(at: fakeFileApp)
+
+        let evilSymlinkApp = extractDir.appendingPathComponent("Evil.app", isDirectory: false)
+        try FileManager.default.createSymbolicLink(at: evilSymlinkApp, withDestinationURL: outsideApp)
+        XCTAssertFalse(UpdateViewModel.isRealAppBundleDirectory(evilSymlinkApp, inside: extractDir))
+        XCTAssertEqual(
+            UpdateViewModel.resolveExtractedAppBundle(in: extractDir).lastPathComponent,
+            "CodexAgySync.app"
+        )
+        try FileManager.default.removeItem(at: evilSymlinkApp)
+
+        let spoofedPreferred = extractDir.appendingPathComponent("CodexAgySync.app", isDirectory: false)
+        try FileManager.default.createSymbolicLink(at: spoofedPreferred, withDestinationURL: outsideApp)
+        XCTAssertFalse(UpdateViewModel.isRealAppBundleDirectory(spoofedPreferred, inside: extractDir))
+        let resolvedSpoofed = UpdateViewModel.resolveExtractedAppBundle(in: extractDir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: resolvedSpoofed.path))
+
+        let updatesRoot = tempRoot.appendingPathComponent("updates", isDirectory: true)
+        let staged050 = updatesRoot.appendingPathComponent("staged/0.5.0", isDirectory: true)
+        let stagedExtracted = staged050.appendingPathComponent("extracted", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagedExtracted, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: stagedExtracted.appendingPathComponent("CodexAgySync.app", isDirectory: false),
+            withDestinationURL: outsideApp
+        )
+        let badManifest = StagedUpdateManifest(
+            tagName: "v0.5.0",
+            version: "0.5.0",
+            notesSummary: "",
+            wheelFileName: nil,
+            wheelSHA256: nil,
+            appBundleName: "CodexAgySync.app",
+            stagedAtEpoch: 1_795_000_000
+        )
+        try JSONEncoder().encode(badManifest).write(to: staged050.appendingPathComponent("stage-manifest.json"))
+
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
+        let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
+        let installDir = tempRoot.appendingPathComponent("apps", isDirectory: true)
+        let legacyBundleName = ["Codex", "Agy", "Hand" + "off"].joined() + ".app"
+        let legacyAppURL = installDir.appendingPathComponent(legacyBundleName, isDirectory: true)
+        try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: legacyAppURL, withIntermediateDirectories: true)
+        try "v0.4.1".write(to: legacyAppURL.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+        try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.4.2\"\n"
+            .write(to: repoDir.appendingPathComponent("pyproject.toml"), atomically: true, encoding: .utf8)
+        let buildScript = scriptsDir.appendingPathComponent("build_menubar_app.sh")
+        try "#!/bin/sh\nexit 0\n".write(to: buildScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: buildScript.path)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
+
+        let cliVerLock = NSLock()
+        nonisolated(unsafe) var cliVer = "0.4.1"
+        let runner = StubCommandRunner { exe, args in
+            if args == ["--version"] {
+                return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(cliVerLock.withLock { cliVer })\n".utf8), stderr: Data())
+            }
+            if args.first == "-c" {
+                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":true,"repo_path":null}"#
+                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
+            }
+            if exe.lastPathComponent == "build_menubar_app.sh",
+               let outIdx = args.firstIndex(of: "--output-dir"),
+               outIdx + 1 < args.count
+            {
+                let outApp = URL(fileURLWithPath: args[outIdx + 1]).appendingPathComponent("CodexAgySync.app", isDirectory: true)
+                try FileManager.default.createDirectory(at: outApp, withIntermediateDirectories: true)
+                try "v0.4.2".write(to: outApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            if args.prefix(3) == ["-m", "pip", "install"] {
+                cliVerLock.withLock { cliVer = "0.4.2" }
+                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+
+        let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
+        let relaunchMock = StubRelaunchExecutor()
+        let legacyBundleID = "dev.semanticcraft." + ["codex", "agy", "hand" + "off"].joined(separator: "-")
+        let vm = UpdateViewModel(
+            preferencesStore: prefs,
+            appVersion: "0.4.1",
+            currentBundleIdentifier: legacyBundleID,
+            currentAppBundleURL: legacyAppURL,
+            environment: ["CODEX_AGY_SYNC_BIN": cliBin.path],
+            commandRunner: runner,
+            httpFetcher: StubHTTPFetcher(routes: [:]),
+            relaunchExecutor: relaunchMock,
+            stagingRootOverride: updatesRoot
+        )
+
+        await vm.probeEnvironment()
+        XCTAssertNil(vm.stagedManifest)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged050.path))
+
+        prefs.setLocalRepoPathForSync(repoDir.path)
+        await vm.syncFromLocalRepo()
+
+        let buildCall = try XCTUnwrap(runner.invocations.first { $0.executablePath == buildScript.path })
+        XCTAssertTrue(buildCall.arguments.contains("dev.semanticcraft.codex-agy-sync"))
+        XCTAssertFalse(buildCall.arguments.contains(legacyBundleID))
+
+        let renamedAppURL = installDir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyAppURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamedAppURL.path))
+        XCTAssertEqual(
+            try String(contentsOf: renamedAppURL.appendingPathComponent("version.txt"), encoding: .utf8),
+            "v0.4.2"
+        )
+        XCTAssertEqual(vm.currentAppBundleURL?.standardizedFileURL, renamedAppURL.standardizedFileURL)
+        XCTAssertTrue(vm.relaunchApp())
+        XCTAssertEqual(relaunchMock.relaunchedURLs.map(\.standardizedFileURL), [renamedAppURL.standardizedFileURL])
     }
 }

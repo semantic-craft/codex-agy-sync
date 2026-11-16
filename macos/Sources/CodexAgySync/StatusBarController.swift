@@ -1,5 +1,5 @@
 import AppKit
-import CodexAgyHandoffCore
+import CodexAgySyncCore
 import Combine
 import SwiftUI
 
@@ -60,7 +60,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        panel.title = "CodexAgyHandoff"
+        panel.title = "CodexAgySync"
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isOpaque = false

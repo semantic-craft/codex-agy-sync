@@ -216,6 +216,8 @@ class HandoffCliUxTest(unittest.TestCase):
             self.assertTrue(diag.agy_daemon_active and not diag.codex_daemon_active)
             joined_steps = "\n".join(diag.remediation_steps)
             self.assertIn("Antigravity Desktop", joined_steps)
+            self.assertIn("codex-agy-sync sync -w", joined_steps)
+            self.assertNotIn("codex-agy-sync handoff", joined_steps)
             self.assertIn("--pair-if-offline", joined_steps)
             self.assertIn("codex-agy-sync pair -w", joined_steps)
 
@@ -224,7 +226,7 @@ class HandoffCliUxTest(unittest.TestCase):
             self.assertIn("pair", str(exc_ctx.exception))
             self.assertEqual(exc_ctx.exception.to_error_payload()["error"], "unpaired_workspace")
 
-            rc, out, err = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--source-id", str(tid)])
+            rc, out, err = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--source-id", str(tid)])
             self.assertEqual(rc, 2)
             self.assertEqual(out, "")
             err_json = json.loads(err)
@@ -253,7 +255,7 @@ class HandoffCliUxTest(unittest.TestCase):
             mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", side_effect=self._activate_agy_rpc),
         ):
             rc, out, err = self._run_cli_inproc([
-                "handoff", "-w", str(self.workspace), "--source-id", str(tid), "--pair-if-offline",
+                "sync", "-w", str(self.workspace), "--source-id", str(tid), "--pair-if-offline",
             ])
         self.assertEqual(rc, 0, err)
         receipt = json.loads(out)
@@ -280,7 +282,7 @@ class HandoffCliUxTest(unittest.TestCase):
         self.assertEqual(json.loads(err_pair)["error"], "sync_busy_lock")
 
         rc_busy, out_busy, err_busy = self._run_cli_inproc([
-            "handoff", "-w", str(busy_ws), "--source-id", str(tid), "--pair-if-offline",
+            "sync", "-w", str(busy_ws), "--source-id", str(tid), "--pair-if-offline",
         ])
         self.assertEqual(rc_busy, 2)
         self.assertEqual(out_busy, "")
@@ -328,16 +330,16 @@ class HandoffCliUxTest(unittest.TestCase):
             resolve_handoff_request(self.paths, self.workspace, source_id="99999999-9999-4999-8999-999999999999")
 
         with self._mock_live_daemons():
-            rc, out, _ = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--source-id", str(codex_tid)])
+            rc, out, _ = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--source-id", str(codex_tid)])
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(out)["target_host"], "antigravity")
 
         for combo in (
-            ["handoff", "-w", str(self.workspace), "--chain", "--latest"],
-            ["handoff", "-w", str(self.workspace), "--chain", "--pick"],
-            ["handoff", "-w", str(self.workspace), "--source-id", str(codex_tid), "--latest"],
-            ["handoff", "-w", str(self.workspace), "--source-id", str(codex_tid), "--pick"],
-            ["handoff", "-w", str(self.workspace), "--latest", "--pick"],
+            ["sync", "-w", str(self.workspace), "--chain", "--latest"],
+            ["sync", "-w", str(self.workspace), "--chain", "--pick"],
+            ["sync", "-w", str(self.workspace), "--source-id", str(codex_tid), "--latest"],
+            ["sync", "-w", str(self.workspace), "--source-id", str(codex_tid), "--pick"],
+            ["sync", "-w", str(self.workspace), "--latest", "--pick"],
         ):
             sub_res = subprocess.run([sys.executable, str(self.cli_bin)] + self._base_cli_args() + combo, capture_output=True, text=True)
             self.assertEqual(sub_res.returncode, 2, f"Expected exit 2 for {combo}: {sub_res.stderr}")
@@ -371,7 +373,7 @@ class HandoffCliUxTest(unittest.TestCase):
         self.assertTrue(src_cand.already_handed_ready and src_cand.handed_target_id == target_cid)
 
         with self._mock_live_daemons():
-            rc_noop, out_noop, _ = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--latest"])
+            rc_noop, out_noop, _ = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--latest"])
         self.assertEqual(rc_noop, 0)
         noop_json = json.loads(out_noop)
         self.assertEqual(noop_json["status"], "no_op")
@@ -385,7 +387,7 @@ class HandoffCliUxTest(unittest.TestCase):
         cands_after = list_handoff_candidates(self.paths, binding)
         self.assertFalse(next(c for c in cands_after if c.session_id == target_cid).is_untouched_baton_target)
         with self._mock_live_daemons():
-            rc_hop, out_hop, _ = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--latest"])
+            rc_hop, out_hop, _ = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--latest"])
         self.assertEqual(rc_hop, 0)
         hop_json = json.loads(out_hop)
         self.assertEqual(hop_json["status"], "ready")
@@ -401,7 +403,7 @@ class HandoffCliUxTest(unittest.TestCase):
         )
 
         with self._mock_live_daemons():
-            rc0, out0, _ = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--chain"])
+            rc0, out0, _ = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--chain"])
         self.assertEqual(rc0, 0)
         r0 = json.loads(out0)
         self.assertEqual(r0["status"], "ready")
@@ -410,7 +412,7 @@ class HandoffCliUxTest(unittest.TestCase):
         self.assertEqual(r0["target_seed_turn_count"], 1)
 
         with self._mock_live_daemons():
-            rc_idem, out_idem, _ = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--chain"])
+            rc_idem, out_idem, _ = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--chain"])
         self.assertEqual(rc_idem, 0)
         r_idem = json.loads(out_idem)
         self.assertEqual(r_idem["status"], "no_op")
@@ -429,7 +431,7 @@ class HandoffCliUxTest(unittest.TestCase):
             resolve_handoff_request(self.paths, self.workspace, chain=True, direction=SyncDirection.CODEX_TO_AGY)
 
         with self._mock_live_daemons():
-            rc1, out1, err1 = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--chain"])
+            rc1, out1, err1 = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--chain"])
         self.assertEqual(rc1, 0, err1)
         r1 = json.loads(out1)
         self.assertEqual((r1["status"], r1["chain_id"], r1["chain_depth"], r1["source_id"], r1["target_host"]), ("ready", r0["chain_id"], 1, str(t0_cid), "codex"))
@@ -442,7 +444,7 @@ class HandoffCliUxTest(unittest.TestCase):
         )
         self.transport.apply_to_agy(binding, t0_cid, t0_upd2.events, t0_upd2, self.bridge.guard.probe_locks(t0_cid, None), TransportMode.OFFLINE_STORAGE)
         with self._mock_live_daemons():
-            rc2, out2, _ = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--chain"])
+            rc2, out2, _ = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--chain"])
         self.assertEqual(rc2, 0)
         r2 = json.loads(out2)
         self.assertEqual((r2["status"], r2["chain_id"], r2["chain_depth"], r2["source_id"]), ("ready", r0["chain_id"], 2, str(t0_cid)))
@@ -459,7 +461,7 @@ class HandoffCliUxTest(unittest.TestCase):
         }), encoding="utf-8")
         with self.assertRaises(HandoffPendingError):
             resolve_handoff_request(self.paths, self.workspace, chain=True)
-        rc_p, out_p, err_p = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--chain"])
+        rc_p, out_p, err_p = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--chain"])
         self.assertEqual(rc_p, 2)
         self.assertEqual(out_p, "")
         self.assertEqual(json.loads(err_p)["status"], "pending")
@@ -531,7 +533,7 @@ class HandoffCliUxTest(unittest.TestCase):
         for flag in ("--latest", "--chain", "--source-id", "--pick"):
             self.assertIn(flag, msg)
 
-        rc_nontty, out_nontty, err_nontty = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--pick"])
+        rc_nontty, out_nontty, err_nontty = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--pick"])
         self.assertEqual(rc_nontty, 2)
         self.assertEqual(out_nontty, "")
         self.assertEqual(json.loads(err_nontty)["error"], "invalid_handoff_request")
@@ -541,7 +543,7 @@ class HandoffCliUxTest(unittest.TestCase):
 
         with self._mock_live_daemons():
             rc, out, err = self._run_cli_inproc(
-                ["handoff", "-w", str(self.workspace), "--pick"],
+                ["sync", "-w", str(self.workspace), "--pick"],
                 stdin_text="1\n", stdin_tty=True, stderr_tty=True,
             )
         self.assertEqual(rc, 0)
@@ -553,7 +555,7 @@ class HandoffCliUxTest(unittest.TestCase):
             with self.assertRaises(HandoffCancelledError):
                 resolve_handoff_request(self.paths, self.workspace, stdin_isatty=True, stderr_isatty=True)
 
-        rc_q, out_q, err_q = self._run_cli_inproc(["handoff", "-w", str(self.workspace)], stdin_text="q\n", stdin_tty=True, stderr_tty=True)
+        rc_q, out_q, err_q = self._run_cli_inproc(["sync", "-w", str(self.workspace)], stdin_text="q\n", stdin_tty=True, stderr_tty=True)
         self.assertEqual(rc_q, 2)
         self.assertEqual(out_q, "")
         self.assertEqual(json.loads(err_q[err_q.index("{"):])["error"], "handoff_cancelled")
@@ -590,7 +592,7 @@ class HandoffCliUxTest(unittest.TestCase):
                 resolve_handoff_request(self.paths, self.workspace, source_id=sid)
             with self.assertRaisesRegex(ValueError, "does not belong to workspace"):
                 handoff_session(self.paths, self.workspace, direction=explicit_dir, source_id=sid)
-            rc, out, err = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--source-id", sid])
+            rc, out, err = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--source-id", sid])
             self.assertEqual((rc, out, json.loads(err)["error"]), (2, "", "invalid_handoff_request"))
 
         shared_cross_ws = "55555555-5555-4555-8555-555555555704"
@@ -720,7 +722,7 @@ class HandoffCliUxTest(unittest.TestCase):
         self.transport.apply_to_codex(binding, CodexThreadId(s_inc), inc_ledger.events, inc_ledger, self.bridge.guard.probe_locks(None, CodexThreadId(s_inc)), TransportMode.OFFLINE_STORAGE)
         with self.assertRaisesRegex(ValueError, "incomplete"):
             resolve_handoff_request(self.paths, self.workspace, latest=True)
-        rc_inc, out_inc, err_inc = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--latest"])
+        rc_inc, out_inc, err_inc = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--latest"])
         self.assertEqual((rc_inc, out_inc, json.loads(err_inc)["error"]), (2, "", "invalid_handoff_request"))
 
         (state_dir / "pending-inc.json").write_text(json.dumps({
@@ -750,10 +752,11 @@ class HandoffCliUxTest(unittest.TestCase):
                 with self.assertRaises(SyncBusyLockError) as h_ctx:
                     handoff_session(self.paths, self.workspace, direction=SyncDirection.CODEX_TO_AGY, source_id=str(tid))
                 self.assertEqual(h_ctx.exception.host, "handoff")
-                rc, out, err = self._run_cli_inproc(["handoff", "-w", str(self.workspace), "--source-id", str(tid)])
+                rc, out, err = self._run_cli_inproc(["sync", "-w", str(self.workspace), "--source-id", str(tid)])
                 self.assertEqual((rc, out), (2, ""))
                 err_j = json.loads(err)
                 self.assertEqual((err_j["error"], err_j["host"]), ("sync_busy_lock", "handoff"))
+                self.assertIn("codex-agy-sync sync -w", err_j["remediation"][0])
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
 
@@ -769,3 +772,21 @@ class HandoffCliUxTest(unittest.TestCase):
                 self.assertEqual(s_ctx.exception.host, "sync")
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def test_11_removed_handoff_subcommand_exits_2_and_help_lists_sync(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc_ctx:
+            cli_main(["handoff", "--latest"])
+        self.assertEqual(exc_ctx.exception.code, 2)
+
+        help_res = subprocess.run([sys.executable, str(self.cli_bin), "--help"], capture_output=True, text=True, check=False)
+        self.assertEqual(help_res.returncode, 0)
+        choices = {tok.strip() for tok in help_res.stdout.split("{", 1)[1].split("}", 1)[0].split(",")}
+        self.assertIn("sync", choices)
+        self.assertNotIn("handoff", choices)
+        self.assertNotIn("handoff", help_res.stdout.lower())
+
+        sync_help = io.StringIO()
+        with contextlib.redirect_stdout(sync_help), self.assertRaises(SystemExit) as sh_ctx:
+            cli_main(["sync", "--help"])
+        self.assertEqual(sh_ctx.exception.code, 0)
+        self.assertNotIn("handoff", sync_help.getvalue().lower())
