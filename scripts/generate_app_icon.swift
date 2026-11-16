@@ -153,97 +153,79 @@ func renderIconCanvas(px: Int) throws -> Data {
         options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
     )
 
-    let railWidth: CGFloat = px <= 32 ? 128 : 112
-    let railRadius = railWidth / 2.0
-    let leftX: CGFloat = 324
-    let rightX: CGFloat = 700
-    let railBottomY: CGFloat = 244
-    let railHeight: CGFloat = 536
+    let isSmall = px <= 32
+    let barHeight: CGFloat = isSmall ? 104 : 80
+    let strokeWidth: CGFloat = isSmall ? 104 : 80
+    let pillRadius = barHeight / 2.0
 
-    let leftRailRect = CGRect(x: leftX - railRadius, y: railBottomY, width: railWidth, height: railHeight)
-    let leftRailPath = CGPath(roundedRect: leftRailRect, cornerWidth: railRadius, cornerHeight: railRadius, transform: nil)
+    let seg1Width: CGFloat = isSmall ? 100 : 96
+    let seg2Width: CGFloat = isSmall ? 184 : 176
+    let gap: CGFloat = isSmall ? 48 : 52
+    let chevronDepth: CGFloat = 140
+    let chevronSpan: CGFloat = 140
+    let arrowLength: CGFloat = 210
+
+    let arrowVisualLength = arrowLength + strokeWidth
+    let totalVisualWidth = seg1Width + gap + seg2Width + gap + arrowVisualLength
+
+    let startX: CGFloat = (1024.0 - totalVisualWidth) / 2.0
+    let centerY: CGFloat = 512.0
+    let barY: CGFloat = centerY - pillRadius
+
+    let seg1Rect = CGRect(x: startX, y: barY, width: seg1Width, height: barHeight)
+    let seg1Path = CGPath(roundedRect: seg1Rect, cornerWidth: pillRadius, cornerHeight: pillRadius, transform: nil)
     ctx.saveGState()
-    ctx.addPath(leftRailPath)
+    ctx.addPath(seg1Path)
     ctx.clip()
     ctx.drawLinearGradient(
         makeLinearGradient(0x60A5FA, 0x2563EB, colorSpace: colorSpace),
-        start: CGPoint(x: leftX, y: railBottomY + railHeight),
-        end: CGPoint(x: leftX, y: railBottomY),
+        start: CGPoint(x: seg1Rect.midX, y: seg1Rect.maxY),
+        end: CGPoint(x: seg1Rect.midX, y: seg1Rect.minY),
         options: []
     )
     ctx.restoreGState()
 
-    let rightRailRect = CGRect(x: rightX - railRadius, y: railBottomY, width: railWidth, height: railHeight)
-    let rightRailPath = CGPath(roundedRect: rightRailRect, cornerWidth: railRadius, cornerHeight: railRadius, transform: nil)
+    let seg2X = startX + seg1Width + gap
+    let seg2Rect = CGRect(x: seg2X, y: barY, width: seg2Width, height: barHeight)
+    let seg2Path = CGPath(roundedRect: seg2Rect, cornerWidth: pillRadius, cornerHeight: pillRadius, transform: nil)
     ctx.saveGState()
-    ctx.addPath(rightRailPath)
+    ctx.addPath(seg2Path)
     ctx.clip()
     ctx.drawLinearGradient(
-        makeLinearGradient(0xFB923C, 0xEA580C, colorSpace: colorSpace),
-        start: CGPoint(x: rightX, y: railBottomY + railHeight),
-        end: CGPoint(x: rightX, y: railBottomY),
+        makeLinearGradient(0xA78BFA, 0x7C3AED, colorSpace: colorSpace),
+        start: CGPoint(x: seg2Rect.midX, y: seg2Rect.maxY),
+        end: CGPoint(x: seg2Rect.midX, y: seg2Rect.minY),
         options: []
     )
     ctx.restoreGState()
 
-    let leftNode = CGPoint(x: leftX, y: 368)
-    let rightNode = CGPoint(x: rightX, y: 656)
-    let bridgePath = CGMutablePath()
-    bridgePath.move(to: leftNode)
-    bridgePath.addCurve(
-        to: rightNode,
-        control1: CGPoint(x: 504, y: 368),
-        control2: CGPoint(x: 520, y: 656)
-    )
+    let arrowVisualStartX = seg2X + seg2Width + gap
+    let arrowStartX = arrowVisualStartX + (strokeWidth / 2.0)
+    let arrowApexX = arrowStartX + arrowLength
+    let arrowChevronBaseX = arrowApexX - chevronDepth
 
-    let bridgeWidth: CGFloat = px <= 32 ? 92 : 76
-    let nodeOuterRadius: CGFloat = px <= 32 ? 70 : 60
+    let arrowPath = CGMutablePath()
+    arrowPath.move(to: CGPoint(x: arrowStartX, y: centerY))
+    arrowPath.addLine(to: CGPoint(x: arrowApexX - strokeWidth * 0.25, y: centerY))
+    arrowPath.move(to: CGPoint(x: arrowChevronBaseX, y: centerY + chevronSpan))
+    arrowPath.addLine(to: CGPoint(x: arrowApexX, y: centerY))
+    arrowPath.addLine(to: CGPoint(x: arrowChevronBaseX, y: centerY - chevronSpan))
 
+    ctx.saveGState()
     if px >= 64 {
-        ctx.saveGState()
         ctx.setShadow(
-            offset: CGSize(width: 0, height: -8),
-            blur: 18,
+            offset: CGSize(width: 0, height: -10),
+            blur: 20,
             color: CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.42)
         )
-        ctx.setStrokeColor(srgb(0xFFFFFF))
-        ctx.setLineWidth(bridgeWidth)
-        ctx.setLineCap(.round)
-        ctx.addPath(bridgePath)
-        ctx.strokePath()
-        ctx.restoreGState()
-    } else {
-        ctx.saveGState()
-        ctx.setStrokeColor(srgb(0xFFFFFF))
-        ctx.setLineWidth(bridgeWidth)
-        ctx.setLineCap(.round)
-        ctx.addPath(bridgePath)
-        ctx.strokePath()
-        ctx.restoreGState()
     }
-
-    for (center, coreHex) in [(leftNode, UInt32(0x2563EB)), (rightNode, UInt32(0xEA580C))] {
-        let outerRect = CGRect(
-            x: center.x - nodeOuterRadius,
-            y: center.y - nodeOuterRadius,
-            width: nodeOuterRadius * 2,
-            height: nodeOuterRadius * 2
-        )
-        ctx.setFillColor(srgb(0xFFFFFF))
-        ctx.fillEllipse(in: outerRect)
-
-        if px >= 64 {
-            let innerRadius: CGFloat = 24
-            let innerRect = CGRect(
-                x: center.x - innerRadius,
-                y: center.y - innerRadius,
-                width: innerRadius * 2,
-                height: innerRadius * 2
-            )
-            ctx.setFillColor(srgb(coreHex))
-            ctx.fillEllipse(in: innerRect)
-        }
-    }
+    ctx.setStrokeColor(srgb(0xFFFFFF))
+    ctx.setLineWidth(strokeWidth)
+    ctx.setLineCap(.round)
+    ctx.setLineJoin(.round)
+    ctx.addPath(arrowPath)
+    ctx.strokePath()
+    ctx.restoreGState()
 
     let rimInset: CGFloat = 5
     let rimRect = squircleRect.insetBy(dx: rimInset, dy: rimInset)
