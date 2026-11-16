@@ -1,4 +1,5 @@
 import AppKit
+import CoreFoundation
 import CryptoKit
 import Foundation
 
@@ -559,6 +560,128 @@ public enum UpdatePathGuard {
             }
             try? fileManager.removeItem(at: canonicalChild)
         }
+    }
+
+    public static func cleanupLegacyUpdateResidue(
+        appSupportDirectory: URL? = nil,
+        cachesDirectory: URL? = nil,
+        preferencesDirectory: URL? = nil,
+        removeLegacyPreferencesDomains: Bool = false,
+        fileManager: FileManager = .default
+    ) {
+        let legacyAppName = PreferencesStore.legacyAppName
+        let legacyBundleID = PreferencesStore.legacyPreferencesSuiteName
+
+        if let targetAppSupport = resolveCleanupDirectory(
+            explicit: appSupportDirectory,
+            defaultDirectory: fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        ) {
+            let legacySupportDir = targetAppSupport.appendingPathComponent(legacyAppName, isDirectory: true)
+            try? fileManager.removeItem(at: legacySupportDir)
+        }
+
+        if let targetCaches = resolveCleanupDirectory(
+            explicit: cachesDirectory,
+            defaultDirectory: fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+        ) {
+            let legacyCacheBundleDir = targetCaches.appendingPathComponent(legacyBundleID, isDirectory: true)
+            try? fileManager.removeItem(at: legacyCacheBundleDir)
+            let legacyCacheAppDir = targetCaches.appendingPathComponent(legacyAppName, isDirectory: true)
+            try? fileManager.removeItem(at: legacyCacheAppDir)
+        }
+
+        if removeLegacyPreferencesDomains,
+           let targetPrefsDir = resolveCleanupDirectory(
+               explicit: preferencesDirectory,
+               defaultDirectory: fileManager.homeDirectoryForCurrentUser.appendingPathComponent(
+                   "Library/Preferences",
+                   isDirectory: true
+               )
+           )
+        {
+            if preferencesDirectory == nil {
+                for domain in [legacyBundleID, legacyAppName] {
+                    let plistURL = targetPrefsDir.appendingPathComponent("\(domain).plist", isDirectory: false)
+                    let hasPlistItem = (try? fileManager.attributesOfItem(atPath: plistURL.path)) != nil
+                    let hasAnyHostKeys = (CFPreferencesCopyKeyList(
+                        domain as CFString,
+                        kCFPreferencesCurrentUser,
+                        kCFPreferencesAnyHost
+                    ) as? [String])?.isEmpty == false
+                    let hasCurrentHostKeys = (CFPreferencesCopyKeyList(
+                        domain as CFString,
+                        kCFPreferencesCurrentUser,
+                        kCFPreferencesCurrentHost
+                    ) as? [String])?.isEmpty == false
+
+                    guard hasPlistItem || hasAnyHostKeys || hasCurrentHostKeys else {
+                        continue
+                    }
+
+                    UserDefaults(suiteName: domain)?.removePersistentDomain(forName: domain)
+                    if let anyKeys = CFPreferencesCopyKeyList(
+                        domain as CFString,
+                        kCFPreferencesCurrentUser,
+                        kCFPreferencesAnyHost
+                    ) {
+                        CFPreferencesSetMultiple(
+                            nil,
+                            anyKeys,
+                            domain as CFString,
+                            kCFPreferencesCurrentUser,
+                            kCFPreferencesAnyHost
+                        )
+                    }
+                    if let hostKeys = CFPreferencesCopyKeyList(
+                        domain as CFString,
+                        kCFPreferencesCurrentUser,
+                        kCFPreferencesCurrentHost
+                    ) {
+                        CFPreferencesSetMultiple(
+                            nil,
+                            hostKeys,
+                            domain as CFString,
+                            kCFPreferencesCurrentUser,
+                            kCFPreferencesCurrentHost
+                        )
+                    }
+                    _ = CFPreferencesSynchronize(
+                        domain as CFString,
+                        kCFPreferencesCurrentUser,
+                        kCFPreferencesAnyHost
+                    )
+                    _ = CFPreferencesAppSynchronize(domain as CFString)
+                    try? fileManager.removeItem(at: plistURL)
+                }
+            } else {
+                let legacyBundlePlist = targetPrefsDir.appendingPathComponent("\(legacyBundleID).plist", isDirectory: false)
+                let legacyAppPlist = targetPrefsDir.appendingPathComponent("\(legacyAppName).plist", isDirectory: false)
+                try? fileManager.removeItem(at: legacyBundlePlist)
+                try? fileManager.removeItem(at: legacyAppPlist)
+            }
+        }
+    }
+
+    private static func resolveCleanupDirectory(
+        explicit: URL?,
+        defaultDirectory: @autoclosure () -> URL?
+    ) -> URL? {
+        let candidate: URL
+        if let explicit {
+            candidate = explicit.standardizedFileURL
+        } else {
+            guard let hostDefault = defaultDirectory(),
+                  let validated = try? validateNonTemporaryURL(hostDefault)
+            else {
+                return nil
+            }
+            candidate = validated.standardizedFileURL
+        }
+        let path = candidate.path
+        guard !path.isEmpty, path != "/" else {
+            return nil
+        }
+        return candidate
     }
 
     private static func isTmpPath(_ path: String) -> Bool {

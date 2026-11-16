@@ -1819,9 +1819,11 @@ public final class UpdateViewModel: ObservableObject {
             let renamedURL = effectiveBundleURL
                 .deletingLastPathComponent()
                 .appendingPathComponent("CodexAgySync.app", isDirectory: true)
-            if !fm.fileExists(atPath: renamedURL.path),
-               (try? fm.moveItem(at: effectiveBundleURL, to: renamedURL)) != nil
-            {
+            if fm.fileExists(atPath: renamedURL.path) {
+                if let replaced = try? fm.replaceItemAt(renamedURL, withItemAt: effectiveBundleURL) {
+                    effectiveBundleURL = replaced
+                }
+            } else if (try? fm.moveItem(at: effectiveBundleURL, to: renamedURL)) != nil {
                 effectiveBundleURL = renamedURL
             }
         }

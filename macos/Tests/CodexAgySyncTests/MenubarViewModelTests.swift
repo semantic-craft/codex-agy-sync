@@ -1048,7 +1048,7 @@ final class MenubarViewModelTests: XCTestCase {
 
         let suiteName = "dev.semanticcraft.codex-agy-sync.cli.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let pyBins = SubprocessCLIClient.userPythonBinDirectories(homeDirectory: fakeHome)
         XCTAssertEqual(
@@ -1154,7 +1154,7 @@ final class MenubarViewModelTests: XCTestCase {
 
         let suiteName = "dev.semanticcraft.codex-agy-sync.parity.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let pyBins = SubprocessCLIClient.userPythonBinDirectories(homeDirectory: dir)
         let env: [String: String] = ["PATH": pathBin.path]
@@ -1284,8 +1284,7 @@ final class MenubarViewModelTests: XCTestCase {
 
         let suiteName = "dev.semanticcraft.codex-agy-sync.lang-vm.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
 
@@ -1428,8 +1427,7 @@ final class MenubarViewModelTests: XCTestCase {
 
         let suiteName = "dev.semanticcraft.codex-agy-sync.guard.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
         let hero = makeItem(sessionId: "cid-guard", state: .completedReady)
