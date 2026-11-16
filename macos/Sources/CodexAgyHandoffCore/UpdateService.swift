@@ -561,7 +561,7 @@ public final class UpdateViewModel: ObservableObject {
     ) {
         let resolvedAppVer = appVersion
             ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
-            ?? "0.3.0"
+            ?? "0.4.0"
         self.appVersion = resolvedAppVer
         self.currentBundleIdentifier = currentBundleIdentifier
             ?? Bundle.main.bundleIdentifier

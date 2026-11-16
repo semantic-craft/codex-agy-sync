@@ -26,6 +26,8 @@ DONE_BANNER = "已在 Codex 打开对话"
 SETTINGS_TITLE = "CodexAgyHandoff 设置"
 BUILD_SCRIPT = REPO_ROOT / "scripts" / "build_menubar_app.sh"
 PACKAGE_VERSION = str(tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
+_VER_PARTS = PACKAGE_VERSION.split(".")
+_NEXT_QA_VERSION = f"{_VER_PARTS[0]}.{int(_VER_PARTS[1]) + 1}.0"
 LSREGISTER = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _SEED_CID = "00000000-0000-4000-8000-000000000091"
@@ -88,7 +90,7 @@ def cmd_doctor() -> int:
 class MockReleaseHttpStub:
     """Loopback HTTP server serving a deterministic GitHub Release JSON payload."""
 
-    def __init__(self, tag_name: str = "v0.4.0") -> None:
+    def __init__(self, tag_name: str = f"v{_NEXT_QA_VERSION}") -> None:
         self.tag_name = tag_name
         self.requests: list[str] = []
         self._lock = threading.Lock()
@@ -105,13 +107,14 @@ class MockReleaseHttpStub:
                 with stub._lock:
                     stub.requests.append(self.path)
                 base = f"http://127.0.0.1:{self.server.server_port}"
+                wheel_ver = stub.tag_name.lstrip("vV") or _NEXT_QA_VERSION
                 payload = {
                     "tag_name": stub.tag_name,
                     "html_url": f"https://github.com/semantic-craft/codex-agy-sync/releases/tag/{stub.tag_name}",
                     "body": "QA mock release: unified Settings window and dual sync update",
                     "assets": [
                         {"name": "SHA256SUMS", "browser_download_url": f"{base}/SHA256SUMS", "size": 128},
-                        {"name": "codex_agy_sync-0.4.0-py3-none-any.whl", "browser_download_url": f"{base}/pkg.whl", "size": 64},
+                        {"name": f"codex_agy_sync-{wheel_ver}-py3-none-any.whl", "browser_download_url": f"{base}/pkg.whl", "size": 64},
                         {"name": "CodexAgyHandoff-macos.zip", "browser_download_url": f"{base}/app.zip", "size": 64},
                     ],
                 }
