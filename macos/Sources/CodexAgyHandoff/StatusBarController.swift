@@ -13,6 +13,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private static let panelWidth: CGFloat = 392
 
     private let viewModel: HandoffViewModel
+    private let updateViewModel: UpdateViewModel
     private let environment: [String: String]
     private let statusItem: NSStatusItem
     private let panel: HandoffPanel
@@ -23,6 +24,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private var layoutRefreshScheduled = false
     private var panelLayoutRefreshScheduled = false
     private var lastShowAttentionDot: Bool?
+    private var lastLanguage: ResolvedLanguage?
     private var lastToolTip: String?
     private var cancellables = Set<AnyCancellable>()
 
@@ -32,12 +34,23 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     init(
         viewModel: HandoffViewModel,
+        updateViewModel: UpdateViewModel? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.viewModel = viewModel
+        let resolvedUpdateVM = updateViewModel ?? UpdateViewModel(
+            preferencesStore: viewModel.preferencesStore,
+            environment: environment,
+            canMutateEnvironment: { [weak viewModel] in
+                viewModel?.busyItemId == nil
+            }
+        )
+        self.updateViewModel = resolvedUpdateVM
         self.environment = environment
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        self.hostingController = NSHostingController(rootView: PopoverView(viewModel: viewModel))
+        self.hostingController = NSHostingController(
+            rootView: PopoverView(viewModel: viewModel, updateViewModel: resolvedUpdateVM)
+        )
         self.hostingController.sizingOptions = [.preferredContentSize]
         self.hostingController.safeAreaRegions = []
 
@@ -66,10 +79,22 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
         super.init()
 
+        self.updateViewModel.onPrepareForRelaunch = { [weak self] in
+            self?.hotKey?.unregister()
+        }
+        self.updateViewModel.onRelaunchFailed = { [weak self] in
+            self?.applyHotKeyPreferences()
+        }
+        if viewModel.canMutateEnvironment == nil {
+            viewModel.canMutateEnvironment = { [weak resolvedUpdateVM] in
+                !(resolvedUpdateVM?.isInstallingUpdate ?? false)
+            }
+        }
         self.hostingController.rootView = PopoverView(
             viewModel: viewModel,
-            onOpenSettings: { [weak self] in
-                self?.openSettings()
+            updateViewModel: resolvedUpdateVM,
+            onOpenSettings: { [weak self] tab in
+                self?.openSettings(initialTab: tab)
             }
         )
         self.panel.delegate = self
@@ -82,8 +107,10 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         Publishers.MergeMany(
             viewModel.$snapshot.map { _ in () }.eraseToAnyPublisher(),
             viewModel.$isLoading.map { _ in () }.eraseToAnyPublisher(),
-            viewModel.$banner.map { _ in () }.eraseToAnyPublisher(),
-            viewModel.$cliMissing.map { _ in () }.eraseToAnyPublisher()
+            viewModel.$bannerEvent.map { _ in () }.eraseToAnyPublisher(),
+            viewModel.$cliMissing.map { _ in () }.eraseToAnyPublisher(),
+            resolvedUpdateVM.$popoverNotice.map { _ in () }.eraseToAnyPublisher(),
+            viewModel.preferencesStore.$effectiveLanguage.map { _ in () }.eraseToAnyPublisher()
         )
         .sink { [weak self] _ in
             self?.scheduleChromeRefresh()
@@ -100,24 +127,29 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             viewModel.preferencesStore.$preferences,
             viewModel.preferencesStore.$isRecordingShortcut
         )
-        .sink { [weak self] prefs, isRecording in
+        .sink { [weak self] _, _ in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.updateStatusButtonAppearance()
-                if self.environment["MENUBAR_DISABLE_GLOBAL_HOTKEY"] != "1", let hk = self.hotKey {
-                    if isRecording {
-                        hk.suspend()
-                    } else {
-                        let ok = hk.reconfigure(prefs.hotKey)
-                        self.viewModel.preferencesStore.setHotKeyRegistrationFailed(!ok)
-                    }
-                }
+                self.applyHotKeyPreferences()
                 if self.panel.isVisible {
                     self.positionPanel()
                 }
             }
         }
         .store(in: &cancellables)
+    }
+
+    private func applyHotKeyPreferences() {
+        guard environment["MENUBAR_DISABLE_GLOBAL_HOTKEY"] != "1", let hk = hotKey else {
+            return
+        }
+        if viewModel.preferencesStore.isRecordingShortcut {
+            hk.suspend()
+        } else {
+            let ok = hk.reconfigure(viewModel.preferencesStore.preferences.hotKey)
+            viewModel.preferencesStore.setHotKeyRegistrationFailed(!ok)
+        }
     }
 
     private func scheduleChromeRefresh() {
@@ -175,6 +207,15 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 await viewModel.refresh()
             }
         }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.viewModel.preferencesStore.preferences.autoUpdatePolicy == .off {
+                await self.updateViewModel.probeIfNeeded()
+            } else {
+                await self.updateViewModel.performOpportunisticCheckIfNeeded(trigger: .appLaunched)
+            }
+        }
     }
 
     func stop() {
@@ -187,7 +228,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         cancellables.removeAll()
     }
 
-    func openSettings() {
+    func openSettings(initialTab: SettingsTab = .general) {
         if pinPanel {
             panel.isFloatingPanel = false
             panel.level = .normal
@@ -195,13 +236,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             hidePanel(force: false)
         }
         if settingsController == nil {
-            let updateVM = UpdateViewModel(
-                preferencesStore: viewModel.preferencesStore,
-                environment: environment
-            )
             settingsController = SettingsWindowController(
                 preferencesStore: viewModel.preferencesStore,
-                updateViewModel: updateVM,
+                updateViewModel: updateViewModel,
                 onDidChangeCLI: { [weak self] in
                     Task { @MainActor in
                         await self?.viewModel.refresh()
@@ -209,7 +246,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 }
             )
         }
-        settingsController?.show()
+        settingsController?.show(initialTab: initialTab)
     }
 
     @objc
@@ -245,6 +282,11 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             Task { @MainActor in
                 await viewModel.refresh()
             }
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.updateViewModel.probeEnvironment(recoverStagedFromFailure: true)
+            await self.updateViewModel.performOpportunisticCheckIfNeeded(trigger: .panelOpened)
         }
     }
 
@@ -361,16 +403,19 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private func updateStatusButtonAppearance() {
         guard let button = statusItem.button else { return }
         let prefs = viewModel.preferencesStore.preferences
+        let lang = viewModel.preferencesStore.effectiveLanguage
         let showDot = prefs.showAttentionDotOnStatusIcon && viewModel.needsAttentionBadge
-        if button.image == nil || lastShowAttentionDot != showDot {
-            let icon = MenuBarIconRenderer.image(showAttentionDot: showDot)
-            icon.accessibilityDescription = "对话接力"
+        if button.image == nil || lastShowAttentionDot != showDot || lastLanguage != lang {
+            let icon = MenuBarIconRenderer.image(showAttentionDot: showDot, language: lang)
+            let label = AppCopy.text(.statusItemLabel, in: lang)
+            icon.accessibilityDescription = label
             button.image = icon
-            button.setAccessibilityLabel("对话接力")
+            button.setAccessibilityLabel(label)
             lastShowAttentionDot = showDot
+            lastLanguage = lang
         }
         let shortcutSuffix = prefs.hotKey.isEnabled ? " (\(prefs.hotKey.displayString))" : ""
-        let newToolTip = "对话接力\(shortcutSuffix)"
+        let newToolTip = AppCopy.statusToolTip(shortcutSuffix: shortcutSuffix, in: lang)
         if lastToolTip != newToolTip {
             button.toolTip = newToolTip
             lastToolTip = newToolTip

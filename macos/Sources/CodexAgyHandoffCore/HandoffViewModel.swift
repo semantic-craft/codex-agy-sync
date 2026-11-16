@@ -1,5 +1,82 @@
+import Combine
 import Foundation
 import SwiftUI
+
+public enum LocalizedFailure: Equatable, Sendable {
+    case cli(CLIClientError)
+    case update(UpdateServiceError)
+    case message(String)
+
+    public init(error: Error) {
+        if let cliError = error as? CLIClientError {
+            self = .cli(cliError)
+        } else if let updateError = error as? UpdateServiceError {
+            self = .update(updateError)
+        } else if let localized = error as? LocalizedError, let message = localized.errorDescription {
+            self = .message(message)
+        } else {
+            self = .message(error.localizedDescription)
+        }
+    }
+
+    public func text(in language: ResolvedLanguage) -> String {
+        switch self {
+        case .cli(let cliError):
+            return cliError.localizedMessage(in: language)
+        case .update(let updateError):
+            return updateError.localizedMessage(in: language)
+        case .message(let raw):
+            return raw
+        }
+    }
+}
+
+public enum HandoffBannerEvent: Equatable, Sendable {
+    case handoffOpened(targetName: String, title: String)
+    case handoffOpenedExisting(targetName: String, title: String)
+    case handoffUnconfirmed
+    case handoffFailed(LocalizedFailure)
+    case reconcileCompleted(unresolvedCount: Int)
+    case reconcileFailed(LocalizedFailure)
+    case feedFailed(LocalizedFailure)
+
+    public func statusBanner(in language: ResolvedLanguage) -> StatusBanner {
+        switch self {
+        case .handoffOpened(let targetName, let title):
+            return StatusBanner(
+                kind: .success,
+                text: AppCopy.handoffOpenedBanner(targetName: targetName, title: title, in: language)
+            )
+        case .handoffOpenedExisting(let targetName, let title):
+            return StatusBanner(
+                kind: .info,
+                text: AppCopy.handoffOpenedExistingBanner(targetName: targetName, title: title, in: language)
+            )
+        case .handoffUnconfirmed:
+            return StatusBanner(
+                kind: .error,
+                text: AppCopy.text(.handoffUnconfirmedBanner, in: language)
+            )
+        case .handoffFailed(let failure):
+            return StatusBanner(
+                kind: .error,
+                text: AppCopy.handoffFailedBanner(failure.text(in: language), in: language)
+            )
+        case .reconcileCompleted(let unresolvedCount):
+            return StatusBanner(
+                kind: .success,
+                text: AppCopy.reconcileCompletedBanner(unresolvedCount: unresolvedCount, in: language)
+            )
+        case .reconcileFailed(let failure):
+            return StatusBanner(
+                kind: .error,
+                text: AppCopy.reconcileFailedBanner(failure.text(in: language), in: language)
+            )
+        case .feedFailed(let failure):
+            return StatusBanner(kind: .error, text: failure.text(in: language))
+        }
+    }
+}
 
 public struct PaletteSection: Identifiable, Equatable, Sendable {
     public let id: String
@@ -59,7 +136,7 @@ public final class HandoffViewModel: ObservableObject {
     @Published public private(set) var snapshot: MenubarFeedSnapshot?
     @Published public private(set) var isLoading: Bool = false
     @Published public private(set) var busyItemId: String?
-    @Published public private(set) var banner: StatusBanner?
+    @Published public private(set) var bannerEvent: HandoffBannerEvent?
     @Published public private(set) var cliMissing: Bool = false
     @Published public var searchQuery: String = "" {
         didSet {
@@ -72,11 +149,17 @@ public final class HandoffViewModel: ObservableObject {
 
     public let preferencesStore: PreferencesStore
     public var onDidHandoffAndActivate: (() -> Void)?
+    public var canMutateEnvironment: (@MainActor () -> Bool)?
+
+    public var banner: StatusBanner? {
+        bannerEvent?.statusBanner(in: preferencesStore.effectiveLanguage)
+    }
 
     private let cli: any CLIRunnerProtocol
     private let activator: any AppActivating
     private let explicitFeedLimit: Int?
     private var activeRefreshTask: Task<Bool, Never>?
+    private var cancellables = Set<AnyCancellable>()
 
     public var needsAttentionBadge: Bool {
         guard let state = snapshot?.hero?.state else { return false }
@@ -88,10 +171,17 @@ public final class HandoffViewModel: ObservableObject {
     }
 
     public var sections: [PaletteSection] {
+        let lang = preferencesStore.effectiveLanguage
         var built: [PaletteSection] = []
         let hero = snapshot?.hero
         if let hero, hero.matchesSearchQuery(searchQuery) {
-            built.append(PaletteSection(id: "continue", title: "继续当前工作", items: [hero]))
+            built.append(
+                PaletteSection(
+                    id: "continue",
+                    title: AppCopy.text(.sectionContinue, in: lang),
+                    items: [hero]
+                )
+            )
         }
 
         var seenIds = Set<String>()
@@ -107,7 +197,13 @@ public final class HandoffViewModel: ObservableObject {
         }
         let cappedRecent = Array(filteredRecent.prefix(max(1, effectiveFeedLimit - 1)))
         if !cappedRecent.isEmpty {
-            built.append(PaletteSection(id: "recent", title: "最近对话", items: cappedRecent))
+            built.append(
+                PaletteSection(
+                    id: "recent",
+                    title: AppCopy.text(.sectionRecent, in: lang),
+                    items: cappedRecent
+                )
+            )
         }
         return built
     }
@@ -127,26 +223,37 @@ public final class HandoffViewModel: ObservableObject {
         preferencesStore: PreferencesStore? = nil,
         feedLimit: Int? = nil,
         defaults: UserDefaults? = nil,
+        canMutateEnvironment: (@MainActor () -> Bool)? = nil,
         onDidHandoffAndActivate: (() -> Void)? = nil
     ) {
         self.cli = cli
         self.activator = activator
+        let store: PreferencesStore
         if let preferencesStore {
-            self.preferencesStore = preferencesStore
+            store = preferencesStore
         } else if let defaults {
-            self.preferencesStore = PreferencesStore(
+            store = PreferencesStore(
                 defaults: defaults,
                 loginItemManager: NoOpLoginItemManager()
             )
         } else {
-            self.preferencesStore = PreferencesStore()
+            store = PreferencesStore()
         }
+        self.preferencesStore = store
         self.explicitFeedLimit = feedLimit
+        self.canMutateEnvironment = canMutateEnvironment
         self.onDidHandoffAndActivate = onDidHandoffAndActivate
+
+        store.$effectiveLanguage
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
     }
 
     public func dismissBanner() {
-        banner = nil
+        bannerEvent = nil
     }
 
     public func selectItem(_ id: String?) {
@@ -214,7 +321,7 @@ public final class HandoffViewModel: ObservableObject {
         if let existingTask = activeRefreshTask {
             let succeeded = await existingTask.value
             if succeeded {
-                banner = nil
+                bannerEvent = nil
             }
         } else {
             await refreshFeed(preserveBanner: false)
@@ -236,8 +343,12 @@ public final class HandoffViewModel: ObservableObject {
 
     public func handoff(_ item: MenubarSessionItem) async {
         guard busyItemId == nil else { return }
+        guard canMutateEnvironment?() ?? true else {
+            bannerEvent = .handoffFailed(LocalizedFailure(error: UpdateServiceError.updateInstallationInProgress))
+            return
+        }
         busyItemId = item.id
-        banner = nil
+        bannerEvent = nil
         defer { busyItemId = nil }
 
         do {
@@ -250,31 +361,35 @@ public final class HandoffViewModel: ObservableObject {
                 for: receipt.targetHost.isEmpty ? item.targetHost : receipt.targetHost
             )
             if receipt.status == "ready" {
-                banner = StatusBanner(kind: .success, text: "已在 \(targetName) 打开对话 · \(item.title)")
+                bannerEvent = .handoffOpened(targetName: targetName, title: item.title)
                 if preferencesStore.preferences.activateTargetAppAfterHandoff {
                     _ = await activator.activateTarget(host: item.targetHost)
                     onDidHandoffAndActivate?()
                 }
             } else if receipt.status == "no_op" {
-                banner = StatusBanner(kind: .info, text: "已在 \(targetName) 打开现有对话 · \(item.title)")
+                bannerEvent = .handoffOpenedExisting(targetName: targetName, title: item.title)
                 if preferencesStore.preferences.activateTargetAppAfterHandoff {
                     _ = await activator.activateTarget(host: item.targetHost)
                     onDidHandoffAndActivate?()
                 }
             } else {
-                banner = StatusBanner(kind: .error, text: "切换尚未完成确认，请稍后点击重试同步状态。")
+                bannerEvent = .handoffUnconfirmed
             }
             await refreshFeed(preserveBanner: true)
         } catch {
             updateMissingFlag(for: error)
-            banner = StatusBanner(kind: .error, text: "切换未成功：\(Self.describeError(error))")
+            bannerEvent = .handoffFailed(LocalizedFailure(error: error))
         }
     }
 
     public func reconcile(workspacePath: String? = nil, itemId: String? = nil) async {
         guard busyItemId == nil else { return }
+        guard canMutateEnvironment?() ?? true else {
+            bannerEvent = .reconcileFailed(LocalizedFailure(error: UpdateServiceError.updateInstallationInProgress))
+            return
+        }
         busyItemId = itemId ?? workspacePath ?? "__reconcile__"
-        banner = nil
+        bannerEvent = nil
         defer { busyItemId = nil }
 
         do {
@@ -297,12 +412,11 @@ public final class HandoffViewModel: ObservableObject {
             }
 
             cliMissing = false
-            let message = unresolved == 0 ? "状态已同步" : "状态已同步，仍有 \(unresolved) 条对话等待响应"
-            banner = StatusBanner(kind: .success, text: message)
+            bannerEvent = .reconcileCompleted(unresolvedCount: unresolved)
             await refreshFeed(preserveBanner: true)
         } catch {
             updateMissingFlag(for: error)
-            banner = StatusBanner(kind: .error, text: "状态同步未成功：\(Self.describeError(error))")
+            bannerEvent = .reconcileFailed(LocalizedFailure(error: error))
         }
     }
 
@@ -311,7 +425,7 @@ public final class HandoffViewModel: ObservableObject {
         guard !trimmed.isEmpty else { return }
         preferencesStore.setCustomCLIPath(trimmed)
         cliMissing = false
-        banner = nil
+        bannerEvent = nil
         Task {
             await refresh()
         }
@@ -321,7 +435,7 @@ public final class HandoffViewModel: ObservableObject {
         if let existingTask = activeRefreshTask {
             let succeeded = await existingTask.value
             if succeeded && !preserveBanner {
-                banner = nil
+                bannerEvent = nil
             }
             return
         }
@@ -344,23 +458,25 @@ public final class HandoffViewModel: ObservableObject {
         activeRefreshTask = nil
         isLoading = false
         if succeeded && !preserveBanner {
-            banner = nil
+            bannerEvent = nil
         }
     }
 
     private func navigableItems() -> [MenubarSessionItem] {
+        let lang = preferencesStore.effectiveLanguage
         let items = visibleItems
-        let actionable = items.filter { $0.presentation().isActionable }
+        let actionable = items.filter { $0.presentation(language: lang).isActionable }
         return actionable.isEmpty ? items : actionable
     }
 
     private func reconcileSelection() {
+        let lang = preferencesStore.effectiveLanguage
         let items = visibleItems
         guard !items.isEmpty else {
             selectedItemId = nil
             return
         }
-        let actionable = items.filter { $0.presentation().isActionable }
+        let actionable = items.filter { $0.presentation(language: lang).isActionable }
         if let current = selectedItemId {
             if actionable.contains(where: { $0.id == current }) {
                 return
@@ -392,13 +508,6 @@ public final class HandoffViewModel: ObservableObject {
 
     private func applyError(_ error: Error) {
         updateMissingFlag(for: error)
-        banner = StatusBanner(kind: .error, text: Self.describeError(error))
-    }
-
-    private static func describeError(_ error: Error) -> String {
-        if let localized = error as? LocalizedError, let message = localized.errorDescription {
-            return message
-        }
-        return error.localizedDescription
+        bannerEvent = .feedFailed(LocalizedFailure(error: error))
     }
 }

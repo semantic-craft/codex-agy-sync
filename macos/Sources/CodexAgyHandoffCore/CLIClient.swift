@@ -8,15 +8,19 @@ public enum CLIResolutionSource: String, Codable, Equatable, Sendable {
     case missing = "missing"
 
     public var displayName: String {
+        displayName(in: .zhHans)
+    }
+
+    public func displayName(in language: ResolvedLanguage) -> String {
         switch self {
         case .envOverride:
-            return "环境变量"
+            return AppCopy.text(.cliSourceEnv, in: language)
         case .customPath:
-            return "手动指定"
+            return AppCopy.text(.cliSourceCustom, in: language)
         case .autoDiscovered:
-            return "自动发现"
+            return AppCopy.text(.cliSourceAuto, in: language)
         case .missing:
-            return "未找到"
+            return AppCopy.text(.cliSourceMissing, in: language)
         }
     }
 }
@@ -49,23 +53,23 @@ public enum CLIClientError: LocalizedError, Sendable, Equatable {
     }
 
     public var errorDescription: String? {
+        localizedMessage(in: .zhHans)
+    }
+
+    public func localizedMessage(in language: ResolvedLanguage) -> String {
         switch self {
         case .cliMissing:
-            return "未找到 codex-agy-sync 命令行工具，请点击“选择工具…”指定路径。"
+            return AppCopy.text(.cliMissingError, in: language)
         case .timedOut(_, let seconds):
-            return "命令行工具响应超时（超过 \(Int(seconds)) 秒），请稍后重试。"
+            return AppCopy.cliTimedOut(seconds: seconds, in: language)
         case .structuredError(let payload, _):
-            if let cause = payload.cause, !cause.isEmpty {
-                return "\(payload.message)（\(cause)）"
-            }
-            return payload.message
+            return AppCopy.cliStructuredError(message: payload.message, cause: payload.cause, in: language)
         case .nonZeroExit(let code, let stderr):
-            let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "命令执行返回错误码 \(code)" : "命令执行返回错误码 \(code)：\(trimmed)"
+            return AppCopy.cliNonZeroExit(code: code, stderr: stderr, in: language)
         case .decodingFailed(let detail):
-            return "无法解析工具输出：\(detail)"
+            return AppCopy.cliDecodingFailed(detail, in: language)
         case .launchFailed(let detail):
-            return "无法启动命令行工具：\(detail)"
+            return AppCopy.cliLaunchFailed(detail, in: language)
         }
     }
 }

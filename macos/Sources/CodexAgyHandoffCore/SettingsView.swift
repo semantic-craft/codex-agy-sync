@@ -9,11 +9,15 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 
     public var title: String {
+        title(in: .zhHans)
+    }
+
+    public func title(in language: ResolvedLanguage) -> String {
         switch self {
         case .general:
-            return "常规与接力"
+            return AppCopy.text(.settingsTabGeneral, in: language)
         case .updates:
-            return "版本与同步更新"
+            return AppCopy.text(.settingsTabUpdates, in: language)
         }
     }
 
@@ -27,28 +31,85 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
     }
 
     public var accessibilityLabel: String {
-        "设置分栏：\(title)"
+        accessibilityLabel(in: .zhHans)
+    }
+
+    public func accessibilityLabel(in language: ResolvedLanguage) -> String {
+        AppCopy.settingsTabAccessibility(title(in: language), in: language)
+    }
+}
+
+@MainActor
+public final class SettingsNavigationModel: ObservableObject {
+    @Published public var selectedTab: SettingsTab
+
+    public init(selectedTab: SettingsTab = .general) {
+        self.selectedTab = selectedTab
+    }
+}
+
+@MainActor
+private final class WeakWindowBox {
+    weak var window: NSWindow?
+}
+
+private struct SettingsWindowAccessor: NSViewRepresentable {
+    let onWindowResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = WindowObservingNSView()
+        view.onWindowResolve = onWindowResolve
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let observing = nsView as? WindowObservingNSView {
+            observing.onWindowResolve = onWindowResolve
+            observing.notifyWindowIfNeeded()
+        }
+    }
+
+    private final class WindowObservingNSView: NSView {
+        var onWindowResolve: ((NSWindow?) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            notifyWindowIfNeeded()
+        }
+
+        func notifyWindowIfNeeded() {
+            if let window, window.identifier == nil {
+                window.identifier = SettingsWindowIdentity.identifier
+            }
+            onWindowResolve?(window)
+        }
     }
 }
 
 public struct SettingsView: View {
     @ObservedObject private var preferencesStore: PreferencesStore
     @ObservedObject private var updateViewModel: UpdateViewModel
+    @ObservedObject private var navigation: SettingsNavigationModel
     private let onDidChangeCLI: (() -> Void)?
 
-    @State private var selectedTab: SettingsTab = .general
     @State private var keyMonitor: Any?
+    @State private var hostWindowBox = WeakWindowBox()
 
     public init(
         preferencesStore: PreferencesStore,
         updateViewModel: UpdateViewModel,
         initialTab: SettingsTab = .general,
+        navigation: SettingsNavigationModel? = nil,
         onDidChangeCLI: (() -> Void)? = nil
     ) {
         self.preferencesStore = preferencesStore
         self.updateViewModel = updateViewModel
-        self._selectedTab = State(initialValue: initialTab)
+        self.navigation = navigation ?? SettingsNavigationModel(selectedTab: initialTab)
         self.onDidChangeCLI = onDidChangeCLI
+    }
+
+    private var lang: ResolvedLanguage {
+        preferencesStore.effectiveLanguage
     }
 
     public var body: some View {
@@ -56,7 +117,7 @@ public struct SettingsView: View {
             tabBar
             Divider()
             Group {
-                switch selectedTab {
+                switch navigation.selectedTab {
                 case .general:
                     generalTab
                 case .updates:
@@ -65,8 +126,13 @@ public struct SettingsView: View {
             }
         }
         .padding(18)
-        .frame(width: 500)
+        .frame(width: 520)
         .background(Color(nsColor: .windowBackgroundColor))
+        .background(
+            SettingsWindowAccessor { window in
+                hostWindowBox.window = window
+            }
+        )
         .onChange(of: preferencesStore.isRecordingShortcut) { _, active in
             if !active {
                 removeShortcutKeyMonitor()
@@ -80,14 +146,14 @@ public struct SettingsView: View {
     private var tabBar: some View {
         HStack(spacing: 6) {
             ForEach(SettingsTab.allCases) { tab in
-                let isSelected = selectedTab == tab
+                let isSelected = navigation.selectedTab == tab
                 Button {
                     selectTab(tab)
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: tab.iconName)
                             .font(.system(size: 12, weight: .semibold))
-                        Text(tab.title)
+                        Text(tab.title(in: lang))
                             .font(.system(size: 12, weight: .semibold))
                     }
                     .foregroundStyle(isSelected ? Color.primary : Color.secondary)
@@ -108,7 +174,7 @@ public struct SettingsView: View {
                 }
                 .buttonStyle(FlatSurfaceButtonStyle())
                 .focusEffectDisabled()
-                .accessibilityLabel(tab.accessibilityLabel)
+                .accessibilityLabel(tab.accessibilityLabel(in: lang))
                 .accessibilityAction {
                     selectTab(tab)
                 }
@@ -119,11 +185,49 @@ public struct SettingsView: View {
     private var generalTab: some View {
         VStack(alignment: .leading, spacing: 12) {
             settingsCard {
+                VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(AppCopy.text(.settingsLanguageTitle, in: lang))
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(AppCopy.text(.settingsLanguageSubtitle, in: lang))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 6) {
+                        ForEach(AppLanguage.allCases) { option in
+                            let active = preferencesStore.preferences.language == option
+                            Button {
+                                preferencesStore.setLanguage(option)
+                            } label: {
+                                Text(option.displayName(in: lang))
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(active ? Color.white : Color.primary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 7)
+                                            .fill(active ? Color.accentColor : Color.primary.opacity(0.06))
+                                    )
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(FlatSurfaceButtonStyle())
+                            .focusEffectDisabled()
+                            .accessibilityLabel(AppCopy.languageOptionAccessibility(option, in: lang))
+                            .accessibilityAction {
+                                preferencesStore.setLanguage(option)
+                            }
+                        }
+                    }
+                }
+            }
+
+            settingsCard {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("登录时自动启动")
+                        Text(AppCopy.text(.settingsLaunchAtLoginTitle, in: lang))
                             .font(.system(size: 13, weight: .semibold))
-                        Text("进入 macOS 桌面后常驻菜单栏（零后台轮询，按需唤醒）")
+                        Text(AppCopy.text(.settingsLaunchAtLoginSubtitle, in: lang))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -138,7 +242,7 @@ public struct SettingsView: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .focusEffectDisabled()
-                    .accessibilityLabel("登录时自动启动")
+                    .accessibilityLabel(AppCopy.text(.settingsLaunchAtLoginTitle, in: lang))
                 }
 
                 if let loginErr = preferencesStore.loginItemError, !loginErr.isEmpty {
@@ -151,9 +255,9 @@ public struct SettingsView: View {
             settingsCard {
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("全局快捷键")
+                        Text(AppCopy.text(.settingsHotKeyTitle, in: lang))
                             .font(.system(size: 13, weight: .semibold))
-                        Text("随时从任意桌面空间唤起会话接力")
+                        Text(AppCopy.text(.settingsHotKeySubtitle, in: lang))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -175,7 +279,7 @@ public struct SettingsView: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .focusEffectDisabled()
-                    .accessibilityLabel("启用全局快捷键")
+                    .accessibilityLabel(AppCopy.text(.settingsHotKeyEnableAX, in: lang))
                 }
 
                 HStack(spacing: 8) {
@@ -189,7 +293,7 @@ public struct SettingsView: View {
                                 .foregroundStyle(recording ? .orange : .secondary)
                             Text(
                                 recording
-                                    ? "按下新组合键… (Esc 取消)"
+                                    ? AppCopy.text(.settingsHotKeyRecordingPrompt, in: lang)
                                     : preferencesStore.preferences.hotKey.displayString
                             )
                             .font(.system(size: 12, weight: .semibold, design: recording ? .default : .monospaced))
@@ -215,8 +319,11 @@ public struct SettingsView: View {
                     .disabled(!preferencesStore.preferences.hotKey.isEnabled)
                     .accessibilityLabel(
                         recording
-                            ? "正在录制快捷键，按 Esc 取消"
-                            : "录制快捷键：\(preferencesStore.preferences.hotKey.displayString)"
+                            ? AppCopy.text(.settingsHotKeyRecordingAX, in: lang)
+                            : AppCopy.hotKeyRecordButtonAccessibility(
+                                shortcut: preferencesStore.preferences.hotKey.displayString,
+                                in: lang
+                            )
                     )
                     .accessibilityAction {
                         toggleShortcutRecording()
@@ -227,7 +334,7 @@ public struct SettingsView: View {
                             stopShortcutRecording()
                             preferencesStore.resetHotKeyToDefault()
                         } label: {
-                            Text("恢复默认")
+                            Text(AppCopy.text(.settingsHotKeyReset, in: lang))
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 9)
@@ -240,7 +347,7 @@ public struct SettingsView: View {
                         }
                         .buttonStyle(FlatSurfaceButtonStyle())
                         .focusEffectDisabled()
-                        .accessibilityLabel("恢复默认快捷键")
+                        .accessibilityLabel(AppCopy.text(.settingsHotKeyResetAX, in: lang))
                         .accessibilityAction {
                             stopShortcutRecording()
                             preferencesStore.resetHotKeyToDefault()
@@ -253,27 +360,36 @@ public struct SettingsView: View {
                 if preferencesStore.hotKeyRegistrationFailed,
                    preferencesStore.preferences.hotKey.isEnabled
                 {
-                    Text("快捷键 \(preferencesStore.preferences.hotKey.displayString) 已被系统或其他应用占用，请录制其他组合键。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
+                    Text(
+                        AppCopy.hotKeyConflictWarning(
+                            shortcut: preferencesStore.preferences.hotKey.displayString,
+                            in: lang
+                        )
+                    )
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("快捷键触发行为")
+                    Text(AppCopy.text(.settingsHotKeyBehaviorLabel, in: lang))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
 
                     HStack(spacing: 6) {
                         ForEach(HotKeyBehavior.allCases) { mode in
                             let active = preferencesStore.preferences.hotKeyBehavior == mode
+                            let label = mode.displayName(in: lang)
                             Button {
                                 preferencesStore.setHotKeyBehavior(mode)
                             } label: {
-                                Text(mode.displayName)
+                                Text(label)
                                     .font(.system(size: 11, weight: .semibold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.9)
                                     .foregroundStyle(active ? Color.white : Color.primary)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 6)
+                                    .padding(.horizontal, 6)
                                     .background(
                                         RoundedRectangle(cornerRadius: 7)
                                             .fill(active ? Color.accentColor : Color.primary.opacity(0.06))
@@ -282,21 +398,26 @@ public struct SettingsView: View {
                             }
                             .buttonStyle(FlatSurfaceButtonStyle())
                             .focusEffectDisabled()
-                            .accessibilityLabel("快捷键触发行为：\(mode.displayName)")
+                            .accessibilityLabel(AppCopy.hotKeyBehaviorAccessibility(label, in: lang))
                             .accessibilityAction {
                                 preferencesStore.setHotKeyBehavior(mode)
                             }
                         }
                     }
+
+                    Text(preferencesStore.preferences.hotKeyBehavior.helperDescription(in: lang))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
             settingsCard {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("交接完成后自动切到目标端应用")
+                        Text(AppCopy.text(.settingsAutoActivateTitle, in: lang))
                             .font(.system(size: 13, weight: .semibold))
-                        Text("关闭后可在菜单栏面板连续批量交接多条会话，不切换前台窗口")
+                        Text(AppCopy.text(.settingsAutoActivateSubtitle, in: lang))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -311,16 +432,16 @@ public struct SettingsView: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .focusEffectDisabled()
-                    .accessibilityLabel("交接完成后自动切到目标端应用")
+                    .accessibilityLabel(AppCopy.text(.settingsAutoActivateTitle, in: lang))
                 }
 
                 Divider()
 
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("面板最近会话条数")
+                        Text(AppCopy.text(.settingsFeedLimitTitle, in: lang))
                             .font(.system(size: 13, weight: .semibold))
-                        Text("控制点击菜单栏时单次读取展示的候选会话数量")
+                        Text(AppCopy.text(.settingsFeedLimitSubtitle, in: lang))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -331,7 +452,7 @@ public struct SettingsView: View {
                             Button {
                                 preferencesStore.setRecentFeedLimit(count)
                             } label: {
-                                Text("\(count) 条")
+                                Text(AppCopy.feedLimitOptionLabel(count, in: lang))
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundStyle(selected ? Color.white : Color.primary)
                                     .padding(.horizontal, 10)
@@ -344,7 +465,7 @@ public struct SettingsView: View {
                             }
                             .buttonStyle(FlatSurfaceButtonStyle())
                             .focusEffectDisabled()
-                            .accessibilityLabel("面板最近会话条数：\(count) 条")
+                            .accessibilityLabel(AppCopy.feedLimitOptionAccessibility(count, in: lang))
                             .accessibilityAction {
                                 preferencesStore.setRecentFeedLimit(count)
                             }
@@ -356,9 +477,9 @@ public struct SettingsView: View {
 
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("存在未完成回复或待确认对话时显示状态栏圆点")
+                        Text(AppCopy.text(.settingsAttentionDotTitle, in: lang))
                             .font(.system(size: 12, weight: .semibold))
-                        Text("在菜单栏模板图标右下角叠加高对比镂空圆点提示")
+                        Text(AppCopy.text(.settingsAttentionDotSubtitle, in: lang))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -373,7 +494,7 @@ public struct SettingsView: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .focusEffectDisabled()
-                    .accessibilityLabel("存在未完成回复或待确认对话时显示状态栏圆点")
+                    .accessibilityLabel(AppCopy.text(.settingsAttentionDotTitle, in: lang))
                 }
             }
         }
@@ -383,31 +504,33 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             settingsCard {
                 HStack(spacing: 8) {
-                    Text("双端版本对齐看板")
+                    Text(AppCopy.text(.updatesAlignmentCardTitle, in: lang))
                         .font(.system(size: 13, weight: .semibold))
                     Spacer()
                     alignmentBadge
                 }
 
                 HStack(spacing: 12) {
-                    versionBox(
-                        title: "菜单栏应用 App",
-                        value: updateViewModel.pendingRelaunchVersion != nil
-                            ? "v\(updateViewModel.effectiveAppVersion)（待重启）"
-                            : "v\(updateViewModel.effectiveAppVersion)"
-                    )
+                    let appBoxTitle = AppCopy.text(.updatesAppBoxTitle, in: lang)
+                    let appValue = updateViewModel.pendingRelaunchVersion != nil
+                        ? "v\(updateViewModel.effectiveAppVersion)\(AppCopy.text(.updatesPendingRelaunchSuffix, in: lang))"
+                        : "v\(updateViewModel.effectiveAppVersion)"
+                    versionBox(title: appBoxTitle, value: appValue)
                     Image(systemName: "arrow.left.arrow.right")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
-                    versionBox(title: "同步引擎 CLI", value: updateViewModel.alignment.cliVersionLabel)
+                    versionBox(
+                        title: AppCopy.text(.updatesCLIBoxTitle, in: lang),
+                        value: updateViewModel.alignment.cliVersionLabel(in: lang)
+                    )
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text("CLI 路径")
+                        Text(AppCopy.text(.updatesCLIPathLabel, in: lang))
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
-                        Text(updateViewModel.cliSource.displayName)
+                        Text(updateViewModel.cliSource.displayName(in: lang))
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 6)
@@ -417,31 +540,34 @@ public struct SettingsView: View {
                                     .fill(Color.primary.opacity(0.08))
                             )
                     }
-                    Text(updateViewModel.resolvedCLIPath ?? "未找到可执行文件")
+                    Text(updateViewModel.resolvedCLIPath ?? AppCopy.text(.updatesCLINotFoundPath, in: lang))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if updateViewModel.cliSource == .envOverride {
-                        Text("当前由环境变量 CODEX_AGY_SYNC_BIN 优先指定")
+                        Text(AppCopy.text(.updatesCLIEnvHint, in: lang))
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 HStack(spacing: 8) {
-                    actionButton("选择 CLI…", systemImage: "folder") {
+                    actionButton(AppCopy.text(.updatesChooseCLI, in: lang), systemImage: "folder") {
                         chooseCustomCLI()
                     }
                     if preferencesStore.preferences.customCLIPath != nil {
-                        actionButton("恢复自动发现", systemImage: "arrow.uturn.backward") {
+                        actionButton(
+                            AppCopy.text(.updatesRestoreAutoDiscovery, in: lang),
+                            systemImage: "arrow.uturn.backward"
+                        ) {
                             preferencesStore.resetCustomCLIPath()
                             onDidChangeCLI?()
                             Task { await updateViewModel.probeEnvironment() }
                         }
                     }
                     Spacer()
-                    actionButton("打开状态目录", systemImage: "externaldrive") {
+                    actionButton(AppCopy.text(.updatesOpenStateDir, in: lang), systemImage: "externaldrive") {
                         updateViewModel.openStateDirectory()
                     }
                 }
@@ -449,7 +575,7 @@ public struct SettingsView: View {
 
             settingsCard {
                 HStack(spacing: 8) {
-                    Text("按需检查与双端同步更新")
+                    Text(AppCopy.text(.updatesPolicyCardTitle, in: lang))
                         .font(.system(size: 13, weight: .semibold))
                     Spacer()
                     if updateViewModel.availability.isBusy {
@@ -459,9 +585,67 @@ public struct SettingsView: View {
                     }
                 }
 
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Text(AppCopy.text(.updatesPolicyLabel, in: lang))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(updateViewModel.lastCheckedDisplayText ?? AppCopy.lastCheckedReadout(nil, in: lang))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 6) {
+                        ForEach(AutoUpdatePolicy.allCases) { policy in
+                            let active = preferencesStore.preferences.autoUpdatePolicy == policy
+                            let label = policy.displayName(in: lang)
+                            Button {
+                                preferencesStore.setAutoUpdatePolicy(policy)
+                                Task { await updateViewModel.handlePolicyChanged(to: policy) }
+                            } label: {
+                                Text(label)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.9)
+                                    .foregroundStyle(active ? Color.white : Color.primary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 7)
+                                            .fill(active ? Color.accentColor : Color.primary.opacity(0.06))
+                                    )
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(FlatSurfaceButtonStyle())
+                            .focusEffectDisabled()
+                            .accessibilityLabel(AppCopy.autoUpdatePolicyAccessibility(label, in: lang))
+                            .accessibilityAction {
+                                preferencesStore.setAutoUpdatePolicy(policy)
+                                Task { await updateViewModel.handlePolicyChanged(to: policy) }
+                            }
+                        }
+                    }
+
+                    Text(preferencesStore.preferences.autoUpdatePolicy.helperDescription(in: lang))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let bgError = updateViewModel.lastBackgroundCheckError, !bgError.isEmpty {
+                        Text(bgError)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Divider()
+
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text("本地源码仓")
+                        Text(AppCopy.text(.updatesLocalRepoLabel, in: lang))
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
                         if let repoVer = updateViewModel.effectiveRepoVersion {
@@ -473,17 +657,17 @@ public struct SettingsView: View {
                                 .background(Capsule().fill(Color.primary.opacity(0.07)))
                         }
                         Spacer()
-                        smallInlineButton("选择本地源码仓…") {
+                        smallInlineButton(AppCopy.text(.updatesChooseLocalRepo, in: lang)) {
                             chooseLocalSourceRepo()
                         }
                         if preferencesStore.preferences.localRepoPathForSync != nil {
-                            smallInlineButton("清除") {
+                            smallInlineButton(AppCopy.text(.updatesClearLocalRepo, in: lang)) {
                                 Task { await updateViewModel.clearLocalRepoPath() }
                             }
                         }
                     }
 
-                    Text(updateViewModel.effectiveRepoPath ?? "未绑定（将通过 GitHub Release 校验升级）")
+                    Text(updateViewModel.effectiveRepoPath ?? AppCopy.text(.updatesNoLocalRepoText, in: lang))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -502,34 +686,45 @@ public struct SettingsView: View {
                                 .fill((isFailedAvailability ? Color.red : Color.primary).opacity(0.06))
                         )
                         .accessibilityElement(children: .combine)
-                        .accessibilityLabel("更新状态：\(statusMsg)")
+                        .accessibilityLabel(AppCopy.statusReadoutAccessibility(statusMsg, in: lang))
                 }
 
                 HStack(spacing: 8) {
                     actionButton(
-                        "检查更新",
+                        AppCopy.text(.updatesCheckNow, in: lang),
                         systemImage: "magnifyingglass",
                         disabled: updateViewModel.availability.isBusy
                     ) {
                         Task { await updateViewModel.checkForUpdates() }
                     }
 
-                    primaryActionButton(
-                        "同步更新 App + CLI",
-                        systemImage: "arrow.triangle.2.circlepath",
-                        disabled: updateViewModel.availability.isBusy
-                    ) {
-                        Task { await updateViewModel.syncUpdateNow() }
+                    if let staged = updateViewModel.stagedManifest {
+                        primaryActionButton(
+                            AppCopy.installStagedButtonTitle(tagName: staged.tagName, in: lang),
+                            systemImage: "arrow.down.circle.fill",
+                            tint: .green,
+                            disabled: updateViewModel.availability.isBusy
+                        ) {
+                            Task { await updateViewModel.installStagedAndRelaunch() }
+                        }
+                    } else {
+                        primaryActionButton(
+                            AppCopy.text(.updatesSyncNow, in: lang),
+                            systemImage: "arrow.triangle.2.circlepath",
+                            disabled: updateViewModel.availability.isBusy
+                        ) {
+                            Task { await updateViewModel.syncUpdateNow() }
+                        }
                     }
 
                     if updateViewModel.canRelaunchApp {
                         primaryActionButton(
-                            "立即重启应用",
+                            AppCopy.text(.updatesRelaunchNow, in: lang),
                             systemImage: "power.circle.fill",
                             tint: .green,
                             disabled: false
                         ) {
-                            updateViewModel.relaunchApp()
+                            _ = updateViewModel.relaunchApp()
                         }
                     }
 
@@ -567,12 +762,13 @@ public struct SettingsView: View {
                 return .red
             }
         }()
+        let title = updateViewModel.alignment.badgeTitle(in: lang)
 
         return HStack(spacing: 5) {
             Circle()
                 .fill(color)
                 .frame(width: 7, height: 7)
-            Text(updateViewModel.alignment.badgeTitle)
+            Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(color)
         }
@@ -583,7 +779,7 @@ public struct SettingsView: View {
                 .fill(color.opacity(0.12))
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("版本状态：\(updateViewModel.alignment.badgeTitle)")
+        .accessibilityLabel(AppCopy.alignmentBadgeAccessibility(title, in: lang))
     }
 
     private func versionBox(title: String, value: String) -> some View {
@@ -602,7 +798,7 @@ public struct SettingsView: View {
                 .fill(Color.primary.opacity(0.045))
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title)：\(value)")
+        .accessibilityLabel(AppCopy.versionBoxAccessibility(title: title, value: value, in: lang))
     }
 
     private func settingsCard<Content: View>(
@@ -703,7 +899,7 @@ public struct SettingsView: View {
 
     private func selectTab(_ tab: SettingsTab) {
         stopShortcutRecording()
-        selectedTab = tab
+        navigation.selectedTab = tab
         DispatchQueue.main.async {
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
@@ -720,10 +916,16 @@ public struct SettingsView: View {
     private func startShortcutRecording() {
         stopShortcutRecording()
         preferencesStore.setShortcutRecording(true)
+        let hostBox = hostWindowBox
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard preferencesStore.isRecordingShortcut,
-                  NSApp.keyWindow?.title == "CodexAgyHandoff 设置"
-            else {
+            let eventWindow = event.window
+            let keyWindow = NSApp.keyWindow
+            guard SettingsWindowMatch.shouldCaptureKeyEvent(
+                isRecording: preferencesStore.isRecordingShortcut,
+                hostWindow: hostBox.window,
+                keyWindow: keyWindow,
+                eventWindow: eventWindow
+            ) else {
                 return event
             }
             if Int(event.keyCode) == kVK_Escape {
@@ -758,7 +960,7 @@ public struct SettingsView: View {
 
     private func chooseCustomCLI() {
         let panel = NSOpenPanel()
-        panel.title = "选择 codex-agy-sync 可执行文件"
+        panel.title = AppCopy.text(.chooseCLIPanelTitle, in: lang)
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -772,7 +974,7 @@ public struct SettingsView: View {
 
     private func chooseLocalSourceRepo() {
         let panel = NSOpenPanel()
-        panel.title = "选择 codex-agy-sync 本地源码仓库目录"
+        panel.title = AppCopy.text(.updatesChooseLocalRepoPanelTitle, in: lang)
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false

@@ -1,504 +1,112 @@
 import AppKit
-import CryptoKit
+import Combine
 import Foundation
 
-public enum VersionAlignmentState: Equatable, Sendable {
-    case aligned(version: String)
-    case mismatched(appVersion: String, cliVersion: String)
-    case cliUnavailable(appVersion: String, reason: String)
+private enum ReleaseNoticeReason: Equatable {
+    case newerVersion
+    case cliMissing
+    case versionMismatch
+}
 
-    public var badgeTitle: String {
-        switch self {
-        case .aligned:
-            return "双端已同频"
-        case .mismatched:
-            return "版本未对齐"
-        case .cliUnavailable:
-            return "CLI 未就绪"
-        }
-    }
+private enum LocalSyncReason: Equatable {
+    case cliMissing
+    case versionMismatch
+    case remoteCheckUnavailable(UpdateFailureReason)
+}
 
-    public var cliVersionLabel: String {
+private enum UpToDateMessage: Equatable {
+    case alignedWithRemote(tag: String)
+    case localRepoSynced(version: String)
+    case releaseSyncedWithApp(tag: String)
+    case releaseSyncedCLIOnly(tag: String)
+}
+
+private enum UpdateProgressStep: Equatable {
+    case buildingLocalApp
+    case upgradingLocalCLI
+    case downloadingChecksums
+    case downloadingWheel(fileName: String)
+    case downloadingAppArchive(fileName: String)
+    case verifyingAppArchive
+    case installingCLI
+    case stagingRelease(tagName: String)
+    case applyingStagedUpdate(tagName: String)
+
+    func localizedText(in language: ResolvedLanguage) -> String {
         switch self {
-        case .aligned(let version):
-            return "v\(version)"
-        case .mismatched(_, let cliVersion):
-            return "v\(cliVersion)"
-        case .cliUnavailable:
-            return "未就绪"
+        case .buildingLocalApp:
+            return AppCopy.text(.updatesStepBuildingLocal, in: language)
+        case .upgradingLocalCLI:
+            return AppCopy.text(.updatesStepUpgradingLocalCLI, in: language)
+        case .downloadingChecksums:
+            return AppCopy.text(.updatesStepDownloadingChecksums, in: language)
+        case .downloadingWheel(let fileName):
+            return AppCopy.stepDownloadingWheel(fileName, in: language)
+        case .downloadingAppArchive(let fileName):
+            return AppCopy.stepDownloadingApp(fileName, in: language)
+        case .verifyingAppArchive:
+            return AppCopy.text(.updatesStepVerifyingApp, in: language)
+        case .installingCLI:
+            return AppCopy.text(.updatesStepInstallingCLI, in: language)
+        case .stagingRelease(let tagName):
+            return AppCopy.stepStagingRelease(tagName, in: language)
+        case .applyingStagedUpdate(let tagName):
+            return AppCopy.stepApplyingStaged(tagName, in: language)
         }
     }
 }
 
-public enum UpdateAvailability: Equatable, Sendable {
+private enum UpdateFailureReason: Equatable {
+    case service(UpdateServiceError)
+    case cliUnavailableMissingAsset(tag: String)
+    case mismatchMissingAsset(tag: String)
+    case bundlePathNotFound
+    case relaunchFailed(String)
+    case handoffInProgress
+    case stagedArtifactInvalid(String)
+    case message(String)
+
+    static func from(_ error: Error) -> UpdateFailureReason {
+        if let serviceErr = error as? UpdateServiceError {
+            return .service(serviceErr)
+        }
+        if let localized = error as? LocalizedError, let text = localized.errorDescription {
+            return .message(text)
+        }
+        return .message(error.localizedDescription)
+    }
+
+    func localizedText(in language: ResolvedLanguage) -> String {
+        switch self {
+        case .service(let serviceError):
+            return serviceError.localizedMessage(in: language)
+        case .cliUnavailableMissingAsset(let tag):
+            return AppCopy.updateFailureCliUnavailableMissingAsset(tag: tag, in: language)
+        case .mismatchMissingAsset(let tag):
+            return AppCopy.updateFailureMismatchMissingAsset(tag: tag, in: language)
+        case .bundlePathNotFound:
+            return AppCopy.text(.updatesErrBundlePathMissing, in: language)
+        case .relaunchFailed(let detail):
+            return AppCopy.updateFailureRelaunchFailed(detail, in: language)
+        case .handoffInProgress:
+            return AppCopy.text(.updatesErrHandoffInProgress, in: language)
+        case .stagedArtifactInvalid(let detail):
+            return AppCopy.updateFailureStagedArtifactInvalid(detail, in: language)
+        case .message(let raw):
+            return raw
+        }
+    }
+}
+
+private enum SemanticUpdateState: Equatable {
     case idle
     case checking
-    case upToDate(currentVersion: String)
-    case releaseAvailable(latestTag: String, notesSummary: String, hasAppAsset: Bool, hasWheelAsset: Bool)
-    case localSyncReady(repoPath: String, repoVersion: String)
-    case updating(stepDescription: String)
-    case failed(String)
-
-    public var isBusy: Bool {
-        switch self {
-        case .checking, .updating:
-            return true
-        default:
-            return false
-        }
-    }
-}
-
-public struct SemanticVersion: Comparable, Equatable, Sendable, CustomStringConvertible {
-    public let major: Int
-    public let minor: Int
-    public let patch: Int
-    public let prerelease: String?
-
-    public var description: String {
-        if let prerelease, !prerelease.isEmpty {
-            return "\(major).\(minor).\(patch)-\(prerelease)"
-        }
-        return "\(major).\(minor).\(patch)"
-    }
-
-    public init(major: Int, minor: Int, patch: Int, prerelease: String? = nil) {
-        self.major = major
-        self.minor = minor
-        self.patch = patch
-        self.prerelease = prerelease
-    }
-
-    private static let versionRegex = try! NSRegularExpression(
-        pattern: #"(?:^|[^0-9])v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?"#
-    )
-
-    public static func parse(_ raw: String) -> SemanticVersion? {
-        let nsRange = NSRange(raw.startIndex..<raw.endIndex, in: raw)
-        guard let match = versionRegex.firstMatch(in: raw, range: nsRange),
-              let r1 = Range(match.range(at: 1), in: raw),
-              let r2 = Range(match.range(at: 2), in: raw),
-              let r3 = Range(match.range(at: 3), in: raw),
-              let major = Int(raw[r1]),
-              let minor = Int(raw[r2]),
-              let patch = Int(raw[r3])
-        else {
-            return nil
-        }
-        var pre: String?
-        if match.range(at: 4).location != NSNotFound,
-           let r4 = Range(match.range(at: 4), in: raw)
-        {
-            pre = String(raw[r4])
-        }
-        return SemanticVersion(major: major, minor: minor, patch: patch, prerelease: pre)
-    }
-
-    public static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
-        if lhs.major != rhs.major { return lhs.major < rhs.major }
-        if lhs.minor != rhs.minor { return lhs.minor < rhs.minor }
-        if lhs.patch != rhs.patch { return lhs.patch < rhs.patch }
-        switch (lhs.prerelease, rhs.prerelease) {
-        case (nil, nil):
-            return false
-        case (.some, nil):
-            return true
-        case (nil, .some):
-            return false
-        case (.some(let lp), .some(let rp)):
-            return lp < rp
-        }
-    }
-}
-
-public struct ReleaseAssetInfo: Codable, Equatable, Sendable {
-    public let name: String
-    public let browserDownloadURL: URL
-    public let size: Int
-
-    public init(name: String, browserDownloadURL: URL, size: Int = 0) {
-        self.name = name
-        self.browserDownloadURL = browserDownloadURL
-        self.size = size
-    }
-
-    public enum CodingKeys: String, CodingKey {
-        case name
-        case browserDownloadURL = "browser_download_url"
-        case size
-    }
-}
-
-public struct GitHubReleaseInfo: Equatable, Sendable {
-    public let tagName: String
-    public let version: String
-    public let htmlURL: URL?
-    public let notesSummary: String
-    public let wheelAsset: ReleaseAssetInfo?
-    public let appZipAsset: ReleaseAssetInfo?
-    public let checksumsAsset: ReleaseAssetInfo?
-
-    public init(
-        tagName: String,
-        version: String,
-        htmlURL: URL?,
-        notesSummary: String,
-        wheelAsset: ReleaseAssetInfo?,
-        appZipAsset: ReleaseAssetInfo?,
-        checksumsAsset: ReleaseAssetInfo?
-    ) {
-        self.tagName = tagName
-        self.version = version
-        self.htmlURL = htmlURL
-        self.notesSummary = notesSummary
-        self.wheelAsset = wheelAsset
-        self.appZipAsset = appZipAsset
-        self.checksumsAsset = checksumsAsset
-    }
-
-    private struct RawReleasePayload: Decodable {
-        let tag_name: String
-        let html_url: String?
-        let body: String?
-        let assets: [ReleaseAssetInfo]?
-    }
-
-    public static func decode(from data: Data) throws -> GitHubReleaseInfo {
-        let raw = try JSONDecoder().decode(RawReleasePayload.self, from: data)
-        let normalizedVersion = SemanticVersion.parse(raw.tag_name)?.description
-            ?? raw.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV \t\r\n"))
-        let assets = raw.assets ?? []
-        let wheel = assets.first {
-            !isSignatureAssetName($0.name)
-                && $0.name.hasPrefix("codex_agy_sync-")
-                && $0.name.hasSuffix(".whl")
-        }
-        let appZip = assets.first { $0.name == "CodexAgyHandoff-macos.zip" }
-            ?? assets.first { !isSignatureAssetName($0.name) && $0.name.lowercased().hasSuffix("-macos.zip") }
-        let checksums = assets.first { $0.name == "SHA256SUMS" }
-            ?? assets.first { !isSignatureAssetName($0.name) && $0.name.uppercased().contains("SHA256SUM") }
-            ?? assets.first { !isSignatureAssetName($0.name) && $0.name.lowercased().hasSuffix(".sha256") }
-
-        let summary = Self.summarizeNotes(raw.body ?? "")
-        let url = raw.html_url.flatMap(URL.init(string:))
-        return GitHubReleaseInfo(
-            tagName: raw.tag_name,
-            version: normalizedVersion,
-            htmlURL: url,
-            notesSummary: summary,
-            wheelAsset: wheel,
-            appZipAsset: appZip,
-            checksumsAsset: checksums
-        )
-    }
-
-    private static func isSignatureAssetName(_ name: String) -> Bool {
-        let lower = name.lowercased()
-        return lower.hasSuffix(".asc")
-            || lower.hasSuffix(".sig")
-            || lower.hasSuffix(".minisig")
-            || lower.hasSuffix(".pem")
-    }
-
-    private static func summarizeNotes(_ rawBody: String) -> String {
-        for line in rawBody.split(whereSeparator: \.isNewline) {
-            var cleaned = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            while cleaned.hasPrefix("#") || cleaned.hasPrefix("-") || cleaned.hasPrefix("*") {
-                cleaned.removeFirst()
-                cleaned = cleaned.trimmingCharacters(in: .whitespaces)
-            }
-            if !cleaned.isEmpty {
-                if cleaned.count > 120 {
-                    return String(cleaned.prefix(117)) + "..."
-                }
-                return cleaned
-            }
-        }
-        return "包含最新双端接力与菜单栏改进"
-    }
-}
-
-public enum UpdateServiceError: LocalizedError, Equatable, Sendable {
-    case forbiddenTemporaryPath(String)
-    case invalidAssetName(String)
-    case invalidReleaseURL(String)
-    case httpError(statusCode: Int)
-    case missingChecksumsAsset
-    case missingUpdateAssets
-    case missingChecksum(assetName: String)
-    case checksumMismatch(assetName: String, expected: String, actual: String)
-    case invalidLocalRepo(String)
-    case targetBundleNotWritable(String)
-    case pythonInterpreterMissing
-    case commandFailed(step: String, detail: String)
-    case codesignVerificationFailed(String)
-
-    public var errorDescription: String? {
-        switch self {
-        case .forbiddenTemporaryPath(let path):
-            return "拒绝使用 /tmp 临时目录：\(path)"
-        case .invalidAssetName(let name):
-            return "拒绝不安全的更新资产文件名：\(name)"
-        case .invalidReleaseURL(let url):
-            return "无效的更新检查地址：\(url)"
-        case .httpError(let code):
-            return "请求远端发布信息失败（HTTP \(code)）。"
-        case .missingChecksumsAsset:
-            return "远端 Release 缺少 SHA256SUMS 校验文件，已中止更新。"
-        case .missingUpdateAssets:
-            return "远端 Release 未包含可用的安装包资产（.whl 或 CodexAgyHandoff-macos.zip）。"
-        case .missingChecksum(let name):
-            return "SHA256SUMS 中缺少资产校验项：\(name)"
-        case .checksumMismatch(let name, let expected, let actual):
-            return "\(name) SHA-256 校验不匹配（预期 \(expected.prefix(12))…，实际 \(actual.prefix(12))…）。"
-        case .invalidLocalRepo(let path):
-            return "无效的本地源码仓目录（需包含 pyproject.toml 与 scripts/build_menubar_app.sh）：\(path)"
-        case .targetBundleNotWritable(let detail):
-            return "无法写入应用安装目录（\(detail)），请将应用移至可写目录后重试。"
-        case .pythonInterpreterMissing:
-            return "未找到可用的 Python 3 解释器以更新 CLI。"
-        case .commandFailed(let step, let detail):
-            return detail.isEmpty ? "\(step) 执行失败。" : "\(step) 失败：\(detail)"
-        case .codesignVerificationFailed(let detail):
-            return "新构建的应用签名校验未通过：\(detail)"
-        }
-    }
-}
-
-public enum SHA256Verifier {
-    public static func sha256Hex(of data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-
-    public static func parseChecksums(_ text: String) -> [String: String] {
-        var result: [String: String] = [:]
-        for rawLine in text.split(whereSeparator: \.isNewline) {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") {
-                continue
-            }
-            let parts = trimmed.split(maxSplits: 1, omittingEmptySubsequences: true) {
-                $0 == " " || $0 == "\t"
-            }
-            guard parts.count == 2 else { continue }
-            let digest = String(parts[0]).lowercased()
-            guard digest.count == 64, digest.allSatisfy({ $0.isHexDigit }) else { continue }
-            var namePart = String(parts[1]).trimmingCharacters(in: .whitespaces)
-            if namePart.hasPrefix("*") {
-                namePart.removeFirst()
-            }
-            let fileName = URL(fileURLWithPath: namePart).lastPathComponent
-            if !fileName.isEmpty {
-                result[fileName] = digest
-            }
-        }
-        return result
-    }
-
-    public static func verify(data: Data, assetName: String, checksums: [String: String]) throws {
-        guard let expected = checksums[assetName]?.lowercased() else {
-            throw UpdateServiceError.missingChecksum(assetName: assetName)
-        }
-        let actual = sha256Hex(of: data)
-        guard actual == expected else {
-            throw UpdateServiceError.checksumMismatch(
-                assetName: assetName,
-                expected: expected,
-                actual: actual
-            )
-        }
-    }
-}
-
-public enum UpdatePathGuard {
-    public static func validateNonTemporaryURL(_ url: URL) throws -> URL {
-        let raw = (url.path as NSString).standardizingPath
-        if isTmpPath(raw) {
-            throw UpdateServiceError.forbiddenTemporaryPath(raw)
-        }
-        let resolved = resolveRealAncestorPath(raw)
-        if isTmpPath(resolved) {
-            throw UpdateServiceError.forbiddenTemporaryPath(resolved)
-        }
-        return URL(fileURLWithPath: resolved, isDirectory: url.hasDirectoryPath)
-    }
-
-    public static func defaultStagingRootURL(fileManager: FileManager = .default) throws -> URL {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
-        let root = appSupport
-            .appendingPathComponent("CodexAgyHandoff", isDirectory: true)
-            .appendingPathComponent("updates", isDirectory: true)
-        return try validateNonTemporaryURL(root)
-    }
-
-    public static func stagedAssetFileURL(for rawAssetName: String, in stagingDir: URL) throws -> URL {
-        let trimmed = rawAssetName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.contains("\0") else {
-            throw UpdateServiceError.invalidAssetName(rawAssetName)
-        }
-        let normalized = trimmed.replacingOccurrences(of: "\\", with: "/")
-        guard !normalized.hasSuffix("/"),
-              let rawTail = normalized.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init),
-              !rawTail.isEmpty,
-              rawTail != ".",
-              rawTail != ".."
-        else {
-            throw UpdateServiceError.invalidAssetName(rawAssetName)
-        }
-        let safeName = URL(fileURLWithPath: "/" + rawTail).lastPathComponent
-        guard !safeName.isEmpty,
-              safeName != ".",
-              safeName != "..",
-              safeName != "/",
-              !safeName.contains("/")
-        else {
-            throw UpdateServiceError.invalidAssetName(rawAssetName)
-        }
-        let canonicalStaging = try validateNonTemporaryURL(stagingDir).standardizedFileURL
-        let dest = canonicalStaging.appendingPathComponent(safeName, isDirectory: false).standardizedFileURL
-        guard dest.deletingLastPathComponent() == canonicalStaging else {
-            throw UpdateServiceError.invalidAssetName(rawAssetName)
-        }
-        return dest
-    }
-
-    public static func pruneStaleStagingDirectories(
-        in rootURL: URL,
-        maxAgeSeconds: TimeInterval = 86_400,
-        now: Date = Date(),
-        fileManager: FileManager = .default
-    ) {
-        guard let validatedRoot = try? validateNonTemporaryURL(rootURL) else { return }
-        let canonicalRoot = validatedRoot.standardizedFileURL
-        guard let children = try? fileManager.contentsOfDirectory(
-            at: canonicalRoot,
-            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .creationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return
-        }
-        for child in children {
-            let canonicalChild = child.standardizedFileURL
-            guard canonicalChild.deletingLastPathComponent() == canonicalRoot else { continue }
-            guard let values = try? child.resourceValues(
-                forKeys: [.isDirectoryKey, .contentModificationDateKey, .creationDateKey]
-            ), values.isDirectory == true else {
-                continue
-            }
-            let stamp = values.contentModificationDate ?? values.creationDate
-            if let stamp, now.timeIntervalSince(stamp) > maxAgeSeconds {
-                try? fileManager.removeItem(at: canonicalChild)
-            }
-        }
-    }
-
-    private static func isTmpPath(_ path: String) -> Bool {
-        path == "/tmp"
-            || path.hasPrefix("/tmp/")
-            || path == "/private/tmp"
-            || path.hasPrefix("/private/tmp/")
-    }
-
-    private static func resolveRealAncestorPath(_ absolutePath: String) -> String {
-        let fm = FileManager.default
-        var probe = URL(fileURLWithPath: absolutePath)
-        var trailing: [String] = []
-        while !fm.fileExists(atPath: probe.path) && probe.path != "/" {
-            trailing.append(probe.lastPathComponent)
-            probe.deleteLastPathComponent()
-        }
-        var resolved = probe.resolvingSymlinksInPath()
-        for component in trailing.reversed() {
-            resolved.appendPathComponent(component)
-        }
-        return (resolved.path as NSString).standardizingPath
-    }
-}
-
-public struct CommandExecutionResult: Equatable, Sendable {
-    public let exitCode: Int32
-    public let stdout: Data
-    public let stderr: Data
-
-    public init(exitCode: Int32, stdout: Data, stderr: Data) {
-        self.exitCode = exitCode
-        self.stdout = stdout
-        self.stderr = stderr
-    }
-
-    public var stdoutString: String {
-        String(data: stdout, encoding: .utf8) ?? ""
-    }
-
-    public var stderrString: String {
-        String(data: stderr, encoding: .utf8) ?? ""
-    }
-}
-
-public protocol SystemCommandRunning: Sendable {
-    func run(
-        executableURL: URL,
-        arguments: [String],
-        environment: [String: String],
-        timeoutSeconds: TimeInterval
-    ) async throws -> CommandExecutionResult
-}
-
-public final class DefaultSystemCommandRunner: SystemCommandRunning, @unchecked Sendable {
-    public init() {}
-
-    public func run(
-        executableURL: URL,
-        arguments: [String],
-        environment: [String: String],
-        timeoutSeconds: TimeInterval
-    ) async throws -> CommandExecutionResult {
-        let out = try await SubprocessCLIClient.runProcessAsync(
-            executableURL: executableURL,
-            arguments: arguments,
-            environment: environment,
-            timeoutSeconds: timeoutSeconds
-        )
-        return CommandExecutionResult(
-            exitCode: out.exitCode,
-            stdout: out.stdout,
-            stderr: out.stderr
-        )
-    }
-}
-
-public protocol ReleaseHTTPFetching: Sendable {
-    func fetchData(
-        from url: URL,
-        headers: [String: String],
-        timeoutSeconds: TimeInterval
-    ) async throws -> (data: Data, statusCode: Int)
-}
-
-public final class URLSessionReleaseHTTPFetcher: ReleaseHTTPFetching, @unchecked Sendable {
-    public init() {}
-
-    public func fetchData(
-        from url: URL,
-        headers: [String: String],
-        timeoutSeconds: TimeInterval
-    ) async throws -> (data: Data, statusCode: Int) {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeoutSeconds
-        config.timeoutIntervalForResource = max(timeoutSeconds * 3, 30)
-        let session = URLSession(configuration: config)
-        defer { session.finishTasksAndInvalidate() }
-
-        var request = URLRequest(url: url, timeoutInterval: timeoutSeconds)
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-
-        let (data, response) = try await session.data(for: request)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 200
-        return (data, code)
-    }
+    case upToDate(currentVersion: String, message: UpToDateMessage?)
+    case releaseAvailable(release: GitHubReleaseInfo, reason: ReleaseNoticeReason)
+    case stagedReady(manifest: StagedUpdateManifest, stagingDir: URL)
+    case localSyncReady(repoPath: String, repoVersion: String, reason: LocalSyncReason)
+    case updating(step: UpdateProgressStep)
+    case failed(UpdateFailureReason)
 }
 
 @MainActor
@@ -506,6 +114,11 @@ public final class UpdateViewModel: ObservableObject {
     public nonisolated static let defaultReleaseAPIURL = "https://api.github.com/repos/semantic-craft/codex-agy-sync/releases/latest"
     public nonisolated static let releaseAPIEnvKey = "MENUBAR_RELEASE_API_URL"
     public nonisolated static let skipSelfReplaceEnvKey = "MENUBAR_SKIP_SELF_REPLACE"
+    public nonisolated static let checkpointDefaultsKey = "updateCheckCheckpoint"
+    public nonisolated static let successCooldownSeconds: TimeInterval = UpdateCheckCheckpoint.successCooldownSeconds
+    public nonisolated static let failureBackoffSeconds: TimeInterval = UpdateCheckCheckpoint.failureBackoffSeconds
+
+    private static let stagedManifestFileName = "stage-manifest.json"
 
     @Published public private(set) var alignment: VersionAlignmentState
     @Published public private(set) var availability: UpdateAvailability = .idle
@@ -515,6 +128,11 @@ public final class UpdateViewModel: ObservableObject {
     @Published public private(set) var detectedRepoVersion: String?
     @Published public private(set) var latestRelease: GitHubReleaseInfo?
     @Published public private(set) var statusMessage: String?
+    @Published public private(set) var popoverNotice: PopoverUpdateNotice?
+    @Published public private(set) var lastCheckedEpoch: TimeInterval?
+    @Published public private(set) var lastCheckedDisplayText: String?
+    @Published public private(set) var lastBackgroundCheckError: String?
+    @Published public private(set) var stagedManifest: StagedUpdateManifest?
     @Published public private(set) var canRelaunchApp: Bool = false
     @Published public private(set) var pendingRelaunchVersion: String?
 
@@ -526,8 +144,31 @@ public final class UpdateViewModel: ObservableObject {
     private let environment: [String: String]
     private let commandRunner: any SystemCommandRunning
     private let httpFetcher: any ReleaseHTTPFetching
+    private let relaunchExecutor: any RelaunchExecuting
     private let stagingRootOverride: URL?
+    private let nowProvider: @Sendable () -> Date
+    private let canMutateEnvironment: (@MainActor () -> Bool)?
+    public var onPrepareForRelaunch: (@MainActor () -> Void)?
+    public var onRelaunchFailed: (@MainActor () -> Void)?
+
+    private var semanticState: SemanticUpdateState = .idle
+    private var lastBackgroundErrorReason: UpdateFailureReason?
     private var hasCompletedInitialProbe = false
+    private var isOpportunisticCheckInFlight = false
+    private var isManualActionInFlight = false
+    private var probeGeneration: UInt64 = 0
+    private var opportunisticGeneration: UInt64 = 0
+    private var cancellables = Set<AnyCancellable>()
+
+    public var isInstallingUpdate: Bool {
+        if case .updating(let step) = semanticState {
+            if case .stagingRelease = step {
+                return false
+            }
+            return true
+        }
+        return false
+    }
 
     public var effectiveAppVersion: String {
         pendingRelaunchVersion ?? (SemanticVersion.parse(appVersion)?.description ?? appVersion)
@@ -557,7 +198,12 @@ public final class UpdateViewModel: ObservableObject {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         commandRunner: any SystemCommandRunning = DefaultSystemCommandRunner(),
         httpFetcher: any ReleaseHTTPFetching = URLSessionReleaseHTTPFetcher(),
-        stagingRootOverride: URL? = nil
+        relaunchExecutor: any RelaunchExecuting = DefaultRelaunchExecutor(),
+        stagingRootOverride: URL? = nil,
+        nowProvider: @escaping @Sendable () -> Date = Date.init,
+        canMutateEnvironment: (@MainActor () -> Bool)? = nil,
+        onPrepareForRelaunch: (@MainActor () -> Void)? = nil,
+        onRelaunchFailed: (@MainActor () -> Void)? = nil
     ) {
         let resolvedAppVer = appVersion
             ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
@@ -577,8 +223,28 @@ public final class UpdateViewModel: ObservableObject {
         self.environment = environment
         self.commandRunner = commandRunner
         self.httpFetcher = httpFetcher
+        self.relaunchExecutor = relaunchExecutor
         self.stagingRootOverride = stagingRootOverride
-        self.alignment = .cliUnavailable(appVersion: resolvedAppVer, reason: "尚未探测")
+        self.nowProvider = nowProvider
+        self.canMutateEnvironment = canMutateEnvironment
+        self.onPrepareForRelaunch = onPrepareForRelaunch
+        self.onRelaunchFailed = onRelaunchFailed
+        self.alignment = .cliUnavailable(
+            appVersion: resolvedAppVer,
+            reason: AppCopy.text(.updatesNotProbed, in: preferencesStore.effectiveLanguage)
+        )
+
+        let checkpoint = Self.loadCheckpoint(from: preferencesStore.defaults)
+        self.lastCheckedEpoch = checkpoint.lastSuccessfulCheckEpoch
+
+        preferencesStore.$effectiveLanguage
+            .dropFirst()
+            .sink { [weak self] nextLanguage in
+                self?.projectPublishedState(in: nextLanguage)
+            }
+            .store(in: &cancellables)
+
+        projectPublishedState()
     }
 
     public func probeIfNeeded() async {
@@ -587,7 +253,10 @@ public final class UpdateViewModel: ObservableObject {
         await probeEnvironment()
     }
 
-    public func probeEnvironment() async {
+    public func probeEnvironment(recoverStagedFromFailure: Bool = false) async {
+        hasCompletedInitialProbe = true
+        probeGeneration &+= 1
+        let myProbeGen = probeGeneration
         let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
         let resolved = SubprocessCLIClient.resolveExecutableWithSource(
             environment: environment,
@@ -597,11 +266,17 @@ public final class UpdateViewModel: ObservableObject {
         self.resolvedCLIPath = resolved.url?.path
 
         guard let cliURL = resolved.url else {
-            self.alignment = .cliUnavailable(appVersion: effectiveAppVersion, reason: "未找到 codex-agy-sync 可执行文件")
+            self.alignment = .cliUnavailable(
+                appVersion: effectiveAppVersion,
+                reason: AppCopy.text(.cliMissingError, in: preferencesStore.effectiveLanguage)
+            )
             updateRepoDiscovery(fromCLI: nil)
+            reconcilePersistedStagedRelease(recoverFromFailure: recoverStagedFromFailure)
+            projectPublishedState()
             return
         }
 
+        let nextAlignment: VersionAlignmentState
         do {
             let result = try await commandRunner.run(
                 executableURL: cliURL,
@@ -609,41 +284,140 @@ public final class UpdateViewModel: ObservableObject {
                 environment: childEnv,
                 timeoutSeconds: 8.0
             )
+            guard myProbeGen == probeGeneration else { return }
             let combined = (result.stdoutString + "\n" + result.stderrString)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if result.exitCode == 0, let parsed = SemanticVersion.parse(combined) {
                 let cliVer = parsed.description
                 let appTargetVer = effectiveAppVersion
                 if cliVer == appTargetVer {
-                    self.alignment = .aligned(version: appTargetVer)
+                    nextAlignment = .aligned(version: appTargetVer)
                 } else {
-                    self.alignment = .mismatched(appVersion: appTargetVer, cliVersion: cliVer)
+                    nextAlignment = .mismatched(appVersion: appTargetVer, cliVersion: cliVer)
                 }
             } else {
-                let reason = combined.isEmpty ? "退出码 \(result.exitCode)" : combined
-                self.alignment = .cliUnavailable(appVersion: effectiveAppVersion, reason: reason)
+                let reason = combined.isEmpty ? "exit \(result.exitCode)" : combined
+                nextAlignment = .cliUnavailable(appVersion: effectiveAppVersion, reason: reason)
             }
         } catch {
-            self.alignment = .cliUnavailable(appVersion: effectiveAppVersion, reason: error.localizedDescription)
+            guard myProbeGen == probeGeneration else { return }
+            nextAlignment = .cliUnavailable(appVersion: effectiveAppVersion, reason: error.localizedDescription)
         }
+        self.alignment = nextAlignment
 
-        await discoverEditableRepoIfNeeded(fromCLI: cliURL, childEnv: childEnv)
+        await discoverEditableRepoIfNeeded(
+            fromCLI: cliURL,
+            childEnv: childEnv,
+            probeGenerationSnapshot: myProbeGen
+        )
+        guard myProbeGen == probeGeneration else { return }
+        reconcilePersistedStagedRelease(recoverFromFailure: recoverStagedFromFailure)
+        projectPublishedState()
     }
 
     public func checkForUpdates() async {
-        guard !availability.isBusy else { return }
-        availability = .checking
-        statusMessage = nil
+        guard !availability.isBusy, !isManualActionInFlight else { return }
+        isManualActionInFlight = true
+        defer { isManualActionInFlight = false }
+        opportunisticGeneration &+= 1
+        isOpportunisticCheckInFlight = false
+        await performManualReleaseCheck()
+    }
+
+    public func performOpportunisticCheckIfNeeded(trigger: UpdateTrigger) async {
+        await performReleaseCheck(trigger: trigger)
+    }
+
+    public func handlePolicyChanged(to policy: AutoUpdatePolicy) async {
+        guard policy != .off else { return }
+        guard !availability.isBusy, !isManualActionInFlight, !isOpportunisticCheckInFlight else { return }
+        if policy == .autoStage,
+           !canRelaunchApp,
+           pendingRelaunchVersion == nil,
+           effectiveRepoPath == nil,
+           case .releaseAvailable(let release, let reason) = semanticState
+        {
+            isOpportunisticCheckInFlight = true
+            let myOppGen = opportunisticGeneration
+            defer {
+                if myOppGen == opportunisticGeneration {
+                    isOpportunisticCheckInFlight = false
+                }
+            }
+            var checkpoint = Self.loadCheckpoint(from: preferencesStore.defaults)
+            checkpoint.lastAttemptEpoch = nowProvider().timeIntervalSince1970
+            Self.saveCheckpoint(checkpoint, to: preferencesStore.defaults)
+            await stageReleaseIfEligible(
+                release,
+                reason: reason,
+                isOpportunistic: true,
+                opportunisticGenerationSnapshot: myOppGen
+            )
+            return
+        }
+        await performOpportunisticCheckIfNeeded(trigger: .policyChanged)
+    }
+
+    private func performManualReleaseCheck() async {
+        await performReleaseCheck(trigger: .manual)
+    }
+
+    private func performReleaseCheck(trigger: UpdateTrigger) async {
+        let isOpportunistic = trigger.isOpportunistic
+        var capturedOppGen: UInt64?
+
+        if isOpportunistic {
+            guard !availability.isBusy, !isManualActionInFlight, !isOpportunisticCheckInFlight else { return }
+            let policy = preferencesStore.preferences.autoUpdatePolicy
+            guard policy != .off else { return }
+            guard !canRelaunchApp, pendingRelaunchVersion == nil else { return }
+
+            let now = nowProvider().timeIntervalSince1970
+            let checkpoint = Self.loadCheckpoint(from: preferencesStore.defaults)
+            guard Self.hasCompletedCooldown(now: now, checkpoint: checkpoint) else {
+                return
+            }
+
+            isOpportunisticCheckInFlight = true
+            capturedOppGen = opportunisticGeneration
+        }
+
+        defer {
+            if let myOppGen = capturedOppGen, myOppGen == opportunisticGeneration {
+                isOpportunisticCheckInFlight = false
+            }
+        }
 
         await probeEnvironment()
+        if let myOppGen = capturedOppGen {
+            guard myOppGen == opportunisticGeneration,
+                  !availability.isBusy,
+                  !isManualActionInFlight,
+                  preferencesStore.preferences.autoUpdatePolicy != .off,
+                  !canRelaunchApp,
+                  pendingRelaunchVersion == nil
+            else {
+                return
+            }
+        }
+
+        let priorState = semanticState
+
+        if isOpportunistic, case .stagedReady = priorState {
+        } else {
+            setSemanticState(.checking)
+        }
 
         let rawURL = environment[Self.releaseAPIEnvKey] ?? Self.defaultReleaseAPIURL
         guard let url = URL(string: rawURL) else {
             let err = UpdateServiceError.invalidReleaseURL(rawURL)
-            availability = .failed(err.localizedDescription)
-            statusMessage = err.localizedDescription
+            handleCheckError(err, isOpportunistic: isOpportunistic, priorState: priorState)
             return
         }
+
+        var checkpoint = Self.loadCheckpoint(from: preferencesStore.defaults)
+        checkpoint.lastAttemptEpoch = nowProvider().timeIntervalSince1970
+        Self.saveCheckpoint(checkpoint, to: preferencesStore.defaults)
 
         do {
             let (data, statusCode) = try await httpFetcher.fetchData(
@@ -654,100 +428,214 @@ public final class UpdateViewModel: ObservableObject {
                 ],
                 timeoutSeconds: 10.0
             )
+            if let myOppGen = capturedOppGen {
+                guard myOppGen == opportunisticGeneration else { return }
+            }
             guard (200..<300).contains(statusCode) else {
                 throw UpdateServiceError.httpError(statusCode: statusCode)
             }
             let release = try GitHubReleaseInfo.decode(from: data)
             self.latestRelease = release
 
-            let currentAppVer = effectiveAppVersion
-            let remoteSemver = SemanticVersion.parse(release.version)
-            let appSemver = SemanticVersion.parse(currentAppVer)
-            let cliSemver: SemanticVersion? = {
-                switch alignment {
-                case .aligned(let ver):
-                    return SemanticVersion.parse(ver)
-                case .mismatched(_, let cliVer):
-                    return SemanticVersion.parse(cliVer)
-                case .cliUnavailable:
-                    return nil
-                }
-            }()
+            let successEpoch = nowProvider().timeIntervalSince1970
+            checkpoint.lastSuccessfulCheckEpoch = successEpoch
+            checkpoint.lastAttemptEpoch = successEpoch
+            Self.saveCheckpoint(checkpoint, to: preferencesStore.defaults)
+            self.lastCheckedEpoch = successEpoch
+            self.lastBackgroundErrorReason = nil
 
-            let remoteIsNewerThanApp = (remoteSemver != nil && appSemver != nil) ? (remoteSemver! > appSemver!) : (release.version != currentAppVer)
-            let remoteIsNewerThanCLI = (remoteSemver != nil && cliSemver != nil) ? (remoteSemver! > cliSemver!) : false
-
-            if remoteIsNewerThanApp || remoteIsNewerThanCLI {
-                availability = .releaseAvailable(
-                    latestTag: release.tagName,
-                    notesSummary: release.notesSummary,
-                    hasAppAsset: release.appZipAsset != nil,
-                    hasWheelAsset: release.wheelAsset != nil
-                )
-                statusMessage = "发现新版本 \(release.tagName)：\(release.notesSummary)"
-                return
-            }
-
-            switch alignment {
-            case .cliUnavailable:
-                if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
-                    availability = .localSyncReady(repoPath: repoPath, repoVersion: repoVer)
-                    statusMessage = "CLI 尚未就绪，可从本地源码仓（v\(repoVer)）安装并同步。"
-                } else if release.wheelAsset != nil {
-                    availability = .releaseAvailable(
-                        latestTag: release.tagName,
-                        notesSummary: "安装 CLI 并同步对齐至 \(release.tagName)",
-                        hasAppAsset: release.appZipAsset != nil,
-                        hasWheelAsset: true
-                    )
-                    statusMessage = "CLI 尚未就绪，可点击同步更新安装 \(release.tagName)。"
-                } else {
-                    let msg = "CLI 尚未就绪，且远端 Release（\(release.tagName)）未包含 CLI 安装包。"
-                    availability = .failed(msg)
-                    statusMessage = msg
-                }
-                return
-
-            case .mismatched:
-                if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
-                    availability = .localSyncReady(repoPath: repoPath, repoVersion: repoVer)
-                    statusMessage = "检测到双端版本不一致，可从本地源码仓（v\(repoVer)）或远端 Release 对齐。"
-                } else if release.wheelAsset != nil || release.appZipAsset != nil {
-                    availability = .releaseAvailable(
-                        latestTag: release.tagName,
-                        notesSummary: "重新同步对齐 App 与 CLI 至 \(release.tagName)",
-                        hasAppAsset: release.appZipAsset != nil,
-                        hasWheelAsset: release.wheelAsset != nil
-                    )
-                    statusMessage = "双端版本未对齐，可点击同步更新对齐至 \(release.tagName)。"
-                } else {
-                    let msg = "双端版本未对齐，且远端 Release（\(release.tagName)）未包含对齐所需安装包。"
-                    availability = .failed(msg)
-                    statusMessage = msg
-                }
-                return
-
-            case .aligned:
-                availability = .upToDate(currentVersion: currentAppVer)
-                statusMessage = "当前 App 与远端最新 Release（\(release.tagName)）一致。"
-            }
+            await evaluateDecodedRelease(
+                release,
+                isOpportunistic: isOpportunistic,
+                priorState: priorState,
+                opportunisticGenerationSnapshot: capturedOppGen
+            )
         } catch {
-            if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
-                availability = .localSyncReady(repoPath: repoPath, repoVersion: repoVer)
-                statusMessage = "远端检查不可用（\(error.localizedDescription)）；可直接从本地源码仓 v\(repoVer) 同步构建。"
-            } else {
-                availability = .failed(error.localizedDescription)
-                statusMessage = error.localizedDescription
+            if let myOppGen = capturedOppGen {
+                guard myOppGen == opportunisticGeneration else { return }
             }
+            handleCheckError(error, isOpportunistic: isOpportunistic, priorState: priorState)
+        }
+    }
+
+    private func evaluateDecodedRelease(
+        _ release: GitHubReleaseInfo,
+        isOpportunistic: Bool,
+        priorState: SemanticUpdateState,
+        opportunisticGenerationSnapshot: UInt64?
+    ) async {
+        let currentAppVer = effectiveAppVersion
+        let remoteSemver = SemanticVersion.parse(release.version)
+        let appSemver = SemanticVersion.parse(currentAppVer)
+        let cliSemver: SemanticVersion? = {
+            switch alignment {
+            case .aligned(let ver):
+                return SemanticVersion.parse(ver)
+            case .mismatched(_, let cliVer):
+                return SemanticVersion.parse(cliVer)
+            case .cliUnavailable:
+                return nil
+            }
+        }()
+
+        let remoteIsNewerThanApp = (remoteSemver != nil && appSemver != nil)
+            ? (remoteSemver! > appSemver!)
+            : (release.version != currentAppVer)
+        let remoteIsNewerThanCLI = (remoteSemver != nil && cliSemver != nil)
+            ? (remoteSemver! > cliSemver!)
+            : false
+
+        if remoteIsNewerThanApp || remoteIsNewerThanCLI {
+            await handleReleaseAvailable(
+                release,
+                reason: .newerVersion,
+                isOpportunistic: isOpportunistic,
+                priorState: priorState,
+                opportunisticGenerationSnapshot: opportunisticGenerationSnapshot
+            )
+            return
+        }
+
+        switch alignment {
+        case .cliUnavailable:
+            if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
+                setSemanticState(.localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .cliMissing))
+            } else if release.wheelAsset != nil {
+                await handleReleaseAvailable(
+                    release,
+                    reason: .cliMissing,
+                    isOpportunistic: isOpportunistic,
+                    priorState: priorState,
+                    opportunisticGenerationSnapshot: opportunisticGenerationSnapshot
+                )
+            } else if isOpportunistic {
+                lastBackgroundErrorReason = .cliUnavailableMissingAsset(tag: release.tagName)
+                restoreQuietStateAfterOpportunistic(priorState)
+            } else {
+                setSemanticState(.failed(.cliUnavailableMissingAsset(tag: release.tagName)))
+            }
+
+        case .mismatched:
+            if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
+                setSemanticState(.localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .versionMismatch))
+            } else if release.wheelAsset != nil || release.appZipAsset != nil {
+                await handleReleaseAvailable(
+                    release,
+                    reason: .versionMismatch,
+                    isOpportunistic: isOpportunistic,
+                    priorState: priorState,
+                    opportunisticGenerationSnapshot: opportunisticGenerationSnapshot
+                )
+            } else if isOpportunistic {
+                lastBackgroundErrorReason = .mismatchMissingAsset(tag: release.tagName)
+                restoreQuietStateAfterOpportunistic(priorState)
+            } else {
+                setSemanticState(.failed(.mismatchMissingAsset(tag: release.tagName)))
+            }
+
+        case .aligned:
+            clearPersistedStagedDirectory()
+            setSemanticState(.upToDate(currentVersion: currentAppVer, message: .alignedWithRemote(tag: release.tagName)))
+        }
+    }
+
+    private func handleReleaseAvailable(
+        _ release: GitHubReleaseInfo,
+        reason: ReleaseNoticeReason,
+        isOpportunistic: Bool,
+        priorState: SemanticUpdateState,
+        opportunisticGenerationSnapshot: UInt64?
+    ) async {
+        let normalizedVer = SemanticVersion.parse(release.version)?.description ?? release.version
+        if case .stagedReady(let manifest, let stagingDir) = priorState,
+           manifest.version == normalizedVer,
+           verifyStagedFilesPresent(manifest: manifest, in: stagingDir)
+        {
+            setSemanticState(.stagedReady(manifest: manifest, stagingDir: stagingDir))
+            return
+        }
+
+        setSemanticState(.releaseAvailable(release: release, reason: reason))
+
+        if isOpportunistic,
+           preferencesStore.preferences.autoUpdatePolicy == .autoStage,
+           effectiveRepoPath == nil
+        {
+            await stageReleaseIfEligible(
+                release,
+                reason: reason,
+                isOpportunistic: true,
+                opportunisticGenerationSnapshot: opportunisticGenerationSnapshot
+            )
+        }
+    }
+
+    private func handleCheckError(
+        _ error: Error,
+        isOpportunistic: Bool,
+        priorState: SemanticUpdateState
+    ) {
+        let failure = UpdateFailureReason.from(error)
+        if isOpportunistic {
+            lastBackgroundErrorReason = failure
+            restoreQuietStateAfterOpportunistic(priorState)
+            return
+        }
+
+        if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
+            setSemanticState(
+                .localSyncReady(
+                    repoPath: repoPath,
+                    repoVersion: repoVer,
+                    reason: .remoteCheckUnavailable(failure)
+                )
+            )
+        } else {
+            setSemanticState(.failed(failure))
+        }
+    }
+
+    private func restoreQuietStateAfterOpportunistic(_ priorState: SemanticUpdateState) {
+        switch priorState {
+        case .stagedReady, .releaseAvailable, .upToDate, .localSyncReady:
+            setSemanticState(priorState)
+        case .idle, .checking, .updating, .failed:
+            setSemanticState(.idle)
         }
     }
 
     public func syncUpdateNow() async {
-        guard !availability.isBusy else { return }
+        guard !availability.isBusy, !isManualActionInFlight else { return }
+        isManualActionInFlight = true
+        defer { isManualActionInFlight = false }
+        opportunisticGeneration &+= 1
+        isOpportunisticCheckInFlight = false
+        await performManualSyncUpdateNow()
+    }
+
+    private func performManualSyncUpdateNow() async {
+        guard canMutateEnvironment?() ?? true else {
+            setSemanticState(.failed(.handoffInProgress))
+            return
+        }
+
+        if case .stagedReady(let manifest, let stagedDir) = semanticState {
+            await performInstallStaged(manifest: manifest, stagedDir: stagedDir)
+            return
+        }
+        reconcilePersistedStagedRelease(recoverFromFailure: true)
+        if case .stagedReady(let manifest, let stagedDir) = semanticState {
+            await performInstallStaged(manifest: manifest, stagedDir: stagedDir)
+            return
+        }
 
         if latestRelease == nil && effectiveRepoPath == nil {
-            await checkForUpdates()
-            if case .failed = availability { return }
+            await performManualReleaseCheck()
+            if case .failed = semanticState { return }
+            if case .stagedReady(let manifest, let stagedDir) = semanticState {
+                await performInstallStaged(manifest: manifest, stagedDir: stagedDir)
+                return
+            }
         }
 
         if let release = latestRelease,
@@ -775,18 +663,125 @@ public final class UpdateViewModel: ObservableObject {
             return
         }
 
-        let err = UpdateServiceError.missingUpdateAssets
-        availability = .failed(err.localizedDescription)
-        statusMessage = err.localizedDescription
+        setSemanticState(.failed(.service(.missingUpdateAssets)))
+    }
+
+    public func installStagedAndRelaunch() async {
+        guard !availability.isBusy, !isManualActionInFlight else { return }
+        isManualActionInFlight = true
+        defer { isManualActionInFlight = false }
+        opportunisticGeneration &+= 1
+        isOpportunisticCheckInFlight = false
+
+        guard canMutateEnvironment?() ?? true else {
+            setSemanticState(.failed(.handoffInProgress))
+            return
+        }
+        if case .stagedReady = semanticState {
+        } else {
+            reconcilePersistedStagedRelease(recoverFromFailure: true)
+        }
+        guard case .stagedReady(let manifest, let stagedDir) = semanticState else {
+            await performManualSyncUpdateNow()
+            return
+        }
+        await performInstallStaged(manifest: manifest, stagedDir: stagedDir)
+    }
+
+    private func performInstallStaged(manifest: StagedUpdateManifest, stagedDir: URL) async {
+        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
+        setSemanticState(.updating(step: .applyingStagedUpdate(tagName: manifest.tagName)))
+
+        do {
+            let validatedStageDir = try UpdatePathGuard.validateNonTemporaryURL(stagedDir)
+            let manifestURL = validatedStageDir.appendingPathComponent(Self.stagedManifestFileName, isDirectory: false)
+            guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+                throw UpdateFailureReasonError(.stagedArtifactInvalid("missing manifest"))
+            }
+
+            var stagedAppURL: URL?
+            if let appBundleName = manifest.appBundleName {
+                try validateReplacementTargetIfNeeded()
+                let extractedRoot = validatedStageDir.appendingPathComponent("extracted", isDirectory: true)
+                let candidateApp: URL
+                do {
+                    candidateApp = try UpdatePathGuard.stagedAssetFileURL(for: appBundleName, in: extractedRoot)
+                } catch {
+                    throw UpdateFailureReasonError(.stagedArtifactInvalid(error.localizedDescription))
+                }
+                do {
+                    try await verifyCodesign(of: candidateApp, childEnv: childEnv)
+                } catch {
+                    throw UpdateFailureReasonError(.stagedArtifactInvalid(error.localizedDescription))
+                }
+                stagedAppURL = candidateApp
+            }
+
+            var verifiedWheelURL: URL?
+            var resolvedPyEnv: PythonRuntimeEnvironment?
+            if let wheelFileName = manifest.wheelFileName {
+                let candidateWheel = try UpdatePathGuard.stagedAssetFileURL(for: wheelFileName, in: validatedStageDir)
+                guard FileManager.default.fileExists(atPath: candidateWheel.path) else {
+                    throw UpdateFailureReasonError(.stagedArtifactInvalid("missing wheel \(wheelFileName)"))
+                }
+                let wheelData = try Data(contentsOf: candidateWheel)
+                guard let expectedSHA = manifest.wheelSHA256?.lowercased(),
+                      SHA256Verifier.sha256Hex(of: wheelData) == expectedSHA
+                else {
+                    throw UpdateFailureReasonError(.stagedArtifactInvalid("SHA-256 mismatch for \(wheelFileName)"))
+                }
+                let cliURL = resolvedCLIExecutableURL()
+                resolvedPyEnv = try await resolvePythonEnvironment(for: cliURL, childEnv: childEnv)
+                verifiedWheelURL = candidateWheel
+            }
+
+            if let wheelURL = verifiedWheelURL, let pyEnv = resolvedPyEnv {
+                try await installWheel(at: wheelURL, pythonEnv: pyEnv, childEnv: childEnv)
+            }
+
+            if let stagedAppURL {
+                try replaceRunningBundleIfPermitted(with: stagedAppURL)
+                pendingRelaunchVersion = manifest.version
+                canRelaunchApp = true
+            }
+
+            clearPersistedStagedDirectory()
+            await probeEnvironment()
+
+            let upToDateKind: UpToDateMessage = stagedAppURL != nil
+                ? .releaseSyncedWithApp(tag: manifest.tagName)
+                : .releaseSyncedCLIOnly(tag: manifest.tagName)
+            setSemanticState(.upToDate(currentVersion: manifest.version, message: upToDateKind))
+
+            if stagedAppURL != nil, environment[Self.skipSelfReplaceEnvKey] != "1" {
+                _ = relaunchApp()
+            }
+        } catch let wrapped as UpdateFailureReasonError {
+            if case .stagedArtifactInvalid = wrapped.reason {
+                clearPersistedStagedDirectory()
+            }
+            await probeEnvironment()
+            setSemanticState(.failed(wrapped.reason))
+        } catch {
+            await probeEnvironment()
+            setSemanticState(.failed(.from(error)))
+        }
     }
 
     public func syncFromLocalRepo() async {
-        guard !availability.isBusy else { return }
+        guard !availability.isBusy, !isManualActionInFlight else { return }
+        isManualActionInFlight = true
+        defer { isManualActionInFlight = false }
+        opportunisticGeneration &+= 1
+        isOpportunisticCheckInFlight = false
+
+        guard canMutateEnvironment?() ?? true else {
+            setSemanticState(.failed(.handoffInProgress))
+            return
+        }
         let candidate = effectiveRepoPath ?? preferencesStore.preferences.localRepoPathForSync
         guard let repoPath = candidate else {
-            let err = UpdateServiceError.invalidLocalRepo("未配置")
-            availability = .failed(err.localizedDescription)
-            statusMessage = err.localizedDescription
+            setSemanticState(.failed(.service(.invalidLocalRepo("unconfigured"))))
             return
         }
         await performLocalRepoSync(repoPath: repoPath)
@@ -807,26 +802,134 @@ public final class UpdateViewModel: ObservableObject {
         NSWorkspace.shared.open(target)
     }
 
-    public func relaunchApp() {
+    @discardableResult
+    public func relaunchApp() -> Bool {
         guard let bundleURL = currentAppBundleURL,
               FileManager.default.fileExists(atPath: bundleURL.path)
         else {
-            let msg = "未找到可重启的应用包路径。"
-            availability = .failed(msg)
-            statusMessage = msg
+            setSemanticState(.failed(.bundlePathNotFound))
+            return false
+        }
+        onPrepareForRelaunch?()
+        do {
+            try relaunchExecutor.relaunch(bundleURL: bundleURL)
+            return true
+        } catch {
+            onRelaunchFailed?()
+            setSemanticState(.failed(.relaunchFailed(error.localizedDescription)))
+            return false
+        }
+    }
+
+    private func stageReleaseIfEligible(
+        _ release: GitHubReleaseInfo,
+        reason: ReleaseNoticeReason,
+        isOpportunistic: Bool,
+        opportunisticGenerationSnapshot: UInt64? = nil
+    ) async {
+        guard effectiveRepoPath == nil else { return }
+        guard let checksumsAsset = release.checksumsAsset,
+              release.wheelAsset != nil || release.appZipAsset != nil
+        else {
             return
         }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        proc.arguments = ["-n", bundleURL.path]
+
+        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
+        let normalizedVer = SemanticVersion.parse(release.version)?.description ?? release.version
+
         do {
-            try proc.run()
-            NSApp.terminate(nil)
+            if release.appZipAsset != nil {
+                try validateReplacementTargetIfNeeded()
+            }
+            let tmpDir = try makeStagingSessionDirectory()
+            defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+            setSemanticState(.updating(step: .stagingRelease(tagName: release.tagName)))
+            let prepared = try await downloadAndVerifyReleaseAssets(
+                release,
+                checksumsAsset: checksumsAsset,
+                into: tmpDir,
+                childEnv: childEnv,
+                reportDetailedSteps: false
+            )
+            if let zipURL = prepared.zipURL {
+                try? FileManager.default.removeItem(at: zipURL)
+            }
+
+            if let myOppGen = opportunisticGenerationSnapshot, myOppGen != opportunisticGeneration {
+                return
+            }
+
+            guard !Task.isCancelled,
+                  preferencesStore.preferences.autoUpdatePolicy == .autoStage,
+                  effectiveRepoPath == nil
+            else {
+                restoreNonStagedStateAfterAbortedStaging(release: release, reason: reason)
+                return
+            }
+
+            let manifest = StagedUpdateManifest(
+                tagName: release.tagName,
+                version: normalizedVer,
+                notesSummary: release.rawNotesSummaryForPersistence ?? "",
+                wheelFileName: prepared.wheelURL?.lastPathComponent,
+                wheelSHA256: prepared.wheelSHA256,
+                appBundleName: prepared.extractedAppURL?.lastPathComponent,
+                stagedAtEpoch: nowProvider().timeIntervalSince1970
+            )
+            let manifestURL = tmpDir.appendingPathComponent(Self.stagedManifestFileName, isDirectory: false)
+            let encoded = try JSONEncoder().encode(manifest)
+            try encoded.write(to: manifestURL, options: .atomic)
+
+            let stagedRoot = try stagedVersionsRootURL()
+            try FileManager.default.createDirectory(at: stagedRoot, withIntermediateDirectories: true)
+            let versionDir = try UpdatePathGuard.stagedAssetFileURL(for: normalizedVer, in: stagedRoot)
+            if FileManager.default.fileExists(atPath: versionDir.path) {
+                _ = try FileManager.default.replaceItemAt(versionDir, withItemAt: tmpDir)
+            } else {
+                try FileManager.default.moveItem(at: tmpDir, to: versionDir)
+            }
+            UpdatePathGuard.pruneStagedVersions(in: stagedRoot, keepingVersion: versionDir.lastPathComponent)
+            setSemanticState(.stagedReady(manifest: manifest, stagingDir: versionDir))
         } catch {
-            let msg = "重启应用失败：\(error.localizedDescription)"
-            availability = .failed(msg)
-            statusMessage = msg
+            if let myOppGen = opportunisticGenerationSnapshot, myOppGen != opportunisticGeneration {
+                return
+            }
+            if Task.isCancelled {
+                restoreNonStagedStateAfterAbortedStaging(release: release, reason: reason)
+                return
+            }
+            if isOpportunistic {
+                lastBackgroundErrorReason = .from(error)
+                var checkpoint = Self.loadCheckpoint(from: preferencesStore.defaults)
+                checkpoint.lastSuccessfulCheckEpoch = nil
+                checkpoint.lastAttemptEpoch = nowProvider().timeIntervalSince1970
+                Self.saveCheckpoint(checkpoint, to: preferencesStore.defaults)
+                lastCheckedEpoch = nil
+                setSemanticState(.releaseAvailable(release: release, reason: reason))
+            } else {
+                setSemanticState(.failed(.from(error)))
+            }
         }
+    }
+
+    private func restoreNonStagedStateAfterAbortedStaging(
+        release: GitHubReleaseInfo,
+        reason: ReleaseNoticeReason
+    ) {
+        if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
+            switch reason {
+            case .cliMissing:
+                setSemanticState(.localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .cliMissing))
+                return
+            case .versionMismatch:
+                setSemanticState(.localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .versionMismatch))
+                return
+            case .newerVersion:
+                break
+            }
+        }
+        setSemanticState(.releaseAvailable(release: release, reason: reason))
     }
 
     public static func resolveSyncStateDirectoryURL(
@@ -879,23 +982,555 @@ public final class UpdateViewModel: ObservableObject {
         return String(text[verRange])
     }
 
+    private struct UpdateFailureReasonError: Error {
+        let reason: UpdateFailureReason
+        init(_ reason: UpdateFailureReason) {
+            self.reason = reason
+        }
+    }
+
+    private struct PreparedReleaseAssets {
+        let wheelURL: URL?
+        let wheelSHA256: String?
+        let zipURL: URL?
+        let extractedAppURL: URL?
+    }
+
+    private func setSemanticState(_ next: SemanticUpdateState) {
+        semanticState = next
+        projectPublishedState()
+    }
+
+    private func projectPublishedState(in languageOverride: ResolvedLanguage? = nil) {
+        let lang = languageOverride ?? preferencesStore.effectiveLanguage
+
+        if case .cliUnavailable(let appVer, _) = alignment, cliSource == .missing {
+            alignment = .cliUnavailable(
+                appVersion: appVer,
+                reason: AppCopy.text(.cliMissingError, in: lang)
+            )
+        }
+
+        if let epoch = lastCheckedEpoch {
+            let formatted = AppDateFormatting.formatCheckTimestamp(epoch, now: nowProvider(), in: lang)
+            lastCheckedDisplayText = AppCopy.lastCheckedReadout(formatted, in: lang)
+        } else {
+            lastCheckedDisplayText = AppCopy.lastCheckedReadout(nil, in: lang)
+        }
+
+        if let bgErr = lastBackgroundErrorReason {
+            lastBackgroundCheckError = AppCopy.backgroundCheckErrorReadout(bgErr.localizedText(in: lang), in: lang)
+        } else {
+            lastBackgroundCheckError = nil
+        }
+
+        switch semanticState {
+        case .idle:
+            availability = .idle
+            statusMessage = nil
+            stagedManifest = nil
+
+        case .checking:
+            availability = .checking
+            statusMessage = nil
+            stagedManifest = nil
+
+        case .upToDate(let currentVersion, let message):
+            availability = .upToDate(currentVersion: currentVersion)
+            stagedManifest = nil
+            switch message {
+            case nil:
+                statusMessage = nil
+            case .alignedWithRemote(let tag):
+                statusMessage = AppCopy.updatesStatusAlignedWithRemote(tag: tag, in: lang)
+            case .localRepoSynced(let version):
+                statusMessage = AppCopy.updatesStatusLocalRepoSynced(version: version, in: lang)
+            case .releaseSyncedWithApp(let tag):
+                statusMessage = AppCopy.updatesStatusReleaseSyncedWithApp(tag: tag, in: lang)
+            case .releaseSyncedCLIOnly(let tag):
+                statusMessage = AppCopy.updatesStatusReleaseSyncedCLIOnly(tag: tag, in: lang)
+            }
+
+        case .releaseAvailable(let release, let reason):
+            stagedManifest = nil
+            let hasApp = release.appZipAsset != nil
+            let hasWheel = release.wheelAsset != nil
+            let summary: String
+            switch reason {
+            case .newerVersion:
+                summary = release.notesSummary(in: lang)
+                statusMessage = AppCopy.updatesStatusNewRelease(tag: release.tagName, summary: summary, in: lang)
+            case .cliMissing:
+                summary = AppCopy.updatesSummaryInstallCLI(tag: release.tagName, in: lang)
+                statusMessage = AppCopy.updatesStatusCLIMissing(tag: release.tagName, in: lang)
+            case .versionMismatch:
+                summary = AppCopy.updatesSummaryAlignVersions(tag: release.tagName, in: lang)
+                statusMessage = AppCopy.updatesStatusVersionMismatch(tag: release.tagName, in: lang)
+            }
+            availability = .releaseAvailable(
+                latestTag: release.tagName,
+                notesSummary: summary,
+                hasAppAsset: hasApp,
+                hasWheelAsset: hasWheel
+            )
+
+        case .stagedReady(let manifest, _):
+            stagedManifest = manifest
+            let legacyDefaultNotes = AppCopy.text(.updatesDefaultNotesSummary, in: .zhHans)
+            let notes = (manifest.notesSummary.isEmpty || manifest.notesSummary == legacyDefaultNotes)
+                ? AppCopy.text(.updatesDefaultNotesSummary, in: lang)
+                : manifest.notesSummary
+            availability = .stagedReady(
+                tagName: manifest.tagName,
+                version: manifest.version,
+                notesSummary: notes,
+                hasAppAsset: manifest.appBundleName != nil,
+                hasWheelAsset: manifest.wheelFileName != nil
+            )
+            statusMessage = AppCopy.updatesStatusStagedReady(tag: manifest.tagName, in: lang)
+
+        case .localSyncReady(let repoPath, let repoVersion, let reason):
+            stagedManifest = nil
+            availability = .localSyncReady(repoPath: repoPath, repoVersion: repoVersion)
+            switch reason {
+            case .cliMissing:
+                statusMessage = AppCopy.updatesStatusLocalSyncCLIMissing(version: repoVersion, in: lang)
+            case .versionMismatch:
+                statusMessage = AppCopy.updatesStatusLocalSyncMismatch(version: repoVersion, in: lang)
+            case .remoteCheckUnavailable(let failure):
+                statusMessage = AppCopy.updatesStatusLocalSyncRemoteUnavailable(
+                    detail: failure.localizedText(in: lang),
+                    repoVersion: repoVersion,
+                    in: lang
+                )
+            }
+
+        case .updating(let step):
+            stagedManifest = nil
+            availability = .updating(stepDescription: step.localizedText(in: lang))
+            statusMessage = nil
+
+        case .failed(let reason):
+            stagedManifest = nil
+            let detail = reason.localizedText(in: lang)
+            availability = .failed(detail)
+            statusMessage = detail
+        }
+
+        popoverNotice = buildPopoverNotice(in: lang)
+    }
+
+    private func buildPopoverNotice(in language: ResolvedLanguage) -> PopoverUpdateNotice? {
+        if canRelaunchApp {
+            let ver = pendingRelaunchVersion ?? effectiveAppVersion
+            return PopoverUpdateNotice(
+                title: AppCopy.noticeRelaunchTitle(version: ver, in: language),
+                actionTitle: AppCopy.text(.updatesNoticeRelaunchAction, in: language),
+                action: .relaunchInstalled(version: ver)
+            )
+        }
+        switch semanticState {
+        case .stagedReady(let manifest, _):
+            return PopoverUpdateNotice(
+                title: AppCopy.noticeStagedTitle(tagName: manifest.tagName, in: language),
+                actionTitle: AppCopy.text(.updatesNoticeInstallStagedAction, in: language),
+                action: .installStagedAndRelaunch(tag: manifest.tagName)
+            )
+        case .releaseAvailable(let release, _):
+            return PopoverUpdateNotice(
+                title: AppCopy.noticeReleaseAvailableTitle(tagName: release.tagName, in: language),
+                actionTitle: AppCopy.text(.updatesNoticeOpenSettingsAction, in: language),
+                action: .openUpdatesSettings(tag: release.tagName)
+            )
+        case .localSyncReady(_, let repoVersion, _):
+            return PopoverUpdateNotice(
+                title: AppCopy.noticeLocalSyncTitle(version: repoVersion, in: language),
+                actionTitle: AppCopy.text(.updatesNoticeOpenSettingsAction, in: language),
+                action: .openUpdatesSettings(tag: "v\(repoVersion)")
+            )
+        case .idle, .checking, .upToDate, .updating, .failed:
+            return nil
+        }
+    }
+
+    public static func loadCheckpoint(from defaults: UserDefaults) -> UpdateCheckCheckpoint {
+        if let rawData = defaults.data(forKey: checkpointDefaultsKey),
+           let decoded = try? JSONDecoder().decode(UpdateCheckCheckpoint.self, from: rawData)
+        {
+            return decoded
+        }
+        if let dict = defaults.dictionary(forKey: checkpointDefaultsKey),
+           let data = try? JSONSerialization.data(withJSONObject: dict),
+           let decoded = try? JSONDecoder().decode(UpdateCheckCheckpoint.self, from: data)
+        {
+            return decoded
+        }
+        return UpdateCheckCheckpoint()
+    }
+
+    public static func saveCheckpoint(_ checkpoint: UpdateCheckCheckpoint, to defaults: UserDefaults) {
+        if let encoded = try? JSONEncoder().encode(checkpoint) {
+            defaults.set(encoded, forKey: checkpointDefaultsKey)
+        }
+    }
+
+    public static func hasCompletedCooldown(
+        now: TimeInterval,
+        checkpoint: UpdateCheckCheckpoint
+    ) -> Bool {
+        if let lastSuccess = checkpoint.lastSuccessfulCheckEpoch,
+           now - lastSuccess < UpdateCheckCheckpoint.successCooldownSeconds
+        {
+            return false
+        }
+        if let lastAttempt = checkpoint.lastAttemptEpoch,
+           now - lastAttempt < UpdateCheckCheckpoint.failureBackoffSeconds
+        {
+            return false
+        }
+        return true
+    }
+
+    private func resolvedCLIExecutableURL() -> URL? {
+        if let resolvedCLIPath {
+            return URL(fileURLWithPath: resolvedCLIPath)
+        }
+        return SubprocessCLIClient.resolveExecutableWithSource(
+            environment: environment,
+            defaults: preferencesStore.defaults
+        ).url
+    }
+
+    private static func isVersion(_ lhs: String, atLeast rhs: String) -> Bool {
+        if let lSem = SemanticVersion.parse(lhs), let rSem = SemanticVersion.parse(rhs) {
+            return lSem >= rSem
+        }
+        return lhs == rhs
+    }
+
+    private func updatesRootURL() throws -> URL {
+        if let stagingRootOverride {
+            return try UpdatePathGuard.validateNonTemporaryURL(stagingRootOverride)
+        }
+        return try UpdatePathGuard.defaultStagingRootURL()
+    }
+
+    private func stagedVersionsRootURL() throws -> URL {
+        let root = try updatesRootURL()
+        return try UpdatePathGuard.validateNonTemporaryURL(
+            root.appendingPathComponent("staged", isDirectory: true)
+        )
+    }
+
+    private func tmpStagingRootURL() throws -> URL {
+        let root = try updatesRootURL()
+        return try UpdatePathGuard.validateNonTemporaryURL(
+            root.appendingPathComponent("tmp", isDirectory: true)
+        )
+    }
+
     private func makeStagingSessionDirectory() throws -> URL {
         let fm = FileManager.default
-        let baseRoot: URL
-        if let stagingRootOverride {
-            baseRoot = try UpdatePathGuard.validateNonTemporaryURL(stagingRootOverride)
-        } else {
-            baseRoot = try UpdatePathGuard.defaultStagingRootURL(fileManager: fm)
-        }
-        try fm.createDirectory(at: baseRoot, withIntermediateDirectories: true)
-        UpdatePathGuard.pruneStaleStagingDirectories(in: baseRoot, fileManager: fm)
-        let sessionDir = baseRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let updatesRoot = try updatesRootURL()
+        try fm.createDirectory(at: updatesRoot, withIntermediateDirectories: true)
+        UpdatePathGuard.pruneStaleStagingDirectories(
+            in: updatesRoot,
+            excludingNames: ["tmp", "staged"],
+            fileManager: fm
+        )
+        let tmpRoot = try tmpStagingRootURL()
+        try fm.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        UpdatePathGuard.pruneStaleStagingDirectories(in: tmpRoot, fileManager: fm)
+        let sessionDir = tmpRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let validated = try UpdatePathGuard.validateNonTemporaryURL(sessionDir)
         try fm.createDirectory(at: validated, withIntermediateDirectories: true)
         return validated
     }
 
+    private func clearPersistedStagedDirectory() {
+        guard let stagedRoot = try? stagedVersionsRootURL() else { return }
+        UpdatePathGuard.pruneStagedVersions(in: stagedRoot, keepingVersion: nil)
+    }
+
+    private func verifyStagedFilesPresent(manifest: StagedUpdateManifest, in stagingDir: URL) -> Bool {
+        let fm = FileManager.default
+        guard let validatedDir = try? UpdatePathGuard.validateNonTemporaryURL(stagingDir) else {
+            return false
+        }
+        let manifestURL = validatedDir.appendingPathComponent(Self.stagedManifestFileName, isDirectory: false)
+        guard fm.fileExists(atPath: manifestURL.path) else {
+            return false
+        }
+        if let appBundleName = manifest.appBundleName {
+            let extractedRoot = validatedDir.appendingPathComponent("extracted", isDirectory: true)
+            guard let appURL = try? UpdatePathGuard.stagedAssetFileURL(for: appBundleName, in: extractedRoot),
+                  fm.fileExists(atPath: appURL.path)
+            else {
+                return false
+            }
+        }
+        if let wheelName = manifest.wheelFileName {
+            guard let wheelURL = try? UpdatePathGuard.stagedAssetFileURL(for: wheelName, in: validatedDir),
+                  let wheelData = try? Data(contentsOf: wheelURL),
+                  let expectedSHA = manifest.wheelSHA256?.lowercased(),
+                  SHA256Verifier.sha256Hex(of: wheelData) == expectedSHA
+            else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func isStagedManifestApplicable(_ manifest: StagedUpdateManifest) -> Bool {
+        let stagedSem = SemanticVersion.parse(manifest.version)
+        let appSem = SemanticVersion.parse(effectiveAppVersion)
+        let cliSem: SemanticVersion? = {
+            switch alignment {
+            case .aligned(let ver):
+                return SemanticVersion.parse(ver)
+            case .mismatched(_, let cliVer):
+                return SemanticVersion.parse(cliVer)
+            case .cliUnavailable:
+                return nil
+            }
+        }()
+
+        let isNewerThanApp = (stagedSem != nil && appSem != nil)
+            ? (stagedSem! > appSem!)
+            : (manifest.version != effectiveAppVersion)
+        if isNewerThanApp {
+            return true
+        }
+        let appMatchesOrOlder = (stagedSem != nil && appSem != nil)
+            ? (stagedSem! >= appSem!)
+            : (manifest.version == effectiveAppVersion)
+        guard appMatchesOrOlder, manifest.wheelFileName != nil else {
+            return false
+        }
+        guard let cliSem else {
+            return true
+        }
+        if let stagedSem {
+            return stagedSem > cliSem
+        }
+        return manifest.version != cliSem.description
+    }
+
+    private func reconcilePersistedStagedRelease(recoverFromFailure: Bool = false) {
+        let fm = FileManager.default
+        if canRelaunchApp || pendingRelaunchVersion != nil {
+            clearPersistedStagedDirectory()
+            return
+        }
+        switch semanticState {
+        case .checking, .updating:
+            return
+        default:
+            break
+        }
+        if effectiveRepoPath != nil {
+            if case .stagedReady = semanticState {
+                semanticState = .idle
+            }
+            return
+        }
+
+        guard let stagedRoot = try? stagedVersionsRootURL(),
+              let children = try? fm.contentsOfDirectory(
+                  at: stagedRoot,
+                  includingPropertiesForKeys: [.isDirectoryKey],
+                  options: [.skipsHiddenFiles]
+              )
+        else {
+            if case .stagedReady = semanticState {
+                semanticState = .idle
+            }
+            return
+        }
+
+        var bestCandidate: (manifest: StagedUpdateManifest, dir: URL, semver: SemanticVersion?)?
+        for child in children {
+            let values = try? child.resourceValues(forKeys: [.isDirectoryKey])
+            guard values?.isDirectory == true else { continue }
+            let manifestURL = child.appendingPathComponent(Self.stagedManifestFileName, isDirectory: false)
+            guard let data = try? Data(contentsOf: manifestURL),
+                  let manifest = try? JSONDecoder().decode(StagedUpdateManifest.self, from: data),
+                  verifyStagedFilesPresent(manifest: manifest, in: child),
+                  isStagedManifestApplicable(manifest)
+            else {
+                try? fm.removeItem(at: child)
+                continue
+            }
+            let sem = SemanticVersion.parse(manifest.version)
+            if let existing = bestCandidate {
+                let isBetter: Bool
+                if let lhs = sem, let rhs = existing.semver, lhs != rhs {
+                    isBetter = lhs > rhs
+                } else {
+                    isBetter = manifest.stagedAtEpoch > existing.manifest.stagedAtEpoch
+                }
+                if isBetter {
+                    bestCandidate = (manifest, child, sem)
+                }
+            } else {
+                bestCandidate = (manifest, child, sem)
+            }
+        }
+
+        if let best = bestCandidate {
+            UpdatePathGuard.pruneStagedVersions(in: stagedRoot, keepingVersion: best.dir.lastPathComponent)
+            switch semanticState {
+            case .releaseAvailable(let knownRelease, _):
+                if Self.isVersion(best.manifest.version, atLeast: knownRelease.version) {
+                    semanticState = .stagedReady(manifest: best.manifest, stagingDir: best.dir)
+                }
+            case .idle, .stagedReady, .upToDate, .failed(.handoffInProgress):
+                semanticState = .stagedReady(manifest: best.manifest, stagingDir: best.dir)
+            case .failed(let reason) where recoverFromFailure:
+                if case .stagedArtifactInvalid = reason {
+                    break
+                }
+                semanticState = .stagedReady(manifest: best.manifest, stagingDir: best.dir)
+            default:
+                break
+            }
+        } else {
+            UpdatePathGuard.pruneStagedVersions(in: stagedRoot, keepingVersion: nil)
+            if case .stagedReady = semanticState {
+                semanticState = .idle
+            }
+        }
+    }
+
+    private func downloadAndVerifyReleaseAssets(
+        _ release: GitHubReleaseInfo,
+        checksumsAsset: ReleaseAssetInfo,
+        into stagingDir: URL,
+        childEnv: [String: String],
+        reportDetailedSteps: Bool
+    ) async throws -> PreparedReleaseAssets {
+        if reportDetailedSteps {
+            setSemanticState(.updating(step: .downloadingChecksums))
+        }
+        let (checksumsData, checksumsStatus) = try await httpFetcher.fetchData(
+            from: checksumsAsset.browserDownloadURL,
+            headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
+            timeoutSeconds: 15.0
+        )
+        guard (200..<300).contains(checksumsStatus),
+              let checksumsText = String(data: checksumsData, encoding: .utf8)
+        else {
+            throw UpdateServiceError.httpError(statusCode: checksumsStatus)
+        }
+        let checksums = SHA256Verifier.parseChecksums(checksumsText)
+
+        var verifiedWheelURL: URL?
+        var wheelSHA256: String?
+        if let wheelAsset = release.wheelAsset {
+            let wheelDest = try UpdatePathGuard.stagedAssetFileURL(for: wheelAsset.name, in: stagingDir)
+            let safeWheelName = wheelDest.lastPathComponent
+            if reportDetailedSteps {
+                setSemanticState(.updating(step: .downloadingWheel(fileName: safeWheelName)))
+            }
+            let (wheelData, wheelStatus) = try await httpFetcher.fetchData(
+                from: wheelAsset.browserDownloadURL,
+                headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
+                timeoutSeconds: 30.0
+            )
+            guard (200..<300).contains(wheelStatus) else {
+                throw UpdateServiceError.httpError(statusCode: wheelStatus)
+            }
+            try SHA256Verifier.verify(data: wheelData, assetName: safeWheelName, checksums: checksums)
+            try wheelData.write(to: wheelDest, options: .atomic)
+            verifiedWheelURL = wheelDest
+            wheelSHA256 = SHA256Verifier.sha256Hex(of: wheelData)
+        }
+
+        var verifiedZipURL: URL?
+        var verifiedExtractedAppURL: URL?
+        if let appZipAsset = release.appZipAsset {
+            let zipDest = try UpdatePathGuard.stagedAssetFileURL(for: appZipAsset.name, in: stagingDir)
+            let safeZipName = zipDest.lastPathComponent
+            if reportDetailedSteps {
+                setSemanticState(.updating(step: .downloadingAppArchive(fileName: safeZipName)))
+            }
+            let (zipData, zipStatus) = try await httpFetcher.fetchData(
+                from: appZipAsset.browserDownloadURL,
+                headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
+                timeoutSeconds: 60.0
+            )
+            guard (200..<300).contains(zipStatus) else {
+                throw UpdateServiceError.httpError(statusCode: zipStatus)
+            }
+            try SHA256Verifier.verify(data: zipData, assetName: safeZipName, checksums: checksums)
+            try zipData.write(to: zipDest, options: .atomic)
+            verifiedZipURL = zipDest
+
+            if reportDetailedSteps {
+                setSemanticState(.updating(step: .verifyingAppArchive))
+            }
+            let extractDir = stagingDir.appendingPathComponent("extracted", isDirectory: true)
+            try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+            let dittoOut = try await commandRunner.run(
+                executableURL: URL(fileURLWithPath: "/usr/bin/ditto"),
+                arguments: ["-x", "-k", zipDest.path, extractDir.path],
+                environment: childEnv,
+                timeoutSeconds: 30.0
+            )
+            if dittoOut.exitCode != 0 {
+                throw UpdateServiceError.commandFailed(
+                    step: "ditto",
+                    detail: dittoOut.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
+            let extractedApp = extractDir.appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+            try await verifyCodesign(of: extractedApp, childEnv: childEnv)
+            verifiedExtractedAppURL = extractedApp
+        }
+
+        return PreparedReleaseAssets(
+            wheelURL: verifiedWheelURL,
+            wheelSHA256: wheelSHA256,
+            zipURL: verifiedZipURL,
+            extractedAppURL: verifiedExtractedAppURL
+        )
+    }
+
+    private func installWheel(
+        at wheelURL: URL,
+        pythonEnv: PythonRuntimeEnvironment,
+        childEnv: [String: String]
+    ) async throws {
+        guard canMutateEnvironment?() ?? true else {
+            throw UpdateFailureReasonError(.handoffInProgress)
+        }
+        var pipArgs = ["-m", "pip", "install", "--upgrade"]
+        if !pythonEnv.inVenv {
+            pipArgs.append("--user")
+            if pythonEnv.supportsBreakSystemPackages {
+                pipArgs.append("--break-system-packages")
+            }
+        }
+        pipArgs.append(wheelURL.path)
+        let pipOut = try await commandRunner.run(
+            executableURL: pythonEnv.pythonURL,
+            arguments: pipArgs,
+            environment: childEnv,
+            timeoutSeconds: 90.0
+        )
+        if pipOut.exitCode != 0 {
+            throw UpdateServiceError.commandFailed(
+                step: "pip install",
+                detail: pipOut.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+    }
+
     private func performLocalRepoSync(repoPath: String) async {
+        guard canMutateEnvironment?() ?? true else {
+            setSemanticState(.failed(.handoffInProgress))
+            return
+        }
         let rawRepoURL = URL(fileURLWithPath: (repoPath as NSString).expandingTildeInPath, isDirectory: true)
         let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
 
@@ -906,13 +1541,13 @@ public final class UpdateViewModel: ObservableObject {
             }
             try validateReplacementTargetIfNeeded()
 
-            let cliURL = resolvedCLIPath.map { URL(fileURLWithPath: $0) }
-            let pyEnv = try await resolvePythonEnvironment(for: cliURL, childEnv: childEnv)
-
             let stagingDir = try makeStagingSessionDirectory()
             defer { try? FileManager.default.removeItem(at: stagingDir) }
 
-            availability = .updating(stepDescription: "正在从源码仓构建并签名 CodexAgyHandoff.app…")
+            setSemanticState(.updating(step: .buildingLocalApp))
+            let cliURL = resolvedCLIExecutableURL()
+            let pyEnv = try await resolvePythonEnvironment(for: cliURL, childEnv: childEnv)
+
             let appStageDir = stagingDir.appendingPathComponent("app-out", isDirectory: true)
             try FileManager.default.createDirectory(at: appStageDir, withIntermediateDirectories: true)
             let buildScript = repoURL.appendingPathComponent("scripts/build_menubar_app.sh")
@@ -927,7 +1562,7 @@ public final class UpdateViewModel: ObservableObject {
             )
             if buildResult.exitCode != 0 {
                 throw UpdateServiceError.commandFailed(
-                    step: "构建菜单栏应用",
+                    step: "build_menubar_app.sh",
                     detail: buildResult.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
                 )
             }
@@ -935,7 +1570,10 @@ public final class UpdateViewModel: ObservableObject {
             let builtAppURL = appStageDir.appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
             try await verifyCodesign(of: builtAppURL, childEnv: childEnv)
 
-            availability = .updating(stepDescription: "正在升级 Python CLI 环境…")
+            setSemanticState(.updating(step: .upgradingLocalCLI))
+            guard canMutateEnvironment?() ?? true else {
+                throw UpdateFailureReasonError(.handoffInProgress)
+            }
             var pipArgs = ["-m", "pip", "install", "--no-build-isolation"]
             if !pyEnv.inVenv {
                 pipArgs.append("--user")
@@ -957,7 +1595,7 @@ public final class UpdateViewModel: ObservableObject {
             )
             if pipResult.exitCode != 0 {
                 throw UpdateServiceError.commandFailed(
-                    step: "pip 升级 CLI",
+                    step: "pip install",
                     detail: pipResult.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
                 )
             }
@@ -968,28 +1606,29 @@ public final class UpdateViewModel: ObservableObject {
             let targetVer = SemanticVersion.parse(rawTargetVer)?.description ?? rawTargetVer
             pendingRelaunchVersion = targetVer
             canRelaunchApp = true
+            clearPersistedStagedDirectory()
             await probeEnvironment()
-            availability = .upToDate(currentVersion: targetVer)
-            statusMessage = "已从本地源码仓同步更新至 v\(targetVer)，点击“立即重启应用”加载新壳层。"
+            setSemanticState(.upToDate(currentVersion: targetVer, message: .localRepoSynced(version: targetVer)))
+        } catch let wrapped as UpdateFailureReasonError {
+            await probeEnvironment()
+            setSemanticState(.failed(wrapped.reason))
         } catch {
-            let errText = error.localizedDescription
             await probeEnvironment()
-            availability = .failed(errText)
-            statusMessage = errText
+            setSemanticState(.failed(.from(error)))
         }
     }
 
     private func performReleaseSync(_ release: GitHubReleaseInfo) async {
+        guard canMutateEnvironment?() ?? true else {
+            setSemanticState(.failed(.handoffInProgress))
+            return
+        }
         guard let checksumsAsset = release.checksumsAsset else {
-            let err = UpdateServiceError.missingChecksumsAsset
-            availability = .failed(err.localizedDescription)
-            statusMessage = err.localizedDescription
+            setSemanticState(.failed(.service(.missingChecksumsAsset)))
             return
         }
         guard release.wheelAsset != nil || release.appZipAsset != nil else {
-            let err = UpdateServiceError.missingUpdateAssets
-            availability = .failed(err.localizedDescription)
-            statusMessage = err.localizedDescription
+            setSemanticState(.failed(.service(.missingUpdateAssets)))
             return
         }
 
@@ -999,133 +1638,60 @@ public final class UpdateViewModel: ObservableObject {
             if release.appZipAsset != nil {
                 try validateReplacementTargetIfNeeded()
             }
+            let stagingDir = try makeStagingSessionDirectory()
+            defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+            setSemanticState(.updating(step: .downloadingChecksums))
             let resolvedPyEnv: PythonRuntimeEnvironment?
             if release.wheelAsset != nil {
-                let cliURL = resolvedCLIPath.map { URL(fileURLWithPath: $0) }
+                let cliURL = resolvedCLIExecutableURL()
                 resolvedPyEnv = try await resolvePythonEnvironment(for: cliURL, childEnv: childEnv)
             } else {
                 resolvedPyEnv = nil
             }
 
-            let stagingDir = try makeStagingSessionDirectory()
-            defer { try? FileManager.default.removeItem(at: stagingDir) }
-
-            availability = .updating(stepDescription: "正在下载并校验 SHA256SUMS…")
-            let (checksumsData, checksumsStatus) = try await httpFetcher.fetchData(
-                from: checksumsAsset.browserDownloadURL,
-                headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
-                timeoutSeconds: 15.0
+            let prepared = try await downloadAndVerifyReleaseAssets(
+                release,
+                checksumsAsset: checksumsAsset,
+                into: stagingDir,
+                childEnv: childEnv,
+                reportDetailedSteps: true
             )
-            guard (200..<300).contains(checksumsStatus),
-                  let checksumsText = String(data: checksumsData, encoding: .utf8)
-            else {
-                throw UpdateServiceError.httpError(statusCode: checksumsStatus)
-            }
-            let checksums = SHA256Verifier.parseChecksums(checksumsText)
 
-            var verifiedWheelURL: URL?
-            if let wheelAsset = release.wheelAsset {
-                let wheelDest = try UpdatePathGuard.stagedAssetFileURL(for: wheelAsset.name, in: stagingDir)
-                let safeWheelName = wheelDest.lastPathComponent
-                availability = .updating(stepDescription: "正在下载并校验 CLI 安装包（\(safeWheelName)）…")
-                let (wheelData, wheelStatus) = try await httpFetcher.fetchData(
-                    from: wheelAsset.browserDownloadURL,
-                    headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
-                    timeoutSeconds: 30.0
-                )
-                guard (200..<300).contains(wheelStatus) else {
-                    throw UpdateServiceError.httpError(statusCode: wheelStatus)
-                }
-                try SHA256Verifier.verify(data: wheelData, assetName: safeWheelName, checksums: checksums)
-                try wheelData.write(to: wheelDest, options: .atomic)
-                verifiedWheelURL = wheelDest
-            }
-
-            var verifiedExtractedAppURL: URL?
-            if let appZipAsset = release.appZipAsset {
-                let zipDest = try UpdatePathGuard.stagedAssetFileURL(for: appZipAsset.name, in: stagingDir)
-                let safeZipName = zipDest.lastPathComponent
-                availability = .updating(stepDescription: "正在下载并校验应用包（\(safeZipName)）…")
-                let (zipData, zipStatus) = try await httpFetcher.fetchData(
-                    from: appZipAsset.browserDownloadURL,
-                    headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
-                    timeoutSeconds: 60.0
-                )
-                guard (200..<300).contains(zipStatus) else {
-                    throw UpdateServiceError.httpError(statusCode: zipStatus)
-                }
-                try SHA256Verifier.verify(data: zipData, assetName: safeZipName, checksums: checksums)
-                try zipData.write(to: zipDest, options: .atomic)
-
-                availability = .updating(stepDescription: "正在解包并校验应用签名…")
-                let extractDir = stagingDir.appendingPathComponent("extracted", isDirectory: true)
-                try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
-                let dittoOut = try await commandRunner.run(
-                    executableURL: URL(fileURLWithPath: "/usr/bin/ditto"),
-                    arguments: ["-x", "-k", zipDest.path, extractDir.path],
-                    environment: childEnv,
-                    timeoutSeconds: 30.0
-                )
-                if dittoOut.exitCode != 0 {
-                    throw UpdateServiceError.commandFailed(
-                        step: "解压应用包",
-                        detail: dittoOut.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-                    )
-                }
-                let extractedApp = extractDir.appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
-                try await verifyCodesign(of: extractedApp, childEnv: childEnv)
-                verifiedExtractedAppURL = extractedApp
-            }
-
-            if let wheelPath = verifiedWheelURL, let pyEnv = resolvedPyEnv {
-                availability = .updating(stepDescription: "正在升级 codex-agy-sync CLI…")
-                var pipArgs = ["-m", "pip", "install", "--upgrade"]
-                if !pyEnv.inVenv {
-                    pipArgs.append("--user")
-                    if pyEnv.supportsBreakSystemPackages {
-                        pipArgs.append("--break-system-packages")
-                    }
-                }
-                pipArgs.append(wheelPath.path)
-                let pipOut = try await commandRunner.run(
-                    executableURL: pyEnv.pythonURL,
-                    arguments: pipArgs,
-                    environment: childEnv,
-                    timeoutSeconds: 90.0
-                )
-                if pipOut.exitCode != 0 {
-                    throw UpdateServiceError.commandFailed(
-                        step: "pip 安装 wheel",
-                        detail: pipOut.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-                    )
-                }
+            if let wheelPath = prepared.wheelURL, let pyEnv = resolvedPyEnv {
+                setSemanticState(.updating(step: .installingCLI))
+                try await installWheel(at: wheelPath, pythonEnv: pyEnv, childEnv: childEnv)
             }
 
             let normalizedReleaseVer = SemanticVersion.parse(release.version)?.description ?? release.version
-            if let extractedApp = verifiedExtractedAppURL {
+            if let extractedApp = prepared.extractedAppURL {
                 try replaceRunningBundleIfPermitted(with: extractedApp)
                 pendingRelaunchVersion = normalizedReleaseVer
                 canRelaunchApp = true
             }
 
+            clearPersistedStagedDirectory()
             await probeEnvironment()
-            availability = .upToDate(currentVersion: normalizedReleaseVer)
-            if verifiedExtractedAppURL != nil {
-                statusMessage = "已同步升级至 \(release.tagName)，点击“立即重启应用”加载新应用壳层。"
-            } else {
-                statusMessage = "已校验并升级 CLI 至 \(release.tagName)（该 Release 未附带 .app 压缩包）。"
-            }
+            let upToDateKind: UpToDateMessage = prepared.extractedAppURL != nil
+                ? .releaseSyncedWithApp(tag: release.tagName)
+                : .releaseSyncedCLIOnly(tag: release.tagName)
+            setSemanticState(.upToDate(currentVersion: normalizedReleaseVer, message: upToDateKind))
+        } catch let wrapped as UpdateFailureReasonError {
+            await probeEnvironment()
+            setSemanticState(.failed(wrapped.reason))
         } catch {
-            let errText = error.localizedDescription
             await probeEnvironment()
-            availability = .failed(errText)
-            statusMessage = errText
+            setSemanticState(.failed(.from(error)))
         }
     }
 
     private func verifyCodesign(of appURL: URL, childEnv: [String: String]) async throws {
         guard FileManager.default.fileExists(atPath: appURL.path) else {
-            throw UpdateServiceError.codesignVerificationFailed("未找到 \(appURL.lastPathComponent)")
+            let missingMsg = AppCopy.updatesMissingAppBundle(
+                appURL.lastPathComponent,
+                in: preferencesStore.effectiveLanguage
+            )
+            throw UpdateServiceError.codesignVerificationFailed(missingMsg)
         }
         let result = try await commandRunner.run(
             executableURL: URL(fileURLWithPath: "/usr/bin/codesign"),
@@ -1145,7 +1711,9 @@ public final class UpdateViewModel: ObservableObject {
             return
         }
         guard let targetBundleURL = currentAppBundleURL else {
-            throw UpdateServiceError.targetBundleNotWritable("当前未从 .app 应用包启动")
+            throw UpdateServiceError.targetBundleNotWritable(
+                AppCopy.text(.updatesErrNoWritableBundleFallback, in: preferencesStore.effectiveLanguage)
+            )
         }
         let validatedTarget = try UpdatePathGuard.validateNonTemporaryURL(targetBundleURL)
         let fm = FileManager.default
@@ -1159,12 +1727,17 @@ public final class UpdateViewModel: ObservableObject {
     }
 
     private func replaceRunningBundleIfPermitted(with stagedAppURL: URL) throws {
+        guard canMutateEnvironment?() ?? true else {
+            throw UpdateFailureReasonError(.handoffInProgress)
+        }
         if environment[Self.skipSelfReplaceEnvKey] == "1" {
             return
         }
         try validateReplacementTargetIfNeeded()
         guard let targetBundleURL = currentAppBundleURL else {
-            throw UpdateServiceError.targetBundleNotWritable("当前未从 .app 应用包启动")
+            throw UpdateServiceError.targetBundleNotWritable(
+                AppCopy.text(.updatesErrNoWritableBundleFallback, in: preferencesStore.effectiveLanguage)
+            )
         }
         let fm = FileManager.default
         if fm.fileExists(atPath: targetBundleURL.path) {
@@ -1287,11 +1860,16 @@ public final class UpdateViewModel: ObservableObject {
         detectedRepoVersion = nil
     }
 
-    private func discoverEditableRepoIfNeeded(fromCLI cliURL: URL, childEnv: [String: String]) async {
+    private func discoverEditableRepoIfNeeded(
+        fromCLI cliURL: URL,
+        childEnv: [String: String],
+        probeGenerationSnapshot: UInt64
+    ) async {
         updateRepoDiscovery(fromCLI: cliURL)
         guard detectedRepoPath == nil else { return }
 
         if let pyInfo = try? await resolvePythonEnvironment(for: cliURL, childEnv: childEnv),
+           probeGenerationSnapshot == probeGeneration,
            let repoPath = pyInfo.repoPath
         {
             let repoURL = URL(fileURLWithPath: repoPath, isDirectory: true)
