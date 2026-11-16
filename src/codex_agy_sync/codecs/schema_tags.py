@@ -455,7 +455,7 @@ class FinishTag(IntEnum):
     HAS_RESULT_SCHEMA = 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StepWireSpec:
     """Declarative specification for one `gemini_coder.Step` active variant."""
 
@@ -504,7 +504,7 @@ STEP_TAG_TO_SPEC: Mapping[GeminiStepWireTag, StepWireSpec] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ToolCodecSpec:
     """Table-driven bidirectional codec entry for one `CanonicalToolPayload` variant."""
 
@@ -522,7 +522,7 @@ class ToolCodecSpec:
     extract_result_meta_fn: Callable[[Any], Mapping[str, Any]] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AgyRawStepRow:
     """Raw row read from or written to `conversations/<cascade_id>.db` `steps` table."""
 
@@ -535,7 +535,7 @@ class AgyRawStepRow:
     step_format: int = 1
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CodexRawRolloutLine:
     """Single JSONL line read from or written to `~/.codex/sessions/**/rollout-*.jsonl`."""
 

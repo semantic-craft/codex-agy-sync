@@ -1033,4 +1033,199 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(envResolved.url?.path, envCLI.path)
         XCTAssertEqual(envResolved.source, .envOverride)
     }
+
+    func testRunProcessAsyncLargeStdoutNonZeroExitAndTimeout() async throws {
+        let largeOut = try await SubprocessCLIClient.runProcessAsync(
+            executableURL: URL(fileURLWithPath: "/usr/bin/perl"),
+            arguments: ["-e", #"print "A" x 300000; print STDERR "E" x 40000;"#],
+            environment: [:],
+            timeoutSeconds: 5.0
+        )
+        XCTAssertEqual(largeOut.exitCode, 0)
+        XCTAssertEqual(largeOut.stdout.count, 300_000)
+        XCTAssertEqual(largeOut.stderr.count, 40_000)
+
+        let failOut = try await SubprocessCLIClient.runProcessAsync(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "echo async-err-detail >&2; exit 7"],
+            environment: [:],
+            timeoutSeconds: 5.0
+        )
+        XCTAssertEqual(failOut.exitCode, 7)
+        XCTAssertEqual(
+            String(data: failOut.stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            "async-err-detail"
+        )
+
+        let start = Date()
+        do {
+            _ = try await SubprocessCLIClient.runProcessAsync(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["5"],
+                environment: [:],
+                timeoutSeconds: 0.15
+            )
+            XCTFail("Expected CLIClientError.timedOut")
+        } catch let err as CLIClientError {
+            guard case .timedOut(_, let seconds) = err else {
+                return XCTFail("Expected timedOut, got \(err)")
+            }
+            XCTAssertEqual(seconds, 0.15, accuracy: 0.001)
+            XCTAssertLessThan(Date().timeIntervalSince(start), 2.0)
+        }
+
+        let cmdResult = try await DefaultSystemCommandRunner().run(
+            executableURL: URL(fileURLWithPath: "/bin/echo"),
+            arguments: ["runner-ok"],
+            environment: [:],
+            timeoutSeconds: 2.0
+        )
+        XCTAssertEqual(cmdResult.exitCode, 0)
+        XCTAssertEqual(cmdResult.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines), "runner-ok")
+    }
+
+    func testRunAndDecodeSingleScanPythonBinParityAndLargeFeed() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("codex-agy-parity-\(UUID().uuidString)", isDirectory: true)
+        let py311Bin = dir.appendingPathComponent("Library/Python/3.11/bin", isDirectory: true)
+        let pathBin = dir.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: py311Bin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: pathBin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let suiteName = "dev.semanticcraft.codex-agy-handoff.parity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let pyBins = SubprocessCLIClient.userPythonBinDirectories(homeDirectory: dir)
+        let env: [String: String] = ["PATH": pathBin.path]
+
+        let resolvedDefault = SubprocessCLIClient.resolveExecutableWithSource(
+            environment: env,
+            defaults: defaults,
+            homeDirectory: dir
+        )
+        let resolvedPrecomputed = SubprocessCLIClient.resolveExecutableWithSource(
+            environment: env,
+            defaults: defaults,
+            homeDirectory: dir,
+            pythonBinDirectories: pyBins
+        )
+        XCTAssertEqual(resolvedDefault.url, resolvedPrecomputed.url)
+        XCTAssertEqual(resolvedDefault.source, resolvedPrecomputed.source)
+        XCTAssertEqual(resolvedDefault.searched, resolvedPrecomputed.searched)
+
+        let mergedDefault = SubprocessCLIClient.mergedEnvironment(from: env, homeDirectory: dir)
+        let mergedPrecomputed = SubprocessCLIClient.mergedEnvironment(
+            from: env,
+            homeDirectory: dir,
+            pythonBinDirectories: pyBins
+        )
+        XCTAssertEqual(mergedDefault, mergedPrecomputed)
+
+        let scriptURL = pathBin.appendingPathComponent("codex-agy-sync")
+        let paddedTitle = String(repeating: "x", count: 140_000)
+        let jsonBody = """
+        {"generated_at_iso":"2026-11-16T00:00:00Z","agy_daemon_active":true,"codex_daemon_active":false,"hero":null,"recent":[{"host":"codex","target_host":"antigravity","direction":"codex_to_agy","session_id":"tid-large","title":"\(paddedTitle)","workspace_path":"/repos/large","workspace_name":"large","paired":true,"state":"completed_ready","updated_at_iso":"2026-11-16T00:00:00Z","sort_epoch":1794730000.0,"turn_count":2,"has_inflight_turn":false,"handed_target_id":null,"pending_error":null,"chain_depth":0}]}
+        """
+        let feedFile = dir.appendingPathComponent("large-feed.json")
+        try jsonBody.write(to: feedFile, atomically: true, encoding: .utf8)
+        let script = """
+        #!/bin/sh
+        cat "\(feedFile.path)"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+        let client = SubprocessCLIClient(environment: env, defaultsSuiteName: suiteName)
+        let snap = try await client.fetchFeed(limit: 5)
+        XCTAssertEqual(snap.recent.count, 1)
+        XCTAssertEqual(snap.recent.first?.title.count, 140_000)
+    }
+
+    func testMenubarSessionItemMatchesSearchQueryFieldsAndStatusLabels() {
+        let interrupted = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-1",
+            title: "Fix Wire Decoder",
+            workspacePath: "/repos/bridge-core",
+            workspaceName: "bridge-core",
+            state: .interruptedStopped,
+            turnCount: 4
+        )
+        let ready = makeItem(
+            host: "codex",
+            targetHost: "antigravity",
+            sessionId: "tid-2",
+            title: "Lazy CLI Startup",
+            workspacePath: "/repos/cli-fast",
+            workspaceName: "cli-fast",
+            state: .completedReady,
+            turnCount: 6
+        )
+        let pending = makeItem(
+            sessionId: "cid-3",
+            title: "Pending Sync",
+            workspaceName: "sync-ws",
+            state: .pendingReconcile,
+            turnCount: 7
+        )
+        let handed = makeItem(
+            sessionId: "cid-4",
+            title: "Done Sync",
+            workspaceName: "done-ws",
+            state: .alreadyHanded,
+            turnCount: 5
+        )
+        let running = makeItem(
+            sessionId: "cid-5",
+            title: "Active Work",
+            workspaceName: "live-ws",
+            state: .activeRunning,
+            turnCount: 8
+        )
+
+        XCTAssertTrue(interrupted.matchesSearchQuery("  "))
+        XCTAssertTrue(interrupted.matchesSearchQuery("wire decoder"))
+        XCTAssertTrue(interrupted.matchesSearchQuery("bridge-core"))
+        XCTAssertTrue(interrupted.matchesSearchQuery("/repos/bridge-core"))
+        XCTAssertTrue(interrupted.matchesSearchQuery("ANTIGRAVITY"))
+        XCTAssertTrue(interrupted.matchesSearchQuery("codex"))
+        XCTAssertTrue(interrupted.matchesSearchQuery("4 轮"))
+        XCTAssertTrue(interrupted.matchesSearchQuery("未完成回复"))
+        XCTAssertFalse(interrupted.matchesSearchQuery("可继续"))
+
+        XCTAssertTrue(ready.matchesSearchQuery("可继续"))
+        XCTAssertTrue(ready.matchesSearchQuery("6 轮"))
+        XCTAssertTrue(ready.matchesSearchQuery("Antigravity"))
+
+        XCTAssertTrue(pending.matchesSearchQuery("上次切换未完成确认"))
+        XCTAssertFalse(pending.matchesSearchQuery("7 轮"))
+
+        XCTAssertTrue(handed.matchesSearchQuery("已同步"))
+        XCTAssertTrue(handed.matchesSearchQuery("5 轮"))
+
+        XCTAssertTrue(running.matchesSearchQuery("对话进行中"))
+        XCTAssertFalse(running.matchesSearchQuery("8 轮"))
+    }
+
+    func testRunProcessAsyncDrainGraceCompletesPromptlyWithGrandchildHoldingStdout() async throws {
+        let start = Date()
+        let out = try await SubprocessCLIClient.runProcessAsync(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "echo prompt-line; (sleep 2) &"],
+            environment: [:],
+            timeoutSeconds: 10.0,
+            drainGraceSeconds: 0.25
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(out.exitCode, 0)
+        XCTAssertEqual(
+            String(data: out.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            "prompt-line"
+        )
+        XCTAssertLessThan(elapsed, 1.5)
+    }
 }

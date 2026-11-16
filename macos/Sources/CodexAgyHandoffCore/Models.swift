@@ -151,20 +151,43 @@ public struct MenubarSessionItem: Codable, Sendable, Equatable, Identifiable {
         )
     }
 
+    private var searchableStateText: String {
+        switch state {
+        case .interruptedStopped:
+            return "未完成回复"
+        case .completedReady:
+            return "可继续"
+        case .pendingReconcile:
+            return "上次切换未完成确认"
+        case .alreadyHanded:
+            return "已同步"
+        case .activeRunning:
+            return "对话进行中"
+        }
+    }
+
     public func matchesSearchQuery(_ rawQuery: String) -> Bool {
         let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
-        let needle = trimmed.lowercased()
-        let haystacks = [
-            title,
-            workspaceName,
-            workspacePath,
-            host,
-            sourceDisplayName,
-            targetDisplayName,
-            presentation().subtitle,
-        ]
-        return haystacks.contains { $0.lowercased().contains(needle) }
+        func matches(_ candidate: String) -> Bool {
+            candidate.range(of: trimmed, options: .caseInsensitive) != nil
+        }
+        if matches(title)
+            || matches(workspaceName)
+            || matches(workspacePath)
+            || matches(host)
+            || matches(sourceDisplayName)
+            || matches(targetDisplayName)
+            || matches(searchableStateText)
+        {
+            return true
+        }
+        switch state {
+        case .interruptedStopped, .completedReady, .alreadyHanded:
+            return matches("\(turnCount) 轮")
+        case .pendingReconcile, .activeRunning:
+            return false
+        }
     }
 
     private static func relativeAgeSuffix(elapsedSeconds: Double) -> String {

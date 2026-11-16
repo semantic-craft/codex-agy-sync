@@ -4,13 +4,18 @@ import contextlib
 import http.client
 import importlib.resources
 import io
+import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 
 from codex_agy_sync import HostEnvironmentPaths, WorkbenchServer, WorkbenchService
+from codex_agy_sync import cli as cli_mod
 from codex_agy_sync.cli import _build_parser, main as cli_main
 from codex_agy_sync.workbench.lease import default_workbench_ui_path
 
@@ -161,6 +166,63 @@ class WorkbenchPackagingTest(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         svc.trigger_handoff(workspace=str(ws), latest=True, auto_pair=False, pair_if_offline=False)
                 self.assertEqual(mock_inv.call_count, 2)
+
+    def test_lazy_package_exports_cli_cold_start_and_all_resolution(self) -> None:
+        import codex_agy_sync
+        import codex_agy_sync.bridge as bridge_pkg
+        import codex_agy_sync.workbench as workbench_pkg
+        from codex_agy_sync.bridge.state_machine import ForkResolutionPolicy, SyncDirection
+
+        repo_root = Path(__file__).resolve().parents[1]
+        env = {**os.environ, "PYTHONPATH": str(repo_root / "src")}
+        probe_script = """
+import sys
+import codex_agy_sync
+assert "codex_agy_sync.codecs.steps" not in sys.modules
+assert "codex_agy_sync.workbench.indexer" not in sys.modules
+import codex_agy_sync.cli
+assert "codex_agy_sync.codecs.steps" not in sys.modules
+assert "codex_agy_sync.workbench.indexer" not in sys.modules
+assert codex_agy_sync.bridge.__name__ == "codex_agy_sync.bridge"
+assert codex_agy_sync.bridge.rpc.__name__ == "codex_agy_sync.bridge.rpc"
+assert codex_agy_sync.workbench.menubar_feed.__name__ == "codex_agy_sync.workbench.menubar_feed"
+print(codex_agy_sync.__version__)
+"""
+        probe_res = subprocess.run(
+            [sys.executable, "-c", probe_script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+        expected_ver = pyproject["project"]["version"]
+        self.assertEqual(probe_res.stdout.strip(), expected_ver)
+
+        ver_res = subprocess.run(
+            [sys.executable, str(repo_root / "bin" / "codex-agy-sync"), "--version"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(ver_res.stdout.strip(), f"codex-agy-sync {expected_ver}")
+
+        for pkg in (codex_agy_sync, bridge_pkg, workbench_pkg):
+            for name in pkg.__all__:
+                with self.subTest(pkg=pkg.__name__, symbol=name):
+                    self.assertIsNotNone(getattr(pkg, name))
+            self.assertTrue(set(pkg.__all__).issubset(set(dir(pkg))))
+
+        self.assertEqual(cli_mod._SYNC_DIRECTION_CHOICES, tuple(d.value for d in SyncDirection))
+        self.assertEqual(cli_mod._FORK_POLICY_CHOICES, tuple(p.value for p in ForkResolutionPolicy))
+
+        from codex_agy_sync.bridge.state_machine import EmptySessionError
+        err = EmptySessionError("empty")
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop("codex_agy_sync.bridge.state_machine", None)
+            payload = cli_mod._exception_to_error_payload(err, "sync-session")
+        self.assertEqual(payload["error"], "empty_session")
 
 
 if __name__ == "__main__":

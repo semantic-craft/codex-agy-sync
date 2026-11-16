@@ -14,7 +14,7 @@ _INT64_MIN = -(1 << 63)
 _VALID_WIRE_TYPES = frozenset({0, 1, 2, 5})
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UnknownWireField:
     """Opaque protobuf wire field preserved for forward-compatible round-tripping."""
 
@@ -126,31 +126,32 @@ def encode_unknown_fields(fields: Iterable[UnknownWireField]) -> bytes:
 
 def iter_wire_fields(buf: bytes) -> list[tuple[int, int, int, bytes]]:
     """Decode `buf` into `(field_number, wire_type, int_val_or_len, raw_bytes)` tuples."""
+    b_buf = buf if isinstance(buf, bytes) else bytes(buf)
     pos = 0
-    n = len(buf)
+    n = len(b_buf)
     fields: list[tuple[int, int, int, bytes]] = []
     while pos < n:
         tag_start = pos
-        tag, pos = read_varint(buf, pos)
+        tag, pos = read_varint(b_buf, pos)
         fn, wt = tag >> 3, tag & 0x07
         if fn <= 0:
             raise ValueError(f"Invalid protobuf field number {fn} at offset {tag_start}.")
         if wt == 0:
             val_start = pos
-            ival, pos = read_varint(buf, pos)
-            fields.append((fn, 0, ival, bytes(buf[val_start:pos])))
+            ival, pos = read_varint(b_buf, pos)
+            fields.append((fn, 0, ival, b_buf[val_start:pos]))
         elif wt in (1, 5):
             width = 8 if wt == 1 else 4
             if pos + width > n:
                 raise ValueError(f"Truncated fixed{width * 8} protobuf field.")
-            raw = bytes(buf[pos : pos + width])
+            raw = b_buf[pos : pos + width]
             fields.append((fn, wt, int.from_bytes(raw, "little"), raw))
             pos += width
         elif wt == 2:
-            ln, pos = read_varint(buf, pos)
+            ln, pos = read_varint(b_buf, pos)
             if pos + ln > n:
                 raise ValueError("Truncated length-delimited protobuf field.")
-            fields.append((fn, 2, ln, bytes(buf[pos : pos + ln])))
+            fields.append((fn, 2, ln, b_buf[pos : pos + ln]))
             pos += ln
         else:
             raise ValueError(f"Unsupported protobuf wire type {wt} at offset {tag_start}.")
@@ -161,12 +162,12 @@ def parse_proto_fields(
     buf: bytes,
     known_tags: Container[int] | None = None,
 ) -> tuple[dict[int, list[tuple[int, int | bytes]]], list[UnknownWireField]]:
-    """Parse `buf` into `{tag: [(wire_type, int | bytes), ...]}` and preserved unknown fields."""
+    """Parse `buf` into `{tag: [(wire_type, int | bytes), ...]}` and unknowns (when `known_tags` is given)."""
     field_map: dict[int, list[tuple[int, int | bytes]]] = {}
     unknowns: list[UnknownWireField] = []
     for fn, wt, ival, raw in iter_wire_fields(buf):
         field_map.setdefault(fn, []).append((wt, ival if wt == 0 else raw))
-        if known_tags is None or fn not in known_tags:
+        if known_tags is not None and fn not in known_tags:
             unknowns.append(UnknownWireField(field_tag=fn, wire_type=wt, raw_bytes=raw))
     return field_map, unknowns
 

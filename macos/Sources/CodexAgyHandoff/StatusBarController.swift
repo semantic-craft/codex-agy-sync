@@ -21,6 +21,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private var hotKey: GlobalHotKey?
     private var keyMonitor: Any?
     private var layoutRefreshScheduled = false
+    private var panelLayoutRefreshScheduled = false
+    private var lastIconState: (style: MenuBarIconStyle, showDot: Bool)?
+    private var lastToolTip: String?
     private var cancellables = Set<AnyCancellable>()
 
     private var pinPanel: Bool {
@@ -80,13 +83,18 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             viewModel.$snapshot.map { _ in () }.eraseToAnyPublisher(),
             viewModel.$isLoading.map { _ in () }.eraseToAnyPublisher(),
             viewModel.$banner.map { _ in () }.eraseToAnyPublisher(),
-            viewModel.$cliMissing.map { _ in () }.eraseToAnyPublisher(),
-            viewModel.$searchQuery.map { _ in () }.eraseToAnyPublisher()
+            viewModel.$cliMissing.map { _ in () }.eraseToAnyPublisher()
         )
         .sink { [weak self] _ in
             self?.scheduleChromeRefresh()
         }
         .store(in: &cancellables)
+
+        viewModel.$searchQuery
+            .sink { [weak self] _ in
+                self?.schedulePanelLayoutRefresh()
+            }
+            .store(in: &cancellables)
 
         Publishers.CombineLatest(
             viewModel.preferencesStore.$preferences,
@@ -119,6 +127,18 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.layoutRefreshScheduled = false
             self.updateStatusButtonAppearance()
+            if self.panel.isVisible {
+                self.positionPanel()
+            }
+        }
+    }
+
+    private func schedulePanelLayoutRefresh() {
+        guard !panelLayoutRefreshScheduled else { return }
+        panelLayoutRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.panelLayoutRefreshScheduled = false
             if self.panel.isVisible {
                 self.positionPanel()
             }
@@ -341,16 +361,24 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private func updateStatusButtonAppearance() {
         guard let button = statusItem.button else { return }
         let prefs = viewModel.preferencesStore.preferences
+        let style = prefs.menuBarIconStyle
         let showDot = prefs.showAttentionDotOnStatusIcon && viewModel.needsAttentionBadge
-        let icon = MenuBarIconRenderer.image(
-            for: prefs.menuBarIconStyle,
-            showAttentionDot: showDot
-        )
-        icon.accessibilityDescription = "对话接力"
-        button.image = icon
+        if button.image == nil || lastIconState?.style != style || lastIconState?.showDot != showDot {
+            let icon = MenuBarIconRenderer.image(
+                for: style,
+                showAttentionDot: showDot
+            )
+            icon.accessibilityDescription = "对话接力"
+            button.image = icon
+            button.setAccessibilityLabel("对话接力")
+            lastIconState = (style: style, showDot: showDot)
+        }
         let shortcutSuffix = prefs.hotKey.isEnabled ? " (\(prefs.hotKey.displayString))" : ""
-        button.toolTip = "对话接力\(shortcutSuffix)"
-        button.setAccessibilityLabel("对话接力")
+        let newToolTip = "对话接力\(shortcutSuffix)"
+        if lastToolTip != newToolTip {
+            button.toolTip = newToolTip
+            lastToolTip = newToolTip
+        }
     }
 
     private func positionPanel() {
