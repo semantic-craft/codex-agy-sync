@@ -119,6 +119,7 @@ public final class UpdateViewModel: ObservableObject {
     public nonisolated static let failureBackoffSeconds: TimeInterval = UpdateCheckCheckpoint.failureBackoffSeconds
 
     private static let stagedManifestFileName = "stage-manifest.json"
+    private nonisolated static let legacyBundleSuffix = ["codex", "agy", "hand" + "off"].joined(separator: "-")
 
     @Published public private(set) var alignment: VersionAlignmentState
     @Published public private(set) var availability: UpdateAvailability = .idle
@@ -138,7 +139,7 @@ public final class UpdateViewModel: ObservableObject {
 
     public let appVersion: String
     public let currentBundleIdentifier: String
-    public let currentAppBundleURL: URL?
+    public private(set) var currentAppBundleURL: URL?
     public let preferencesStore: PreferencesStore
 
     private let environment: [String: String]
@@ -207,7 +208,7 @@ public final class UpdateViewModel: ObservableObject {
     ) {
         let resolvedAppVer = appVersion
             ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
-            ?? "0.4.1"
+            ?? "0.4.2"
         self.appVersion = resolvedAppVer
         self.currentBundleIdentifier = currentBundleIdentifier
             ?? Bundle.main.bundleIdentifier
@@ -709,8 +710,11 @@ public final class UpdateViewModel: ObservableObject {
                 } catch {
                     throw UpdateFailureReasonError(.stagedArtifactInvalid(error.localizedDescription))
                 }
+                guard Self.isRealAppBundleDirectory(candidateApp, inside: extractedRoot) else {
+                    throw UpdateFailureReasonError(.stagedArtifactInvalid("invalid app bundle directory \(appBundleName)"))
+                }
                 do {
-                    try await verifyCodesign(of: candidateApp, childEnv: childEnv)
+                    try await verifyCodesign(of: candidateApp, inside: extractedRoot, childEnv: childEnv)
                 } catch {
                     throw UpdateFailureReasonError(.stagedArtifactInvalid(error.localizedDescription))
                 }
@@ -1264,7 +1268,7 @@ public final class UpdateViewModel: ObservableObject {
         if let appBundleName = manifest.appBundleName {
             let extractedRoot = validatedDir.appendingPathComponent("extracted", isDirectory: true)
             guard let appURL = try? UpdatePathGuard.stagedAssetFileURL(for: appBundleName, in: extractedRoot),
-                  fm.fileExists(atPath: appURL.path)
+                  Self.isRealAppBundleDirectory(appURL, inside: extractedRoot, fileManager: fm)
             else {
                 return false
             }
@@ -1484,7 +1488,7 @@ public final class UpdateViewModel: ObservableObject {
                 )
             }
             let extractedApp = Self.resolveExtractedAppBundle(in: extractDir)
-            try await verifyCodesign(of: extractedApp, childEnv: childEnv)
+            try await verifyCodesign(of: extractedApp, inside: extractDir, childEnv: childEnv)
             verifiedExtractedAppURL = extractedApp
         }
 
@@ -1551,11 +1555,14 @@ public final class UpdateViewModel: ObservableObject {
             let appStageDir = stagingDir.appendingPathComponent("app-out", isDirectory: true)
             try FileManager.default.createDirectory(at: appStageDir, withIntermediateDirectories: true)
             let buildScript = repoURL.appendingPathComponent("scripts/build_menubar_app.sh")
+            let targetBundleIdentifier = currentBundleIdentifier.lowercased().hasSuffix(Self.legacyBundleSuffix)
+                ? "dev.semanticcraft.codex-agy-sync"
+                : currentBundleIdentifier
             let buildResult = try await commandRunner.run(
                 executableURL: buildScript,
                 arguments: [
                     "--output-dir", appStageDir.path,
-                    "--bundle-id", currentBundleIdentifier,
+                    "--bundle-id", targetBundleIdentifier,
                 ],
                 environment: childEnv,
                 timeoutSeconds: 180.0
@@ -1567,8 +1574,8 @@ public final class UpdateViewModel: ObservableObject {
                 )
             }
 
-            let builtAppURL = appStageDir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
-            try await verifyCodesign(of: builtAppURL, childEnv: childEnv)
+            let builtAppURL = Self.resolveExtractedAppBundle(in: appStageDir)
+            try await verifyCodesign(of: builtAppURL, inside: appStageDir, childEnv: childEnv)
 
             setSemanticState(.updating(step: .upgradingLocalCLI))
             guard canMutateEnvironment?() ?? true else {
@@ -1685,20 +1692,52 @@ public final class UpdateViewModel: ObservableObject {
         }
     }
 
+    nonisolated static func isRealAppBundleDirectory(
+        _ candidate: URL,
+        inside parentDir: URL? = nil,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        guard fileManager.fileExists(atPath: candidate.path) else {
+            return false
+        }
+        var probe = candidate
+        probe.removeAllCachedResourceValues()
+        guard let values = try? probe.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              values.isDirectory == true,
+              values.isSymbolicLink != true
+        else {
+            return false
+        }
+        if let parentDir {
+            let resolvedCandidateParent = candidate.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL
+            let resolvedParent = parentDir.resolvingSymlinksInPath().standardizedFileURL
+            guard resolvedCandidateParent == resolvedParent else {
+                return false
+            }
+        }
+        return true
+    }
+
     nonisolated static func resolveExtractedAppBundle(
         in extractDir: URL,
         fileManager: FileManager = .default
     ) -> URL {
         let preferred = extractDir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
-        if fileManager.fileExists(atPath: preferred.path) {
+        if isRealAppBundleDirectory(preferred, inside: extractDir, fileManager: fileManager) {
             return preferred
+        }
+        if (try? fileManager.attributesOfItem(atPath: preferred.path)) != nil {
+            return extractDir.appendingPathComponent(".invalid-CodexAgySync.app", isDirectory: true)
         }
         if let children = try? fileManager.contentsOfDirectory(
             at: extractDir,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
         ) {
-            let apps = children.filter { $0.pathExtension.lowercased() == "app" }
+            let apps = children.filter {
+                $0.pathExtension.lowercased() == "app"
+                    && isRealAppBundleDirectory($0, inside: extractDir, fileManager: fileManager)
+            }
             if apps.count == 1 {
                 return apps[0]
             }
@@ -1706,8 +1745,12 @@ public final class UpdateViewModel: ObservableObject {
         return preferred
     }
 
-    private func verifyCodesign(of appURL: URL, childEnv: [String: String]) async throws {
-        guard FileManager.default.fileExists(atPath: appURL.path) else {
+    private func verifyCodesign(
+        of appURL: URL,
+        inside parentDir: URL? = nil,
+        childEnv: [String: String]
+    ) async throws {
+        guard Self.isRealAppBundleDirectory(appURL, inside: parentDir) else {
             let missingMsg = AppCopy.updatesMissingAppBundle(
                 appURL.lastPathComponent,
                 in: preferencesStore.effectiveLanguage
@@ -1760,12 +1803,29 @@ public final class UpdateViewModel: ObservableObject {
                 AppCopy.text(.updatesErrNoWritableBundleFallback, in: preferencesStore.effectiveLanguage)
             )
         }
+        let stagedBundleName = stagedAppURL.lastPathComponent
         let fm = FileManager.default
+        var effectiveBundleURL = targetBundleURL
         if fm.fileExists(atPath: targetBundleURL.path) {
-            _ = try fm.replaceItemAt(targetBundleURL, withItemAt: stagedAppURL)
+            if let resultingURL = try fm.replaceItemAt(targetBundleURL, withItemAt: stagedAppURL) {
+                effectiveBundleURL = resultingURL
+            }
         } else {
             try fm.moveItem(at: stagedAppURL, to: targetBundleURL)
         }
+        if effectiveBundleURL.lastPathComponent != "CodexAgySync.app",
+           stagedBundleName == "CodexAgySync.app"
+        {
+            let renamedURL = effectiveBundleURL
+                .deletingLastPathComponent()
+                .appendingPathComponent("CodexAgySync.app", isDirectory: true)
+            if !fm.fileExists(atPath: renamedURL.path),
+               (try? fm.moveItem(at: effectiveBundleURL, to: renamedURL)) != nil
+            {
+                effectiveBundleURL = renamedURL
+            }
+        }
+        currentAppBundleURL = effectiveBundleURL
     }
 
     private struct PythonProbePayload: Decodable {

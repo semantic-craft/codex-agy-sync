@@ -235,36 +235,43 @@ def _execute_doctor(run_dir: Path) -> tuple[bool, dict[str, Any]]:
     owner_ok = _verify_owner_marker(layout["owner_file"])
     help_proc = subprocess.run(
         [sys.executable, str(CLI_BIN), "--help"],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        check=False,
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
     )
-    advertised_subcommands = {
-        tok.strip()
-        for group in re.findall(r"\{([^}]+)\}", help_proc.stdout)
-        for tok in group.split(",")
-        if tok.strip()
+    sync_help_proc = subprocess.run(
+        [sys.executable, str(CLI_BIN), "sync", "--help"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+    )
+    import_env = {
+        **os.environ,
+        "PYTHONPATH": str(REPO_ROOT / "src"),
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
-    cli_help_ok = (
-        help_proc.returncode == 0
-        and set(REQUIRED_SUBCOMMANDS).issubset(advertised_subcommands)
-        and "handoff" not in advertised_subcommands
-        and "handoff" not in help_proc.stdout.lower()
-    )
-
-    import_env = dict(os.environ)
-    import_env["PYTHONPATH"] = str(REPO_ROOT / "src")
-    import_env["PYTHONDONTWRITEBYTECODE"] = "1"
     import_proc = subprocess.run(
-        [sys.executable, "-c", "import codex_agy_sync"],
-        cwd=str(REPO_ROOT),
-        env=import_env,
-        capture_output=True,
-        text=True,
-        check=False,
+        [
+            sys.executable,
+            "-c",
+            "import argparse, json, codex_agy_sync; "
+            "from codex_agy_sync.cli import _build_parser; "
+            "p = _build_parser(); "
+            "subs = next(a.choices for a in p._actions if isinstance(a, argparse._SubParsersAction)); "
+            "print(json.dumps(sorted(subs.keys())))",
+        ],
+        cwd=str(REPO_ROOT), env=import_env, capture_output=True, text=True, check=False,
     )
     import_ok = import_proc.returncode == 0
+    parser_choices: set[str] = set()
+    if import_ok:
+        try:
+            parser_choices = set(json.loads(import_proc.stdout))
+        except Exception:
+            import_ok = False
+    cli_help_ok = (
+        help_proc.returncode == 0
+        and sync_help_proc.returncode == 0
+        and parser_choices == set(REQUIRED_SUBCOMMANDS)
+        and "handoff" not in help_proc.stdout.lower()
+        and "handoff" not in sync_help_proc.stdout.lower()
+    )
 
     env_receipt_ok = False
     host_unchanged = False

@@ -144,3 +144,14 @@
 - 正确做法（Done right）：每次流式/懒加载/连接池/异步进程性能优化后，必须用真实损坏流、包属性遍历、超时复现和 3 模型 `/interrogate` 验过边界再合并。
 - 验证点：运行 `./scripts/check`（核对 `test_wire_and_ledger.py`、`test_workbench_packaging.py`、`test_menubar_rpc_batch.py` 及 `MenubarViewModelTests.testRunProcessAsyncDrainGraceCompletesPromptlyWithGrandchildHoldingStdout`）。
 - 复发记录：Seen 1x (2026-11-16)，由 PR `#15`–`#17` 全量性能波次的三模型 `/interrogate` 审查捕获并修复。
+
+### 应用与 CLI 破坏性重命名必须同步升格版本号、迁移偏好与旧包，并将界面字面量纳入静态门禁
+
+**当 macOS 菜单栏应用（`.app` / `CFBundleIdentifier`）与配套 CLI 子命令契约同步发生破坏性重命名时，必须同步升格 `PACKAGE_VERSION` 以防版本对齐看板误报 `Aligned`，在启动与 `--install` 边界一次性迁移旧域 `UserDefaults` 并退役旧 `.app` 释放全局快捷键，同时在 `scripts/check` 用词法扫描覆盖全部 Swift 源码字面量。**
+
+- 标签：#契约升级 #macOS原生 #静态门禁
+- 起因与后果：统一重命名为 `CodexAgySync.app`（`dev.semanticcraft.codex-agy-sync`）与 `codex-agy-sync sync` 主子命令时，实屏截图与三模型 `/interrogate` 审查捕获四项边界漏口：（1）沿用已发布的 `0.4.1` 版本号会让 `UpdateViewModel.probeEnvironment` 对仍只支持旧子命令的已装 `0.4.1` CLI 误报 `Aligned`；（2）仅替换 Bundle ID 而不读取旧域偏好或退役已装旧 `.app` 会导致用户配置丢失且两个常驻进程争抢 `⌃⌥H` Carbon 热键（`-9878`）；（3）`resolveExtractedAppBundle` 仅校验 `.app` 扩展名未排除普通文件与外部符号链接；（4）双语 `Localization.swift` 与运行期异常消息若无静态字面量扫描极易残留旧品牌词。
+- 修复与证据：将全仓版本升格至 `0.4.2`（`pyproject.toml`、`workspace.py`、`UpdateService.swift`、`scripts/check`）；在 `PreferencesStore.loadPreferencesWithLegacyFallback` 补齐一次性旧域偏好读取，在 `scripts/build_menubar_app.sh --install` 与 `replaceRunningBundleIfPermitted` 退役/重命名旧 `.app` 包，并在 `UpdateViewModel.isRealAppBundleDirectory` 校验非符号链接真实目录与暂存父目录边界；在 `scripts/check` `[4/5]` 校验 `_build_parser()` 8 个子命令精确集合并对 `macos/Sources/**/*.swift` 单行/多行/原始字符串字面量做全量扫描。由 `PreferencesAndUpdateTests.swift`、`./scripts/check`（`169` Python + `41/41` Swift XCTest）与 `menubar_verify.py suite` 验证通过。
+- 正确做法（Done right）：破坏性 CLI 契约变更必升版本号；Bundle ID 变更必配一次性只读偏好迁移与旧包 LaunchServices 注销；用 `scripts/check` 词法扫描守住全部用户可见文案边界。
+- 验证点：运行 `./scripts/check` 与 `python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py suite`。
+- 复发记录：Seen 1x (2026-11-16)，由实屏截图核验与三模型 `/interrogate` 对抗审查捕获并固化。

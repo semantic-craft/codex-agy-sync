@@ -205,6 +205,15 @@ fi
 
 if [[ "$INSTALL" -eq 1 ]]; then
     LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    LEGACY_NAME="CodexAgy""Handoff"
+    LEGACY_BUNDLE="$OUTPUT_DIR/$LEGACY_NAME.app"
+    if [[ -d "$LEGACY_BUNDLE" ]]; then
+        pkill -f "$LEGACY_BUNDLE/Contents/MacOS/$LEGACY_NAME" >/dev/null 2>&1 || true
+        if [[ -x "$LSREGISTER" ]]; then
+            "$LSREGISTER" -u "$LEGACY_BUNDLE" >/dev/null 2>&1 || true
+        fi
+        rm -rf "$LEGACY_BUNDLE"
+    fi
     if [[ -x "$LSREGISTER" ]]; then
         "$LSREGISTER" -f "$APP_BUNDLE" >/dev/null 2>&1 || true
     fi

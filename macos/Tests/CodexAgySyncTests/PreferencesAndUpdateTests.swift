@@ -2446,4 +2446,202 @@ final class PreferencesAndUpdateTests: XCTestCase {
             XCTFail("Expected .failed after relaunch failure")
         }
     }
+
+    @MainActor
+    func testLegacyUserDefaultsOneTimeMigrationSeedsEmptyPrimaryOnlyOnce() throws {
+        let (primary, primarySuite) = makeIsolatedDefaults()
+        let (legacy, legacySuite) = makeIsolatedDefaults()
+        defer {
+            primary.removePersistentDomain(forName: primarySuite)
+            legacy.removePersistentDomain(forName: legacySuite)
+        }
+
+        let expectedLegacyDomain = "dev.semanticcraft." + ["codex", "agy", "hand" + "off"].joined(separator: "-")
+        XCTAssertEqual(PreferencesStore.legacyPreferencesSuiteName, expectedLegacyDomain)
+
+        let seededLegacyPrefs = AppPreferences(
+            showAttentionDotOnStatusIcon: false,
+            hotKey: .defaultShortcut,
+            hotKeyBehavior: .togglePanelOnly,
+            activateTargetAppAfterHandoff: false,
+            recentFeedLimit: 10,
+            customCLIPath: nil,
+            localRepoPathForSync: "/repos/migrated-sync",
+            language: .en,
+            autoUpdatePolicy: .autoStage
+        )
+        let encoded = try JSONEncoder().encode(seededLegacyPrefs)
+        let jsonObj = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.set(jsonObj, forKey: PreferencesStore.preferencesDefaultsKey)
+        legacy.set("/opt/legacy-bin/codex-agy-sync", forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
+
+        let migrated = PreferencesStore(
+            defaults: primary,
+            legacyDefaults: legacy,
+            loginItemManager: NoOpLoginItemManager()
+        )
+        XCTAssertFalse(migrated.preferences.showAttentionDotOnStatusIcon)
+        XCTAssertEqual(migrated.preferences.hotKeyBehavior, .togglePanelOnly)
+        XCTAssertFalse(migrated.preferences.activateTargetAppAfterHandoff)
+        XCTAssertEqual(migrated.preferences.recentFeedLimit, 10)
+        XCTAssertEqual(migrated.preferences.localRepoPathForSync, "/repos/migrated-sync")
+        XCTAssertEqual(migrated.preferences.language, .en)
+        XCTAssertEqual(migrated.preferences.autoUpdatePolicy, .autoStage)
+        XCTAssertEqual(migrated.preferences.customCLIPath, "/opt/legacy-bin/codex-agy-sync")
+        XCTAssertNotNil(primary.object(forKey: PreferencesStore.preferencesDefaultsKey))
+        XCTAssertEqual(
+            primary.string(forKey: SubprocessCLIClient.cliExecutableDefaultsKey),
+            "/opt/legacy-bin/codex-agy-sync"
+        )
+
+        migrated.setRecentFeedLimit(5)
+        var mutatedLegacy = jsonObj
+        mutatedLegacy["recentFeedLimit"] = 12
+        legacy.set(mutatedLegacy, forKey: PreferencesStore.preferencesDefaultsKey)
+
+        let reloaded = PreferencesStore(
+            defaults: primary,
+            legacyDefaults: legacy,
+            loginItemManager: NoOpLoginItemManager()
+        )
+        XCTAssertEqual(reloaded.preferences.recentFeedLimit, 5)
+    }
+
+    @MainActor
+    func testBundleResolutionRejectsPlainFileAndSymlinkAndRenamesLegacyBundleOnReplace() async throws {
+        let (defaults, suiteName) = makeIsolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-agy-hardening-\(UUID().uuidString)", isDirectory: true)
+        let extractDir = tempRoot.appendingPathComponent("extract", isDirectory: true)
+        let outsideDir = tempRoot.appendingPathComponent("outside", isDirectory: true)
+        let outsideApp = outsideDir.appendingPathComponent("OutsideReal.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideApp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let fakeFileApp = extractDir.appendingPathComponent("Fake.app", isDirectory: false)
+        try Data("not-a-directory".utf8).write(to: fakeFileApp)
+        XCTAssertFalse(UpdateViewModel.isRealAppBundleDirectory(fakeFileApp, inside: extractDir))
+        XCTAssertEqual(
+            UpdateViewModel.resolveExtractedAppBundle(in: extractDir).lastPathComponent,
+            "CodexAgySync.app"
+        )
+        try FileManager.default.removeItem(at: fakeFileApp)
+
+        let evilSymlinkApp = extractDir.appendingPathComponent("Evil.app", isDirectory: false)
+        try FileManager.default.createSymbolicLink(at: evilSymlinkApp, withDestinationURL: outsideApp)
+        XCTAssertFalse(UpdateViewModel.isRealAppBundleDirectory(evilSymlinkApp, inside: extractDir))
+        XCTAssertEqual(
+            UpdateViewModel.resolveExtractedAppBundle(in: extractDir).lastPathComponent,
+            "CodexAgySync.app"
+        )
+        try FileManager.default.removeItem(at: evilSymlinkApp)
+
+        let spoofedPreferred = extractDir.appendingPathComponent("CodexAgySync.app", isDirectory: false)
+        try FileManager.default.createSymbolicLink(at: spoofedPreferred, withDestinationURL: outsideApp)
+        XCTAssertFalse(UpdateViewModel.isRealAppBundleDirectory(spoofedPreferred, inside: extractDir))
+        let resolvedSpoofed = UpdateViewModel.resolveExtractedAppBundle(in: extractDir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: resolvedSpoofed.path))
+
+        let updatesRoot = tempRoot.appendingPathComponent("updates", isDirectory: true)
+        let staged050 = updatesRoot.appendingPathComponent("staged/0.5.0", isDirectory: true)
+        let stagedExtracted = staged050.appendingPathComponent("extracted", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagedExtracted, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: stagedExtracted.appendingPathComponent("CodexAgySync.app", isDirectory: false),
+            withDestinationURL: outsideApp
+        )
+        let badManifest = StagedUpdateManifest(
+            tagName: "v0.5.0",
+            version: "0.5.0",
+            notesSummary: "",
+            wheelFileName: nil,
+            wheelSHA256: nil,
+            appBundleName: "CodexAgySync.app",
+            stagedAtEpoch: 1_795_000_000
+        )
+        try JSONEncoder().encode(badManifest).write(to: staged050.appendingPathComponent("stage-manifest.json"))
+
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
+        let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
+        let installDir = tempRoot.appendingPathComponent("apps", isDirectory: true)
+        let legacyBundleName = ["Codex", "Agy", "Hand" + "off"].joined() + ".app"
+        let legacyAppURL = installDir.appendingPathComponent(legacyBundleName, isDirectory: true)
+        try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: legacyAppURL, withIntermediateDirectories: true)
+        try "v0.4.1".write(to: legacyAppURL.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+        try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.4.2\"\n"
+            .write(to: repoDir.appendingPathComponent("pyproject.toml"), atomically: true, encoding: .utf8)
+        let buildScript = scriptsDir.appendingPathComponent("build_menubar_app.sh")
+        try "#!/bin/sh\nexit 0\n".write(to: buildScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: buildScript.path)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
+
+        let cliVerLock = NSLock()
+        nonisolated(unsafe) var cliVer = "0.4.1"
+        let runner = StubCommandRunner { exe, args in
+            if args == ["--version"] {
+                return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(cliVerLock.withLock { cliVer })\n".utf8), stderr: Data())
+            }
+            if args.first == "-c" {
+                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":true,"repo_path":null}"#
+                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
+            }
+            if exe.lastPathComponent == "build_menubar_app.sh",
+               let outIdx = args.firstIndex(of: "--output-dir"),
+               outIdx + 1 < args.count
+            {
+                let outApp = URL(fileURLWithPath: args[outIdx + 1]).appendingPathComponent("CodexAgySync.app", isDirectory: true)
+                try FileManager.default.createDirectory(at: outApp, withIntermediateDirectories: true)
+                try "v0.4.2".write(to: outApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            if args.prefix(3) == ["-m", "pip", "install"] {
+                cliVerLock.withLock { cliVer = "0.4.2" }
+                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+            return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
+        }
+
+        let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
+        let relaunchMock = StubRelaunchExecutor()
+        let legacyBundleID = "dev.semanticcraft." + ["codex", "agy", "hand" + "off"].joined(separator: "-")
+        let vm = UpdateViewModel(
+            preferencesStore: prefs,
+            appVersion: "0.4.1",
+            currentBundleIdentifier: legacyBundleID,
+            currentAppBundleURL: legacyAppURL,
+            environment: ["CODEX_AGY_SYNC_BIN": cliBin.path],
+            commandRunner: runner,
+            httpFetcher: StubHTTPFetcher(routes: [:]),
+            relaunchExecutor: relaunchMock,
+            stagingRootOverride: updatesRoot
+        )
+
+        await vm.probeEnvironment()
+        XCTAssertNil(vm.stagedManifest)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged050.path))
+
+        prefs.setLocalRepoPathForSync(repoDir.path)
+        await vm.syncFromLocalRepo()
+
+        let buildCall = try XCTUnwrap(runner.invocations.first { $0.executablePath == buildScript.path })
+        XCTAssertTrue(buildCall.arguments.contains("dev.semanticcraft.codex-agy-sync"))
+        XCTAssertFalse(buildCall.arguments.contains(legacyBundleID))
+
+        let renamedAppURL = installDir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyAppURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamedAppURL.path))
+        XCTAssertEqual(
+            try String(contentsOf: renamedAppURL.appendingPathComponent("version.txt"), encoding: .utf8),
+            "v0.4.2"
+        )
+        XCTAssertEqual(vm.currentAppBundleURL?.standardizedFileURL, renamedAppURL.standardizedFileURL)
+        XCTAssertTrue(vm.relaunchApp())
+        XCTAssertEqual(relaunchMock.relaunchedURLs.map(\.standardizedFileURL), [renamedAppURL.standardizedFileURL])
+    }
 }

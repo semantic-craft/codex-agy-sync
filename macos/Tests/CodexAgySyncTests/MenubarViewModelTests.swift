@@ -666,6 +666,32 @@ final class MenubarViewModelTests: XCTestCase {
         cli.setReconcileResult(.success(resolvedSummary))
         let defaultSummary = try await cli.reconcilePending()
         XCTAssertEqual(defaultSummary.workspace, "/repos/gamma")
+
+        let readyHero = makeItem(
+            sessionId: "cid-ready-only",
+            title: "No pending items",
+            workspacePath: "/repos/clean",
+            workspaceName: "clean",
+            state: .completedReady
+        )
+        let cleanSnapshot = MenubarFeedSnapshot(
+            generatedAtIso: "2026-11-15T08:10:00Z",
+            agyDaemonActive: true,
+            codexDaemonActive: true,
+            hero: readyHero,
+            recent: [readyHero]
+        )
+        let cleanCLI = MockCLIRunner(
+            feedResult: .success(cleanSnapshot),
+            handoffResult: .failure(CLIClientError.nonZeroExit(exitCode: 2, stderr: "unused")),
+            reconcileResult: .failure(CLIClientError.nonZeroExit(exitCode: 2, stderr: "cwd=/ must never be reconciled"))
+        )
+        let cleanVM = HandoffViewModel(cli: cleanCLI, activator: MockActivator())
+        await cleanVM.refresh()
+        await cleanVM.reconcile(workspacePath: nil)
+        XCTAssertTrue(cleanCLI.reconcileCalls.isEmpty)
+        XCTAssertEqual(cleanCLI.fetchLimits.count, 2)
+        XCTAssertEqual(cleanVM.banner, StatusBanner(kind: .success, text: "状态已同步"))
     }
 
     @MainActor

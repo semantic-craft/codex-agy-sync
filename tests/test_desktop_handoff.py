@@ -293,7 +293,7 @@ class DesktopHandoffTest(unittest.TestCase):
     def test_active_agy_status_blocks_disk_history_read(self):
         cid = CascadeId("00000000-0000-4000-8000-000000000042")
         with mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_agy_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.rpc.fetch_agy_trajectory_via_rpc", return_value=AgyRpcReadResult((), 2)), mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta") as disk:
-            with self.assertRaisesRegex(ValueError, "active"):
+            with self.assertRaisesRegex(ValueError, r"Finish the turn before sync\."):
                 read_handoff_source(self.paths, self.binding, SyncDirection.AGY_TO_CODEX, str(cid))
         disk.assert_not_called()
 
@@ -303,6 +303,7 @@ class DesktopHandoffTest(unittest.TestCase):
         with mock.patch.object(DefaultHostTransport, "read_agy_ledger_with_meta", return_value=(self.ledger, TransportMode.ONLINE_RPC, False)), mock.patch("codex_agy_sync.bridge.handoff.PresenceWalGuard.discover_codex_daemon", return_value=object()), mock.patch("codex_agy_sync.bridge.handoff.import_codex_rollout_via_rpc", side_effect=error):
             with self.assertRaises(HandoffPendingError) as failure:
                 handoff_session(self.paths, self.workspace, direction=SyncDirection.AGY_TO_CODEX, source_id="00000000-0000-4000-8000-000000000011")
+        self.assertIn("Sync remains pending", str(failure.exception))
         self.assertEqual(failure.exception.receipt.target_id, error.thread_id)
         saved = list((self.paths.sync_state_dir / "handoffs").glob("*.json"))
         self.assertEqual(json.loads(saved[0].read_text())["target_id"], error.thread_id)

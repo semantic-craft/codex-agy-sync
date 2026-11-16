@@ -78,7 +78,7 @@ class HandoffPendingError(RuntimeError):
     def __init__(self, receipt: HandoffReceipt, receipt_path: Path) -> None:
         self.receipt = receipt
         super().__init__(
-            f"Handoff remains pending; target={receipt.target_id or 'unknown'}. Run "
+            f"Sync remains pending; target={receipt.target_id or 'unknown'}. Run "
             f"`codex-agy-sync sync --reconcile` or inspect {receipt_path} before retrying; "
             f"no new session was allocated on retry. Cause: {receipt.error or 'Previous operation did not finish.'}"
         )
@@ -112,7 +112,7 @@ def load_handoff_receipt(path: Path) -> HandoffReceipt:
     """Parse a persisted handoff receipt JSON file while preserving legacy schema compatibility."""
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise ValueError(f"Invalid handoff receipt payload in {path}: expected JSON object.")
+        raise ValueError(f"Invalid sync receipt payload in {path}: expected JSON object.")
     return HandoffReceipt(**{key: value for key, value in raw.items() if key in _RECEIPT_FIELDS})
 
 

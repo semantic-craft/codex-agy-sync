@@ -101,7 +101,7 @@ def validate_handoff_selector_flags(
     if latest and pick:
         raise ValueError("--latest cannot be combined with --pick.")
     if require_selector and source_id is None and not latest and not chain and not pick:
-        raise ValueError("Specify source_id, latest, chain, or pick for handoff.")
+        raise ValueError("Specify source_id, latest, chain, or pick for sync.")
 
 
 def _read_ledger_for_chain(
@@ -240,10 +240,10 @@ def _select_latest_candidate(
     include_interrupted: bool = False,
 ) -> HandoffCandidate:
     if not candidates:
-        raise ValueError(f"No handoff candidates found for workspace {str(binding.workspace_path)!r}.")
+        raise ValueError(f"No sync candidates found for workspace {str(binding.workspace_path)!r}.")
     eligible = [c for c in candidates if c.turn_or_step_count > 0]
     if not eligible:
-        raise ValueError(f"No completed handoff candidates found for workspace {str(binding.workspace_path)!r}.")
+        raise ValueError(f"No completed sync candidates found for workspace {str(binding.workspace_path)!r}.")
     non_untouched = [c for c in eligible if not c.is_untouched_baton_target]
     if not include_interrupted:
         chosen = non_untouched[0] if non_untouched else eligible[0]
@@ -276,24 +276,24 @@ def _choose_interactive_candidate(
 ) -> HandoffCandidate:
     if chooser is not None:
         if not candidates:
-            raise ValueError("No handoff candidates found in this workspace.")
+            raise ValueError("No sync candidates found in this workspace.")
         return chooser(candidates)
     in_tty = bool(sys.stdin.isatty()) if stdin_isatty is None else stdin_isatty
     err_tty = bool(sys.stderr.isatty()) if stderr_isatty is None else stderr_isatty
     if not (in_tty and err_tty):
         raise ValueError("Interactive session picker (--pick) requires a TTY. Pass --latest, --chain, or --source-id explicitly (or run in a TTY with --pick).")
     if not candidates:
-        raise ValueError("No handoff candidates found in this workspace.")
+        raise ValueError("No sync candidates found in this workspace.")
     for idx, cand in enumerate(candidates, start=1):
         tag = " (untouched baton target)" if cand.is_untouched_baton_target else (
-            f" (handed -> {cand.handed_target_host}:{cand.handed_target_id[:8]})" if cand.already_handed_ready and cand.handed_target_id else ""
+            f" (synced -> {cand.handed_target_host}:{cand.handed_target_id[:8]})" if cand.already_handed_ready and cand.handed_target_id else ""
         )
         print(f"[{idx}] {cand.direction.value} | {cand.title} | {cand.session_id} | count={cand.turn_or_step_count}{tag}", file=sys.stderr)
     sys.stderr.write(f"Select candidate [1-{len(candidates)}] (or q to cancel): ")
     sys.stderr.flush()
     raw_choice = sys.stdin.readline().strip()
     if not raw_choice or raw_choice.lower() in {"q", "quit", "cancel", "exit"}:
-        raise HandoffCancelledError("Interactive handoff selection cancelled.")
+        raise HandoffCancelledError("Interactive sync selection cancelled.")
     try:
         picked_idx = int(raw_choice)
     except ValueError as exc:
@@ -355,7 +355,7 @@ def _resolve_chain_request(
     s_wm = s_ledger.latest_watermark() if s_ledger is not None else None
     if s_wm is not None and str(s_wm.boundary_digest) != tip.source_digest:
         if direction is not None and direction != s_dir:
-            raise ValueError(f"--direction {direction.value} contradicts --chain source re-handoff {s_dir.value} from {tip.source_id}.")
+            raise ValueError(f"--direction {direction.value} contradicts --chain source re-sync {s_dir.value} from {tip.source_id}.")
         return ResolvedHandoffRequest(
             binding, s_dir, tip.source_id, title, "chain",
             chain_id=tip.chain_id or generate_uuid7(), chained_from_source_id=tip.chained_from_source_id, chain_depth=tip.chain_depth + 1,
@@ -416,7 +416,7 @@ def resolve_handoff_request(
     """Resolve CLI/API handoff flags into a concrete direction, source ID, and chain lineage."""
     validate_handoff_selector_flags(source_id=source_id, latest=latest, chain=chain, pick=pick)
     if direction is not None and direction not in (SyncDirection.CODEX_TO_AGY, SyncDirection.AGY_TO_CODEX):
-        raise ValueError("Handoff direction must be codex_to_agy or agy_to_codex.")
+        raise ValueError("Sync direction must be codex_to_agy or agy_to_codex.")
     binding, paired_now, pairing_mode = _resolve_binding_for_handoff(
         paths, workspace, pair_if_offline=pair_if_offline, auto_pair=auto_pair,
     )
