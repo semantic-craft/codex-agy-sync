@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
 from pathlib import Path
 import re
 import subprocess
-from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, Tuple
+from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence, Tuple
 
 from ..events import (
     INTERRUPTED_TOOL_OUTPUT,
@@ -137,21 +138,38 @@ def compress_zstd_rollout_bytes(text: str) -> bytes:
     return subprocess.run(["zstd", "-q", "-c"], input=payload, capture_output=True, check=True).stdout
 
 
+def _iter_binary_lf_lines(stream: Iterable[bytes]) -> Iterator[CodexRawRolloutLine]:
+    for i, raw_line in enumerate(stream):
+        ln = raw_line.rstrip(b"\n").decode("utf-8", errors="replace")
+        if ln.strip():
+            yield CodexRawRolloutLine(line_no=RolloutLineNo(i + 1), raw_json=ln)
+
+
 def iter_codex_rollout_lines(path: Path) -> Iterator[CodexRawRolloutLine]:
     """Stream `.jsonl` or `.jsonl.zst` Codex rollout lines splitting strictly on LF."""
     with path.open("rb") as fh:
-        magic = fh.read(4)
-        fh.seek(0)
-        if path.name.endswith(".zst") or magic == _ZSTD_MAGIC:
-            text = decompress_zstd_rollout_bytes(fh.read())
-            for i, ln in enumerate(text.split("\n")):
-                if ln.strip():
-                    yield CodexRawRolloutLine(line_no=RolloutLineNo(i + 1), raw_json=ln)
-            return
-        for i, raw_line in enumerate(fh):
-            ln = raw_line.rstrip(b"\n").decode("utf-8", errors="replace")
-            if ln.strip():
-                yield CodexRawRolloutLine(line_no=RolloutLineNo(i + 1), raw_json=ln)
+        is_zst = path.name.endswith(".zst") or fh.read(4) == _ZSTD_MAGIC
+    if not is_zst:
+        with path.open("rb") as fh:
+            yield from _iter_binary_lf_lines(fh)
+        return
+    backend = _zstd_module()
+    if backend is not None and backend[0] == "stdlib":
+        with backend[1].open(path, "rb") as zfh:
+            yield from _iter_binary_lf_lines(zfh)
+        return
+    if backend is not None and backend[0] == "zstandard":
+        with (
+            path.open("rb") as fh,
+            backend[1].ZstdDecompressor().stream_reader(fh) as zr,
+            io.BufferedReader(zr) as br,
+        ):
+            yield from _iter_binary_lf_lines(br)
+        return
+    text = decompress_zstd_rollout_bytes(path.read_bytes())
+    for i, ln in enumerate(text.split("\n")):
+        if ln.strip():
+            yield CodexRawRolloutLine(line_no=RolloutLineNo(i + 1), raw_json=ln)
 
 
 def read_codex_rollout_lines(path: Path) -> Tuple[CodexRawRolloutLine, ...]:

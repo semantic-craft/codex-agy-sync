@@ -62,7 +62,13 @@ def _try_register_workspace(
     raw_spec: str | Path,
     homes: Sequence[Path],
     discovered: dict[WorkspacePath, WorkspaceRootUri],
+    seen_raw: set[str] | None = None,
 ) -> None:
+    if seen_raw is not None:
+        spec_key = str(raw_spec or "").strip()
+        if not spec_key or spec_key in seen_raw:
+            return
+        seen_raw.add(spec_key)
     raw_path = raw_spec_to_candidate_path(raw_spec)
     if raw_path is None or is_excluded_for_homes(raw_path, homes):
         return
@@ -79,6 +85,7 @@ def _collect_agy_project_workspaces(
     paths: HostEnvironmentPaths,
     homes: Sequence[Path],
     discovered: dict[WorkspacePath, WorkspaceRootUri],
+    seen_raw: set[str] | None = None,
 ) -> None:
     projects_dir = paths.gemini_config_dir / "projects"
     if not projects_dir.is_dir():
@@ -96,7 +103,7 @@ def _collect_agy_project_workspaces(
         if not isinstance(data.get("projectResources"), dict):
             continue
         for uri in extract_agy_project_folder_uris(data):
-            _try_register_workspace(uri, homes, discovered)
+            _try_register_workspace(uri, homes, discovered, seen_raw)
 
 
 AGY_PRELOAD_SUMMARY_COLS = (
@@ -184,26 +191,28 @@ def _collect_codex_and_summary_workspaces(
     homes: Sequence[Path],
     discovered: dict[WorkspacePath, WorkspaceRootUri],
     preloaded: PreloadedHostTables,
+    seen_raw: set[str] | None = None,
 ) -> None:
     for _, raw_root in preloaded.codex_project_roots:
         if raw_root:
-            _try_register_workspace(raw_root, homes, discovered)
+            _try_register_workspace(raw_root, homes, discovered, seen_raw)
     for row in preloaded.codex_thread_rows:
         cwd, archived = row[4], row[14]
         if not archived and cwd:
-            _try_register_workspace(str(cwd), homes, discovered)
+            _try_register_workspace(str(cwd), homes, discovered, seen_raw)
     for row in preloaded.agy_summary_rows:
         uris_raw, pid = row[3], row[4]
         if str(pid or "").strip() in FORBIDDEN_AGY_PROJECT_IDS:
             continue
         for uri in parse_summary_workspace_uris(uris_raw):
-            _try_register_workspace(uri, homes, discovered)
+            _try_register_workspace(uri, homes, discovered, seen_raw)
 
 
 def _collect_sync_state_workspaces(
     paths: HostEnvironmentPaths,
     homes: Sequence[Path],
     discovered: dict[WorkspacePath, WorkspaceRootUri],
+    seen_raw: set[str] | None = None,
 ) -> None:
     for sub, field_name in (("cursors", "workspace_uri"), ("handoffs", "workspace")):
         target_dir = paths.sync_state_dir / sub
@@ -215,13 +224,14 @@ def _collect_sync_state_workspaces(
             with contextlib.suppress(OSError, ValueError):
                 raw = json.loads(jf.read_text(encoding="utf-8"))
                 if isinstance(raw, dict) and raw.get(field_name):
-                    _try_register_workspace(str(raw[field_name]), homes, discovered)
+                    _try_register_workspace(str(raw[field_name]), homes, discovered, seen_raw)
 
 
 def _collect_codex_global_state_workspaces(
     paths: HostEnvironmentPaths,
     homes: Sequence[Path],
     discovered: dict[WorkspacePath, WorkspaceRootUri],
+    seen_raw: set[str] | None = None,
 ) -> None:
     gs_path = paths.codex_home_dir / ".codex-global-state.json"
     if not gs_path.is_file():
@@ -234,7 +244,7 @@ def _collect_codex_global_state_workspaces(
                 roots = entry.get("rootPaths") if isinstance(entry, dict) else None
                 if isinstance(roots, list):
                     for rp in roots:
-                        _try_register_workspace(str(rp), homes, discovered)
+                        _try_register_workspace(str(rp), homes, discovered, seen_raw)
 
 
 def discover_workspaces(
@@ -246,10 +256,11 @@ def discover_workspaces(
     tables = preloaded if preloaded is not None else load_preloaded_host_tables(paths)
     homes = candidate_home_dirs(paths)
     discovered: dict[WorkspacePath, WorkspaceRootUri] = {}
+    seen_raw: set[str] = set()
     for seed in seed_workspaces:
-        _try_register_workspace(seed, homes, discovered)
-    _collect_agy_project_workspaces(paths, homes, discovered)
-    _collect_codex_and_summary_workspaces(homes, discovered, tables)
-    _collect_codex_global_state_workspaces(paths, homes, discovered)
-    _collect_sync_state_workspaces(paths, homes, discovered)
+        _try_register_workspace(seed, homes, discovered, seen_raw)
+    _collect_agy_project_workspaces(paths, homes, discovered, seen_raw)
+    _collect_codex_and_summary_workspaces(homes, discovered, tables, seen_raw)
+    _collect_codex_global_state_workspaces(paths, homes, discovered, seen_raw)
+    _collect_sync_state_workspaces(paths, homes, discovered, seen_raw)
     return tuple(sorted(discovered.items(), key=lambda pair: str(pair[0])))

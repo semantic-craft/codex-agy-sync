@@ -28,6 +28,8 @@ from codex_agy_sync.bridge.store_catalog import (
 from codex_agy_sync.codecs import compress_zstd_rollout_bytes, encode_agy_trajectory, iter_codex_rollout_lines
 from codex_agy_sync.events import AssistantTextEvent, EventOriginAnchor, HostKind, TurnId, UserInputEvent
 from codex_agy_sync.workbench import WorkbenchIndexer, WorkbenchService
+from codex_agy_sync.workbench.discovery import discover_workspaces
+from codex_agy_sync.workspace import parse_workspace_identity
 
 
 def _write_agy_session(
@@ -534,6 +536,89 @@ class IndexerScalabilityTest(unittest.TestCase):
             work_retried = indexer.get_work(wid)
         self.assertTrue(bumped)
         self.assertEqual(len(work_retried.turns), 1)
+
+    def test_discover_workspaces_deduplicates_raw_specs_and_keeps_symlink_exclusions(self) -> None:
+        ws_a = self.root / "dedup-a"
+        ws_b = self.root / "dedup-b"
+        arch_ws = self.root / "Archive" / "secret-dedup"
+        sym_arch = self.root / "workspaces" / "sym-into-archive"
+        for d in (ws_a, ws_b, arch_ws, sym_arch.parent):
+            d.mkdir(parents=True, exist_ok=True)
+        sym_arch.symlink_to(arch_ws)
+
+        state_db = self.paths.codex_home_dir / "state_5.sqlite"
+        sum_db = self.paths.agy_data_dir / "conversation_summaries.db"
+        with contextlib.closing(sqlite3.connect(str(state_db))) as cconn:
+            ensure_codex_state_db_schema(cconn)
+            for idx in range(50):
+                ws = ws_a if idx % 2 == 0 else ws_b
+                tid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"dedup-codex-{idx}"))
+                cconn.execute(
+                    "INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, archived, has_user_event) "
+                    "VALUES (?, ?, 1000, 1000, 'cli', 'openai', ?, ?, 'workspace-write', 'never', 0, 1)",
+                    (tid, str(self.root / f"{tid}.jsonl"), str(ws), f"Thread {idx}"),
+                )
+            for idx in range(5):
+                tid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"dedup-sym-codex-{idx}"))
+                cconn.execute(
+                    "INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, archived, has_user_event) "
+                    "VALUES (?, ?, 1000, 1000, 'cli', 'openai', ?, ?, 'workspace-write', 'never', 0, 1)",
+                    (tid, str(self.root / f"{tid}.jsonl"), str(sym_arch), f"Sym {idx}"),
+                )
+            cconn.commit()
+
+        with contextlib.closing(sqlite3.connect(str(sum_db))) as sconn:
+            ensure_agy_summaries_db_schema(sconn)
+            for idx in range(50):
+                ws = ws_a if idx % 2 == 0 else ws_b
+                cid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"dedup-agy-{idx}"))
+                sconn.execute(
+                    "INSERT INTO conversation_summaries (conversation_id, title, step_count, last_modified_time, workspace_uris, project_id, nesting_depth, last_user_input_time) "
+                    "VALUES (?, ?, 2, 1000, ?, ?, 0, 1000)",
+                    (cid, f"AGY {idx}", json.dumps([ws.as_uri()]), deterministic_uuid("agy-project", ws.as_uri())),
+                )
+            for idx in range(5):
+                cid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"dedup-sym-agy-{idx}"))
+                sconn.execute(
+                    "INSERT INTO conversation_summaries (conversation_id, title, step_count, last_modified_time, workspace_uris, project_id, nesting_depth, last_user_input_time) "
+                    "VALUES (?, ?, 2, 1000, ?, ?, 0, 1000)",
+                    (cid, f"Sym AGY {idx}", json.dumps([sym_arch.as_uri()]), deterministic_uuid("agy-project", sym_arch.as_uri())),
+                )
+            sconn.commit()
+
+        with patch("codex_agy_sync.workbench.discovery.parse_workspace_identity", wraps=parse_workspace_identity) as mock_parse:
+            found = discover_workspaces(self.paths)
+
+        self.assertLessEqual(mock_parse.call_count, 6)
+        self.assertEqual({p for p, _ in found}, {ws_a.resolve(), ws_b.resolve()})
+
+    def test_iter_codex_rollout_lines_streams_zst_without_full_decompress_and_preserves_cr(self) -> None:
+        ws = self.root / "zst-stream-ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        tid = str(uuid.uuid4())
+        line1 = json.dumps(
+            {"type": "session_meta", "payload": {"id": tid, "cwd": str(ws), "note": "a\rb"}}
+        ).replace(', "payload":', ',\r"payload":', 1)
+        line2 = json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}})
+        line3 = json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "world"}]}})
+        zst_path = self.root / "stream-check.jsonl.zst"
+        zst_path.write_bytes(compress_zstd_rollout_bytes("\n".join((line1, line2, line3)) + "\n"))
+
+        with patch("codex_agy_sync.codecs.rollout.decompress_zstd_rollout_bytes", side_effect=AssertionError("must stream")):
+            gen = iter_codex_rollout_lines(zst_path)
+            try:
+                first = next(gen)
+            finally:
+                gen.close()
+            self.assertEqual(first.line_no, 1)
+            self.assertEqual(json.loads(first.raw_json)["payload"]["note"], "a\rb")
+
+            all_lines = tuple(iter_codex_rollout_lines(zst_path))
+        self.assertEqual(len(all_lines), 3)
+        self.assertEqual([ln.line_no for ln in all_lines], [1, 2, 3])
+        self.assertEqual(json.loads(all_lines[0].raw_json)["payload"]["note"], "a\rb")
+        for ln in all_lines:
+            json.loads(ln.raw_json)
 
 
 if __name__ == "__main__":
