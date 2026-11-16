@@ -148,7 +148,9 @@ class PreloadedHostTables:
     codex_has_user_event_col: bool = False
 
 
-def load_preloaded_host_tables(paths: HostEnvironmentPaths) -> PreloadedHostTables:
+def load_preloaded_host_tables(
+    paths: HostEnvironmentPaths, *, include_raw_summary: bool = True,
+) -> PreloadedHostTables:
     """Open `state_5.sqlite` and `conversation_summaries.db` at most once each for read-only indexing."""
     project_roots: list[tuple[str, str]] = []
     thread_rows: list[tuple[Any, ...]] = []
@@ -176,7 +178,8 @@ def load_preloaded_host_tables(paths: HostEnvironmentPaths) -> PreloadedHostTabl
                 scols = table_column_names(conn, "conversation_summaries")
                 if "conversation_id" in scols:
                     order_sql = " ORDER BY last_modified_time DESC" if "last_modified_time" in scols else ""
-                    ssql = f"SELECT {optional_select_columns_sql(scols, AGY_PRELOAD_SUMMARY_COLS)} FROM conversation_summaries{order_sql}"
+                    eff_scols = scols if include_raw_summary else (scols - {"raw_summary"})
+                    ssql = f"SELECT {optional_select_columns_sql(eff_scols, AGY_PRELOAD_SUMMARY_COLS)} FROM conversation_summaries{order_sql}"
                     agy_rows = [tuple(r) for r in conn.execute(ssql).fetchall()]
 
     return PreloadedHostTables(

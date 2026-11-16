@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 from typing import AbstractSet, Any, Mapping, Sequence
@@ -310,6 +311,43 @@ def discover_agy_subagent_sidecars(paths: HostEnvironmentPaths) -> dict[str, dic
             "workspace_uris": [str(u) for u in ws_uris] if isinstance(ws_uris, list) else [],
         }
     return sidecars
+
+
+def discover_agy_subagent_sidecar_ids(paths: HostEnvironmentPaths) -> set[str]:
+    ids: set[str] = set()
+    brain_dir = paths.agy_data_dir / "brain"
+    if not brain_dir.is_dir():
+        return ids
+    with contextlib.suppress(OSError), os.scandir(brain_dir) as brain_it:
+        for b in brain_it:
+            try:
+                if not b.is_dir() or not safe_valid_session_id(b.name, "parent_cascade_id"):
+                    continue
+            except OSError:
+                continue
+            sub_dir = os.path.join(b.path, ".system_generated", "subagents")
+            with contextlib.suppress(OSError), os.scandir(sub_dir) as sub_it:
+                for f in sub_it:
+                    if not f.name.endswith(".json"):
+                        continue
+                    try:
+                        if not f.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    stem = f.name[:-5]
+                    if len(stem) == 36 and stem.count("-") == 4 and (fast_cid := safe_valid_session_id(stem, "child_cascade_id")):
+                        ids.add(fast_cid)
+                        continue
+                    try:
+                        raw = json.loads(Path(f.path).read_text(encoding="utf-8", errors="replace"))
+                    except Exception:
+                        continue
+                    if not isinstance(raw, dict):
+                        continue
+                    if child_cid := safe_valid_session_id(raw.get("conversationId") or stem, "child_cascade_id"):
+                        ids.add(child_cid)
+    return ids
 
 
 _AGY_SUMMARY_COLS = (

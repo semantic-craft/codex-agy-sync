@@ -72,6 +72,7 @@ from .rpc import (
     OnlineRpcUnavailableError,
     UnixWebSocketClient,
     extract_codex_rpc_thread,
+    fetch_agy_run_statuses_via_rpc,
     fetch_agy_trajectory_via_rpc,
     fetch_codex_thread_via_rpc,
 )
@@ -157,6 +158,7 @@ __all__ = [
     "execute_handoff",
     "expand_existing_with_sidecars",
     "extract_codex_rpc_thread",
+    "fetch_agy_run_statuses_via_rpc",
     "fetch_agy_trajectory_via_rpc",
     "fetch_codex_thread_via_rpc",
     "generate_uuid7",

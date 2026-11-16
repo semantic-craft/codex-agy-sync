@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from contextlib import closing, redirect_stdout
+from datetime import datetime, timezone
 import fcntl
+import http.client
+import http.server
 import io
 import json
 import os
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +33,7 @@ from codex_agy_sync import (
     HostEnvironmentPaths,
     HostKind,
     MenubarCandidateState,
+    OnlineRpcUnavailableError,
     PresenceWalGuard,
     SubagentLineage,
     SyncBridge,
@@ -37,8 +43,10 @@ from codex_agy_sync import (
     TransportMode,
     UserInputEvent,
     build_menubar_feed,
+    fetch_agy_trajectory_via_rpc,
     handoff_session,
 )
+from codex_agy_sync._wire import encode_bytes_field, encode_string_field, encode_varint_field, iter_wire_fields
 from codex_agy_sync.bridge import ensure_codex_state_db_schema
 from codex_agy_sync.bridge.handoff_store import save_handoff_receipt
 from codex_agy_sync.cli import main as cli_main
@@ -543,6 +551,205 @@ class MenubarFeedTest(unittest.TestCase):
             os.close(lock_fd)
             live_sum.close()
             live_state.close()
+
+    def test_fetch_agy_trajectory_via_rpc_include_steps_false_and_keepalive(self) -> None:
+        cid_ok = "10000000-0000-4000-8000-000000000001"
+        cid_empty_blob = "10000000-0000-4000-8000-000000000002"
+        cid_empty_fields = "10000000-0000-4000-8000-000000000003"
+        cid_404 = "10000000-0000-4000-8000-000000000004"
+        cid_503 = "10000000-0000-4000-8000-000000000005"
+
+        step_blob = encode_varint_field(1, 14) + encode_varint_field(4, 1)
+        ok_traj = encode_string_field(1, cid_ok) + encode_bytes_field(2, step_blob)
+        routes: dict[str, tuple[int, bytes]] = {
+            cid_ok: (200, encode_bytes_field(1, ok_traj) + encode_varint_field(2, 2)),
+            cid_empty_blob: (200, encode_bytes_field(1, b"") + encode_varint_field(2, 1)),
+            cid_empty_fields: (200, encode_bytes_field(1, encode_varint_field(8, 1)) + encode_varint_field(2, 1)),
+            cid_404: (404, b'{"code":"not_found"}'),
+            cid_503: (503, b"service unavailable"),
+        }
+        state: dict[str, object] = {"connections": 0, "requests": [], "proto": "HTTP/1.1"}
+        state_lock = threading.Lock()
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def setup(self) -> None:
+                super().setup()
+                with state_lock:
+                    state["connections"] = int(state["connections"]) + 1  # type: ignore[arg-type]
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:
+                self.protocol_version = str(state["proto"])
+                length = int(self.headers.get("Content-Length") or "0")
+                raw_req = self.rfile.read(length)
+                req_cid = next((raw.decode("utf-8") for fn, wt, _, raw in iter_wire_fields(raw_req) if fn == 1 and wt == 2), "")
+                with state_lock:
+                    state["requests"].append((self.path, self.headers.get("Connection"), req_cid))  # type: ignore[attr-defined]
+                code, body = routes[req_cid]
+                self.send_response(code)
+                self.send_header("Content-Type", "application/proto")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        server.daemon_threads = True
+        port = server.server_address[1]
+        srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        srv_thread.start()
+        ep = AgyDaemonEndpoint(os.getpid(), port, port + 1, "1.0", CsrfSecret("tok"))
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+        try:
+            res_fast = fetch_agy_trajectory_via_rpc(ep, CascadeId(cid_ok), include_steps=False, conn=conn)
+            self.assertEqual(res_fast.raw_steps, ())
+            self.assertEqual(res_fast.cascade_run_status, 2)
+            self.assertTrue(res_fast.is_active)
+
+            res_full = fetch_agy_trajectory_via_rpc(ep, CascadeId(cid_ok), include_steps=True, conn=conn)
+            self.assertEqual(len(res_full.raw_steps), 1)
+            self.assertEqual(res_full.cascade_run_status, 2)
+
+            for missing_cid in (cid_empty_blob, cid_empty_fields, cid_404):
+                with self.assertRaises(FileNotFoundError):
+                    fetch_agy_trajectory_via_rpc(ep, CascadeId(missing_cid), include_steps=False, conn=conn)
+            with self.assertRaises(OnlineRpcUnavailableError):
+                fetch_agy_trajectory_via_rpc(ep, CascadeId(cid_503), include_steps=False, conn=conn)
+
+            self.assertEqual(state["connections"], 1)
+            self.assertEqual(len(state["requests"]), 6)  # type: ignore[arg-type]
+
+            assert conn.sock is not None
+            conn.sock.close()
+            res_recovered = fetch_agy_trajectory_via_rpc(ep, CascadeId(cid_ok), include_steps=False, conn=conn)
+            self.assertEqual(res_recovered.cascade_run_status, 2)
+            self.assertEqual(state["connections"], 2)
+            conn.close()
+
+            state["proto"] = "HTTP/1.0"
+            conn_10 = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+            try:
+                r1 = fetch_agy_trajectory_via_rpc(ep, CascadeId(cid_ok), include_steps=False, conn=conn_10)
+                self.assertIsNone(conn_10.sock)
+                r2 = fetch_agy_trajectory_via_rpc(ep, CascadeId(cid_ok), include_steps=False, conn=conn_10)
+                self.assertEqual((r1.cascade_run_status, r2.cascade_run_status), (2, 2))
+            finally:
+                conn_10.close()
+        finally:
+            conn.close()
+            server.shutdown()
+            server.server_close()
+            srv_thread.join(timeout=2.0)
+
+    def test_selective_rpc_and_parallel_ordering(self) -> None:
+        cid_recent = "20000000-0000-4000-8000-000000000001"
+        cid_empty = "20000000-0000-4000-8000-000000000002"
+        cid_old_done_1 = "20000000-0000-4000-8000-000000000003"
+        cid_old_done_2 = "20000000-0000-4000-8000-000000000004"
+        cid_old_inflight = "20000000-0000-4000-8000-000000000005"
+        cid_old_locked = "20000000-0000-4000-8000-000000000006"
+
+        def _set_summary_mtime(cid: str, mtime: float) -> None:
+            iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            with closing(sqlite3.connect(self.paths.agy_data_dir / "conversation_summaries.db")) as sconn, sconn:
+                sconn.execute("UPDATE conversation_summaries SET last_modified_time = ? WHERE conversation_id = ?", (iso, cid))
+
+        self._write_agy_session(
+            self.binding_a, cid_recent, "Recent Done",
+            _turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-15T08:04:00Z", "recent q", "recent a"),
+            mtime=_NOW_EPOCH - 120.0,
+        )
+        _set_summary_mtime(cid_recent, _NOW_EPOCH - 120.0)
+        self._write_agy_session(self.binding_a, cid_empty, "Empty Session", [], mtime=_NOW_EPOCH - 1000.0)
+        _set_summary_mtime(cid_empty, _NOW_EPOCH - 1000.0)
+        self._write_agy_session(
+            self.binding_a, cid_old_done_1, "Old Done 1",
+            _turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-15T07:45:00Z", "old1 q", "old1 a"),
+            mtime=_NOW_EPOCH - 1200.0,
+        )
+        _set_summary_mtime(cid_old_done_1, _NOW_EPOCH - 1200.0)
+        self._write_agy_session(
+            self.binding_a, cid_old_done_2, "Old Done 2",
+            _turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-15T07:40:00Z", "old2 q", "old2 a"),
+            mtime=_NOW_EPOCH - 1500.0,
+        )
+        _set_summary_mtime(cid_old_done_2, _NOW_EPOCH - 1500.0)
+        inflight_events = [
+            *_turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-15T07:30:00Z", "ok q", "ok a"),
+            UserInputEvent(
+                kind="user_input",
+                anchor=EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("t2"), "2026-11-15T07:35:00Z"),
+                query_text="old crash",
+            ),
+        ]
+        db_inflight = self._write_agy_session(self.binding_a, cid_old_inflight, "Old Inflight", inflight_events, mtime=_NOW_EPOCH - 1800.0)
+        with closing(sqlite3.connect(db_inflight)) as conn, conn:
+            conn.execute("UPDATE steps SET status = 2 WHERE idx = (SELECT MAX(idx) FROM steps)")
+        os.utime(db_inflight, (_NOW_EPOCH - 1800.0, _NOW_EPOCH - 1800.0))
+        _set_summary_mtime(cid_old_inflight, _NOW_EPOCH - 1800.0)
+
+        self._write_agy_session(
+            self.binding_a, cid_old_locked, "Old Locked",
+            _turn_pair(HostKind.ANTIGRAVITY, "t1", "2026-11-15T07:20:00Z", "lock q", "lock a"),
+            mtime=_NOW_EPOCH - 2400.0,
+        )
+        _set_summary_mtime(cid_old_locked, _NOW_EPOCH - 2400.0)
+
+        presence_dir = self.paths.agy_data_dir / "presence"
+        presence_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = presence_dir / f"{cid_old_locked}.lock"
+        lock_file.write_text("held", encoding="utf-8")
+        lock_fd = os.open(str(lock_file), os.O_RDWR)
+        rpc_calls: list[tuple[str, object, object]] = []
+        calls_lock = threading.Lock()
+
+        def _spy_agy_rpc(_ep, cid, **kwargs):
+            cid_s = str(cid)
+            time.sleep(0.03 if cid_s == cid_recent else 0.002)
+            with calls_lock:
+                rpc_calls.append((cid_s, kwargs.get("include_steps"), kwargs.get("conn")))
+            return AgyRpcReadResult(raw_steps=(), cascade_run_status=2 if cid_s == cid_old_locked else 1)
+
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            agy_ep = AgyDaemonEndpoint(os.getpid(), 41233, 41234, "1.0", CsrfSecret("tok"))
+            with (
+                patch.object(PresenceWalGuard, "discover_agy_daemon", return_value=agy_ep),
+                patch.object(PresenceWalGuard, "discover_codex_daemon", return_value=None),
+                patch("codex_agy_sync.workbench.menubar_feed.fetch_agy_trajectory_via_rpc", side_effect=_spy_agy_rpc),
+            ):
+                snap = build_menubar_feed(self.paths, limit=6, now_epoch=_NOW_EPOCH)
+                self.assertEqual({c[0] for c in rpc_calls}, {cid_recent, cid_old_inflight, cid_old_locked})
+                for _, inc_steps, conn_arg in rpc_calls:
+                    self.assertIs(inc_steps, False)
+                    self.assertIsInstance(conn_arg, http.client.HTTPConnection)
+                    assert isinstance(conn_arg, http.client.HTTPConnection)
+                    self.assertIsNone(conn_arg.sock)
+
+                rpc_calls.clear()
+                snap_fallback = build_menubar_feed(self.paths, limit=2, now_epoch=_NOW_EPOCH)
+                self.assertEqual({c[0] for c in rpc_calls}, {cid_recent, cid_old_inflight})
+
+            assert snap.hero is not None
+            self.assertEqual(snap.hero.session_id, cid_recent)
+            self.assertEqual(
+                [it.session_id for it in snap.recent],
+                [cid_old_done_1, cid_old_done_2, cid_old_inflight, cid_old_locked],
+            )
+            by_id = {it.session_id: it for it in snap.recent}
+            self.assertEqual(by_id[cid_old_done_1].state, MenubarCandidateState.COMPLETED_READY)
+            self.assertEqual(by_id[cid_old_inflight].state, MenubarCandidateState.INTERRUPTED_STOPPED)
+            self.assertEqual(by_id[cid_old_locked].state, MenubarCandidateState.ACTIVE_RUNNING)
+
+            assert snap_fallback.hero is not None
+            self.assertEqual(snap_fallback.hero.session_id, cid_recent)
+            self.assertEqual([it.session_id for it in snap_fallback.recent], [cid_old_done_1, cid_old_done_2])
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 if __name__ == "__main__":

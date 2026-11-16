@@ -5,12 +5,11 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 from dataclasses import dataclass
+import http.client
 from pathlib import Path
 from typing import Any, Callable, Mapping, Tuple
-import urllib.error
-import urllib.request
 
-from .._wire import encode_string_field, iter_wire_fields
+from .._wire import encode_string_field, iter_wire_fields, read_varint
 from ..codecs import (
     AgyRawStepRow, decode_agy_trajectory, decode_codex_rollout,
     decode_codex_rpc_thread_to_ledger, read_codex_rollout_lines,
@@ -67,7 +66,36 @@ def _decode_agy_rpc_step(idx: int, step_blob: bytes) -> AgyRawStepRow:
     return AgyRawStepRow(StepIndex(idx), step_type, status, has_sub, meta_blob, step_blob, 1)
 
 
-def _decode_agy_trajectory_response(resp_bytes: bytes, cascade_id: CascadeId) -> AgyRpcReadResult:
+def _has_agy_trajectory_content(traj_blob: bytes) -> bool:
+    pos, n = 0, len(traj_blob)
+    while pos < n:
+        tag_start = pos
+        tag, pos = read_varint(traj_blob, pos)
+        fn, wt = tag >> 3, tag & 0x07
+        if fn <= 0:
+            raise ValueError(f"Invalid protobuf field number {fn} at offset {tag_start}.")
+        if wt == 0:
+            _, pos = read_varint(traj_blob, pos)
+        elif wt in (1, 5):
+            width = 8 if wt == 1 else 4
+            if pos + width > n:
+                raise ValueError(f"Truncated fixed{width * 8} protobuf field.")
+            pos += width
+        elif wt == 2:
+            ln, pos = read_varint(traj_blob, pos)
+            if pos + ln > n:
+                raise ValueError("Truncated length-delimited protobuf field.")
+            if fn == 2 or (fn == 1 and ln > 0):
+                return True
+            pos += ln
+        else:
+            raise ValueError(f"Unsupported protobuf wire type {wt} at offset {tag_start}.")
+    return False
+
+
+def _decode_agy_trajectory_response(
+    resp_bytes: bytes, cascade_id: CascadeId, *, include_steps: bool = True,
+) -> AgyRpcReadResult:
     trajectory_blob, run_status = b"", 1
     for fn, wt, ival, raw in iter_wire_fields(resp_bytes):
         if fn == 1 and wt == 2:
@@ -76,6 +104,10 @@ def _decode_agy_trajectory_response(resp_bytes: bytes, cascade_id: CascadeId) ->
             run_status = ival
     if not trajectory_blob:
         raise FileNotFoundError(f"Antigravity cascade {cascade_id} returned empty trajectory.")
+    if not include_steps:
+        if not _has_agy_trajectory_content(trajectory_blob):
+            raise FileNotFoundError(f"Antigravity cascade {cascade_id} returned empty trajectory.")
+        return AgyRpcReadResult((), run_status)
 
     traj_id_bytes, tmeta_blob, source_enum = b"", b"", 0
     raw_steps: list[AgyRawStepRow] = []
@@ -93,36 +125,123 @@ def _decode_agy_trajectory_response(resp_bytes: bytes, cascade_id: CascadeId) ->
     return AgyRpcReadResult(tuple(raw_steps), run_status, tmeta_blob, source_enum)
 
 
+def _send_agy_proto_once(
+    conn: http.client.HTTPConnection, path: str, body: bytes, headers: Mapping[str, str], timeout_s: float,
+) -> tuple[int, bytes]:
+    conn.timeout = timeout_s
+    if conn.sock is None:
+        conn.connect()
+    else:
+        conn.sock.settimeout(timeout_s)
+    conn.request("POST", path, body=body, headers=headers)
+    resp = conn.getresponse()
+    data = resp.read()
+    if resp.will_close:
+        conn.close()
+    return int(resp.status), data
+
+
+def _post_agy_proto(
+    endpoint: AgyDaemonEndpoint, path: str, body: bytes, timeout_s: float, conn: http.client.HTTPConnection | None,
+) -> tuple[int, bytes]:
+    headers = {
+        "Content-Type": "application/proto",
+        "Connect-Protocol-Version": "1",
+        "Connection": "keep-alive" if conn is not None else "close",
+        **endpoint.csrf_secret.as_loopback_header(),
+    }
+    if conn is None:
+        ephemeral = http.client.HTTPConnection("127.0.0.1", endpoint.http_port, timeout=timeout_s)
+        try:
+            return _send_agy_proto_once(ephemeral, path, body, headers, timeout_s)
+        finally:
+            ephemeral.close()
+    was_reused = conn.sock is not None
+    try:
+        return _send_agy_proto_once(conn, path, body, headers, timeout_s)
+    except (http.client.HTTPException, ConnectionError, OSError):
+        conn.close()
+        if not was_reused:
+            raise
+    try:
+        conn.connect()
+        return _send_agy_proto_once(conn, path, body, headers, timeout_s)
+    except (http.client.HTTPException, ConnectionError, OSError):
+        conn.close()
+        raise
+
+
 def fetch_agy_trajectory_via_rpc(
-    endpoint: AgyDaemonEndpoint | None, cascade_id: CascadeId, *, timeout_s: float = 2.0,
+    endpoint: AgyDaemonEndpoint | None,
+    cascade_id: CascadeId,
+    *,
+    timeout_s: float = 2.0,
+    include_steps: bool = True,
+    conn: http.client.HTTPConnection | None = None,
 ) -> AgyRpcReadResult:
     """Read an Antigravity trajectory lock-free via loopback Connect RPC (`GetCascadeTrajectory`)."""
     validate_session_id(str(cascade_id), label="cascade_id")
     if endpoint is None or endpoint.http_port <= 0:
         raise OnlineRpcUnavailableError("No live Antigravity LanguageServer HTTP endpoint available.")
 
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    url = f"http://127.0.0.1:{endpoint.http_port}/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory"
-    headers = {"Content-Type": "application/proto", "Connect-Protocol-Version": "1", **endpoint.csrf_secret.as_loopback_header()}
-    req = urllib.request.Request(url, data=encode_string_field(1, str(cascade_id)), headers=headers, method="POST")
+    path = "/exa.language_server_pb.LanguageServerService/GetCascadeTrajectory"
     try:
-        with opener.open(req, timeout=timeout_s) as resp:
-            resp_bytes = resp.read()
-    except urllib.error.HTTPError as exc:
-        err_body = ""
-        with contextlib.suppress(Exception):
-            err_body = exc.read(4096).decode("utf-8", errors="ignore").lower()
-            exc.close()
-        if exc.code == 404 or "not_found" in err_body or "not found" in err_body:
-            raise FileNotFoundError(f"Antigravity cascade {cascade_id} not found via LanguageServer RPC.") from None
-        raise OnlineRpcUnavailableError(f"Antigravity GetCascadeTrajectory RPC failed with HTTP {exc.code}.") from None
-    except (urllib.error.URLError, TimeoutError, OSError):
+        status, resp_bytes = _post_agy_proto(endpoint, path, encode_string_field(1, str(cascade_id)), timeout_s, conn)
+    except (http.client.HTTPException, TimeoutError, OSError):
         raise OnlineRpcUnavailableError("Antigravity GetCascadeTrajectory RPC connection failed.") from None
 
+    if status != 200:
+        err_body = resp_bytes[:4096].decode("utf-8", errors="ignore").lower()
+        if status == 404 or "not_found" in err_body or "not found" in err_body:
+            raise FileNotFoundError(f"Antigravity cascade {cascade_id} not found via LanguageServer RPC.")
+        raise OnlineRpcUnavailableError(f"Antigravity GetCascadeTrajectory RPC failed with HTTP {status}.")
+
     try:
-        return _decode_agy_trajectory_response(resp_bytes, cascade_id)
+        return _decode_agy_trajectory_response(resp_bytes, cascade_id, include_steps=include_steps)
     except ValueError:
         raise OnlineRpcUnavailableError("Invalid protobuf payload from Antigravity GetCascadeTrajectory RPC.") from None
+
+
+def _decode_agy_all_run_statuses(resp_bytes: bytes) -> dict[str, int]:
+    statuses: dict[str, int] = {}
+    for fn, wt, _, raw in iter_wire_fields(resp_bytes):
+        if fn != 1 or wt != 2:
+            continue
+        cid, summary_raw = "", b""
+        for efn, ewt, _, eraw in iter_wire_fields(raw):
+            if efn == 1 and ewt == 2:
+                cid = eraw.decode("utf-8")
+            elif efn == 2 and ewt == 2:
+                summary_raw = eraw
+        if cid:
+            status = 0
+            for sfn, swt, sival, _ in iter_wire_fields(summary_raw):
+                if sfn == 5 and swt == 0:
+                    status = sival
+            statuses[cid] = status
+    return statuses
+
+
+def fetch_agy_run_statuses_via_rpc(
+    endpoint: AgyDaemonEndpoint | None,
+    *,
+    timeout_s: float = 2.0,
+    conn: http.client.HTTPConnection | None = None,
+) -> dict[str, int]:
+    """Fetch all cascade run statuses lock-free via loopback Connect RPC (`GetAllCascadeTrajectories`)."""
+    if endpoint is None or endpoint.http_port <= 0:
+        raise OnlineRpcUnavailableError("No live Antigravity LanguageServer HTTP endpoint available.")
+    path = "/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories"
+    try:
+        status, resp_bytes = _post_agy_proto(endpoint, path, b"", timeout_s, conn)
+    except (http.client.HTTPException, TimeoutError, OSError):
+        raise OnlineRpcUnavailableError("Antigravity GetAllCascadeTrajectories RPC connection failed.") from None
+    if status != 200:
+        raise OnlineRpcUnavailableError(f"Antigravity GetAllCascadeTrajectories RPC failed with HTTP {status}.")
+    try:
+        return _decode_agy_all_run_statuses(resp_bytes)
+    except ValueError:
+        raise OnlineRpcUnavailableError("Invalid protobuf payload from Antigravity GetAllCascadeTrajectories RPC.") from None
 
 
 def extract_codex_rpc_thread(resp_msg: Mapping[str, Any], thread_id: CodexThreadId) -> CodexRpcReadResult:
