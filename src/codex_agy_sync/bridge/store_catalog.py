@@ -331,7 +331,7 @@ def discover_agy_subagent_sidecar_ids(paths: HostEnvironmentPaths) -> set[str]:
                     if not f.name.endswith(".json"):
                         continue
                     try:
-                        if not f.is_file():
+                        if not f.is_file() or f.stat().st_size < 2:
                             continue
                     except OSError:
                         continue

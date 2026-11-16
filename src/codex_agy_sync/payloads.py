@@ -9,7 +9,7 @@ from typing import Any, Callable, Literal, Mapping, Tuple, TypeAlias
 from .workspace import normalize_tool_file_path
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReadFilePayload:
     kind: Literal["read_file"]
     path: str
@@ -21,7 +21,7 @@ class ReadFilePayload:
     content_excerpt: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FileEditPayload:
     kind: Literal["file_edit"]
     path: str
@@ -32,7 +32,7 @@ class FileEditPayload:
     artifact_summary: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RunCommandPayload:
     kind: Literal["run_command"]
     command_line: str
@@ -45,14 +45,14 @@ class RunCommandPayload:
     sandbox_policy: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SearchWebDocument:
     title: str
     url: str
     snippet: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SearchWebPayload:
     kind: Literal["search_web"]
     query: str
@@ -61,7 +61,7 @@ class SearchWebPayload:
     summary: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InvokeSubagentPayload:
     kind: Literal["invoke_subagent"]
     subagent_type: str
@@ -72,7 +72,7 @@ class InvokeSubagentPayload:
     task_mode: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DefineSubagentPayload:
     kind: Literal["define_subagent"]
     name: str
@@ -80,14 +80,14 @@ class DefineSubagentPayload:
     agent_path: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ManageSubagentsPayload:
     kind: Literal["manage_subagents"]
     action: Literal["list", "kill", "kill_all"]
     target_conversation_ids: Tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ManageTaskPayload:
     kind: Literal["manage_task"]
     action: Literal["list", "status", "send_input", "kill"]
@@ -95,7 +95,7 @@ class ManageTaskPayload:
     input_text: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SendMessagePayload:
     kind: Literal["send_message"]
     recipient_id: str
@@ -103,7 +103,7 @@ class SendMessagePayload:
     recipient_name: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SchedulePayload:
     kind: Literal["schedule"]
     prompt: str
@@ -115,13 +115,13 @@ class SchedulePayload:
     max_iterations: int | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuestionOption:
     label: str
     description: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuestionItem:
     question: str
     options: Tuple[QuestionOption, ...] = ()
@@ -129,20 +129,20 @@ class QuestionItem:
     user_answers: Tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AskQuestionPayload:
     kind: Literal["ask_question"]
     questions: Tuple[QuestionItem, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ListResourcesPayload:
     kind: Literal["list_resources"]
     server_name: str
     resource_uris: Tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReadResourcePayload:
     kind: Literal["read_resource"]
     server_name: str
@@ -150,7 +150,7 @@ class ReadResourcePayload:
     contents_text: Tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GenerateImagePayload:
     kind: Literal["generate_image"]
     prompt: str
@@ -160,21 +160,21 @@ class GenerateImagePayload:
     model_name: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MomaSearchPayload:
     kind: Literal["moma_search"]
     query: str
     result_count: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FinishPayload:
     kind: Literal["finish"]
     arguments_json: str = "{}"
     has_result_schema: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OpaqueToolPayload:
     kind: Literal["opaque"]
     tool_name: str

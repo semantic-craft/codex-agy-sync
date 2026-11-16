@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-import http.server, json, os, sqlite3, tempfile, threading, unittest
+import http.client, http.server, json, os, sqlite3, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +14,7 @@ from codex_agy_sync import (
     build_menubar_feed, fetch_agy_run_statuses_via_rpc,
 )
 from codex_agy_sync._wire import encode_bytes_field, encode_string_field, encode_varint_field, iter_wire_fields
+from codex_agy_sync.bridge.rpc import _post_agy_proto
 from codex_agy_sync.bridge.store_catalog import discover_agy_subagent_sidecar_ids, discover_agy_subagent_sidecars
 from codex_agy_sync.workspace import TurnId
 
@@ -155,7 +156,7 @@ class MenubarRpcBatchTest(unittest.TestCase):
         self.assertEqual(by_id[c_omit].state, MenubarCandidateState.COMPLETED_READY)
         self.assertEqual(direct, {c_idle: 1, c_run: 2, c_busy: 4, c_omit: 0})
         self.assertEqual(len(feed_reqs), 1)
-        self.assertEqual((feed_reqs[0][0], feed_reqs[0][1].lower()), (_BATCH_PATH, "keep-alive"))
+        self.assertEqual((feed_reqs[0][0], feed_reqs[0][1].lower()), (_BATCH_PATH, "close"))
 
     def test_batch_rpc_404_falls_back_to_single_with_keepalive(self) -> None:
         c_idle = "20000000-0000-4000-8000-000000000001"
@@ -164,8 +165,8 @@ class MenubarRpcBatchTest(unittest.TestCase):
 
         with self._rpc_server(404, [], {c_idle: 1, c_run: 2}) as (ep, state):
             snap_one = self._feed_with_ep(ep)
-            self.assertEqual(state["connections"], 1)
-            self.assertEqual(state["requests"], [(_BATCH_PATH, "keep-alive", ""), (_SINGLE_PATH, "keep-alive", c_idle)])
+            self.assertEqual(state["connections"], 2)
+            self.assertEqual(state["requests"], [(_BATCH_PATH, "close", ""), (_SINGLE_PATH, "keep-alive", c_idle)])
             self._write_agy(c_run, "Fallback Run", mtime=_NOW_EPOCH - 20.0)
             state["requests"] = []
             snap_two = self._feed_with_ep(ep)
@@ -175,7 +176,7 @@ class MenubarRpcBatchTest(unittest.TestCase):
         self.assertEqual(snap_one.hero.state, MenubarCandidateState.INTERRUPTED_STOPPED)
         self.assertEqual(snap_two.hero.session_id, c_idle)
         self.assertEqual((snap_two.recent[0].session_id, snap_two.recent[0].state), (c_run, MenubarCandidateState.ACTIVE_RUNNING))
-        self.assertEqual(reqs_two[0], (_BATCH_PATH, "keep-alive", ""))
+        self.assertEqual(reqs_two[0], (_BATCH_PATH, "close", ""))
         self.assertEqual({(p, conn.lower(), cid) for p, conn, cid in reqs_two[1:]}, {(_SINGLE_PATH, "keep-alive", c_idle), (_SINGLE_PATH, "keep-alive", c_run)})
 
     def test_missing_cascade_in_batch_map_triggers_single_fallback_only(self) -> None:
@@ -188,8 +189,8 @@ class MenubarRpcBatchTest(unittest.TestCase):
 
         with self._rpc_server(200, [(c_done, 1), (c_run, 2)], {c_miss: 1}) as (ep, state):
             snap = self._feed_with_ep(ep)
-            self.assertEqual(state["connections"], 1)
-            self.assertEqual(state["requests"], [(_BATCH_PATH, "keep-alive", ""), (_SINGLE_PATH, "keep-alive", c_miss)])
+            self.assertEqual(state["connections"], 2)
+            self.assertEqual(state["requests"], [(_BATCH_PATH, "close", ""), (_SINGLE_PATH, "keep-alive", c_miss)])
 
         assert snap.hero is not None
         self.assertEqual((snap.hero.session_id, snap.hero.state), (c_miss, MenubarCandidateState.INTERRUPTED_STOPPED))
@@ -208,6 +209,7 @@ class MenubarRpcBatchTest(unittest.TestCase):
         (valid_sub / f"{u1}.json").write_text(json.dumps({"conversationId": u1}), encoding="utf-8")
         (valid_sub / "worker-alpha.json").write_text(json.dumps({"conversationId": u2}), encoding="utf-8")
         (valid_sub / "custom-child.json").write_text("{}", encoding="utf-8")
+        (valid_sub / "eeeeeeee-5555-4555-8555-555555555555.json").write_text("", encoding="utf-8")
         (valid_sub / "child.json").write_text(json.dumps({"conversationId": "../evil"}), encoding="utf-8")
         (valid_sub / "corrupt.json").write_text("{not-json", encoding="utf-8")
         (valid_sub / "list.json").write_text("[1, 2]", encoding="utf-8")
@@ -220,6 +222,41 @@ class MenubarRpcBatchTest(unittest.TestCase):
         fast_ids = discover_agy_subagent_sidecar_ids(self.paths)
         self.assertEqual(fast_ids, set(discover_agy_subagent_sidecars(self.paths).keys()))
         self.assertEqual(fast_ids, {u1, u2, "custom-child"})
+
+    def test_post_agy_proto_reused_conn_timeout_does_not_retry(self) -> None:
+        hits: list[str] = []
+
+        class _SlowHandler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            def log_message(self, format: str, *args: object) -> None:
+                return
+            def do_POST(self) -> None:
+                _ = self.rfile.read(int(self.headers.get("Content-Length") or "0"))
+                hits.append(self.path)
+                if self.path == "/slow":
+                    time.sleep(0.3)
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowHandler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        ep = AgyDaemonEndpoint(os.getpid(), srv.server_address[1], srv.server_address[1] + 1, "1.0", CsrfSecret("tok"))
+        conn = http.client.HTTPConnection("127.0.0.1", ep.http_port, timeout=1.0)
+        try:
+            self.assertEqual(_post_agy_proto(ep, "/fast", b"", 1.0, conn), (200, b"ok"))
+            self.assertIsNotNone(conn.sock)
+            with self.assertRaises(TimeoutError):
+                _post_agy_proto(ep, "/slow", b"", 0.05, conn)
+            self.assertIsNone(conn.sock)
+            self.assertEqual(hits, ["/fast", "/slow"])
+        finally:
+            conn.close()
+            srv.shutdown()
+            srv.server_close()
+            t.join(timeout=2.0)
 
 
 if __name__ == "__main__":

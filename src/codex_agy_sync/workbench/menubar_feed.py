@@ -593,14 +593,11 @@ def _probe_candidates(
     agy_primary = [i for i in primary_indices if merged[i].host == "antigravity"]
     codex_primary = [i for i in primary_indices if merged[i].host == "codex"]
     agy_run_statuses: dict[str, int] | None = None
-    window_n = min(len(merged), max(target_n * 2, len(primary_indices)))
-    needs_batch = agy_daemon is not None and agy_daemon.http_port > 0 and any(
-        merged[i].host == "antigravity" for i in (*primary_indices, *range(window_n))
-    )
+    needs_batch = agy_daemon is not None and agy_daemon.http_port > 0 and any(c.host == "antigravity" for c in merged)
     try:
         batch_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1) if needs_batch else None
         batch_future = (
-            batch_executor.submit(fetch_agy_run_statuses_via_rpc, agy_daemon, timeout_s=4.0, conn=_get_conn())
+            batch_executor.submit(fetch_agy_run_statuses_via_rpc, agy_daemon, timeout_s=4.0, conn=None)
             if batch_executor is not None else None
         )
         try:

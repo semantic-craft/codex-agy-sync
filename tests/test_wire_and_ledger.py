@@ -7,13 +7,18 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from codex_agy_sync.codecs import (
-    decode_cascade_summary_proto, decode_codex_rollout, decode_summaries_state_proto,
-    encode_agy_trajectory, encode_cascade_summary_proto, encode_codex_rollout,
-    encode_summaries_state_proto, render_annotation_pbtxt,
+    AgyRawStepRow, CodexRawRolloutLine, decode_cascade_summary_proto, decode_codex_rollout,
+    decode_summaries_state_proto, decompress_zstd_rollout_bytes, encode_agy_trajectory,
+    encode_cascade_summary_proto, encode_codex_rollout, encode_summaries_state_proto,
+    iter_codex_rollout_lines, render_annotation_pbtxt,
 )
-from codex_agy_sync import validate_session_id
+from codex_agy_sync import (
+    HandoffReceipt, HostEnvironmentPaths, PresenceWalGuard, build_menubar_feed,
+    validate_session_id,
+)
 from codex_agy_sync._wire import (
     UnknownWireField, encode_bytes_field, encode_fixed32_field, encode_fixed64_field,
     encode_varint, encode_varint_field, parse_proto_fields, read_varint,
@@ -605,3 +610,75 @@ class TestSharedWireAndPureSummaryProjections(unittest.TestCase):
         self.assertEqual(got.trajectory_metadata_unknown_fields, meta_unknowns)
         self.assertEqual(got.annotations.unknown_wire_fields, annot.unknown_wire_fields)
         self.assertEqual(encode_summaries_state_proto(decoded_state), raw_bytes)
+
+    def test_parse_proto_fields_unknown_preservation_and_dataclass_slots(self) -> None:
+        msg = encode_varint_field(1, 7) + encode_bytes_field(3, b"xyz")
+        fmap_default, unknowns_default = parse_proto_fields(msg)
+        self.assertEqual(fmap_default[1], [(0, 7)])
+        self.assertEqual(fmap_default[3], [(2, b"xyz")])
+        self.assertEqual(unknowns_default, [])
+
+        fmap_all, unknowns_all = parse_proto_fields(msg, known_tags=())
+        self.assertEqual(fmap_all, fmap_default)
+        self.assertEqual([u.field_tag for u in unknowns_all], [1, 3])
+
+        anchor = EventOriginAnchor(
+            origin_host=HostKind.ANTIGRAVITY,
+            turn_id=TurnId("turn-1"),
+            timestamp_iso="2026-11-16T00:00:00Z",
+        )
+        slotted_objects = (
+            UnknownWireField(field_tag=1, wire_type=0, raw_bytes=b"\x01"),
+            ReadFilePayload(kind="read_file", path="README.md"),
+            AgyRawStepRow(idx=StepIndex(0), step_type=14, status=3, has_subtrajectory=False, metadata_blob=b"", step_payload_blob=b""),
+            CodexRawRolloutLine(line_no=RolloutLineNo(1), raw_json="{}"),
+            UserInputEvent(kind="user_input", anchor=anchor, query_text="hi"),
+        )
+        for obj in slotted_objects:
+            with self.subTest(cls=type(obj).__name__):
+                self.assertFalse(hasattr(obj, "__dict__"))
+
+        receipt = HandoffReceipt(
+            workspace=str(self.ws_path),
+            source_host="codex",
+            source_id="01970000-0000-7000-8000-000000000001",
+            source_digest="d",
+            target_host="antigravity",
+            target_id=None,
+            title="Title",
+            status="ready",
+            staging_path="",
+            created_at_iso="2026-11-16T00:00:00Z",
+        )
+        self.assertIsInstance(receipt.__dict__, dict)
+        self.assertEqual(receipt.__dict__["status"], "ready")
+
+    def test_corrupt_zstd_rollout_raises_value_error_and_menubar_feed_skips_it(self) -> None:
+        for bad_bytes in (b"", b"\x28\xb5\x2f\xfd\x20\x00", b"corrupt-zst-stream"):
+            with self.subTest(payload=bad_bytes):
+                with self.assertRaises(ValueError):
+                    decompress_zstd_rollout_bytes(bad_bytes)
+                bad_file = Path(self.temp_dir.name) / "bad.jsonl.zst"
+                bad_file.write_bytes(bad_bytes)
+                with self.assertRaises(ValueError):
+                    list(iter_codex_rollout_lines(bad_file))
+
+        home = Path(self.temp_dir.name) / "home"
+        paths = HostEnvironmentPaths(
+            gemini_config_dir=home / ".gemini" / "config",
+            agy_data_dir=home / ".gemini" / "antigravity",
+            codex_home_dir=home / ".codex",
+            sync_state_dir=home / ".codex-agy-sync",
+        )
+        sessions_dir = paths.codex_home_dir / "sessions" / "2026" / "11" / "16"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / "rollout-2026-11-16T00-00-00-01970000-0000-7000-8000-0000000000ab.jsonl.zst").write_bytes(
+            b"\x28\xb5\x2f\xfd\x20\x00"
+        )
+        with (
+            mock.patch.object(PresenceWalGuard, "discover_agy_daemon", return_value=None),
+            mock.patch.object(PresenceWalGuard, "discover_codex_daemon", return_value=None),
+        ):
+            snap = build_menubar_feed(paths)
+        self.assertIsNone(snap.hero)
+        self.assertEqual(snap.recent, ())

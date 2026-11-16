@@ -2,42 +2,54 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import importlib
 import json
 import os
 from pathlib import Path
 import sys
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from .bridge import (
-    EmptySessionError,
-    ForkResolutionPolicy,
-    HandoffCancelledError,
-    HandoffPendingError,
-    HostEnvironmentPaths,
-    OnlineRpcUnavailableError,
-    SyncBridge,
-    SyncBusyLockError,
-    SyncDirection,
-    SyncReceipt,
-    TransportMode,
-    UnpairedWorkspaceError,
-    WorkspaceProjectBinding,
-    diagnose_workspace_binding,
-    execute_handoff,
-    reconcile_workspace_handoffs,
-    summarize_workspace_handoffs,
-    validate_handoff_selector_flags,
-)
-from .events import (
-    AssistantTextEvent,
-    CheckpointEvent,
-    ThinkingEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    UserInputEvent,
-)
-from .workbench import build_menubar_feed, query_workbench_status, run_serve_server, stop_workbench_server
+from .bridge.paths_and_locks import HostEnvironmentPaths, SyncBusyLockError, TransportMode
 from .workspace import AgyGuiSafeSource, CascadeId, CodexThreadId, PACKAGE_VERSION, normalize_workspace_spec
+
+if TYPE_CHECKING:
+    from .bridge import (
+        EmptySessionError,
+        ForkResolutionPolicy,
+        HandoffCancelledError,
+        HandoffPendingError,
+        OnlineRpcUnavailableError,
+        SyncBridge,
+        SyncDirection,
+        SyncReceipt,
+        UnpairedWorkspaceError,
+        WorkspaceProjectBinding,
+        diagnose_workspace_binding,
+        execute_handoff,
+        reconcile_workspace_handoffs,
+        summarize_workspace_handoffs,
+        validate_handoff_selector_flags,
+    )
+    from .events import (
+        AssistantTextEvent,
+        CheckpointEvent,
+        ThinkingEvent,
+        ToolCallEvent,
+        ToolResultEvent,
+        UserInputEvent,
+    )
+    from .workbench import build_menubar_feed, query_workbench_status, run_serve_server, stop_workbench_server
+
+_SYNC_DIRECTION_CHOICES = ("auto_incremental", "agy_to_codex", "codex_to_agy")
+_FORK_POLICY_CHOICES = ("halt_on_divergence", "fork_new_session", "backup_and_overwrite_target")
+
+
+def _load_attr(rel_mod: str, attr: str) -> Any:
+    return getattr(importlib.import_module(rel_mod, __package__ or "codex_agy_sync"), attr)
+
+
+def _parse_seed_workspaces(raw_workspaces: Sequence[str] | None) -> list[Any]:
+    return [item for raw in (raw_workspaces or ()) if (item := normalize_workspace_spec(raw))]
 
 
 def _binding_to_dict(binding: WorkspaceProjectBinding) -> dict[str, Any]:
@@ -102,9 +114,9 @@ def _receipt_to_dict(receipt: SyncReceipt) -> dict[str, Any]:
 
 def _add_sync_common_args(sub_p: argparse.ArgumentParser) -> None:
     sub_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
-    sub_p.add_argument("--direction", choices=[d.value for d in SyncDirection], default=SyncDirection.AUTO_INCREMENTAL.value, help="Synchronization direction.")
+    sub_p.add_argument("--direction", choices=_SYNC_DIRECTION_CHOICES, default=_SYNC_DIRECTION_CHOICES[0], help="Synchronization direction.")
     sub_p.add_argument("--mode", choices=[m.value for m in TransportMode], default=TransportMode.AUTO.value, help="Transport mode.")
-    sub_p.add_argument("--fork-policy", choices=[p.value for p in ForkResolutionPolicy], default=ForkResolutionPolicy.HALT_ON_DIVERGENCE.value, help="Divergence resolution policy.")
+    sub_p.add_argument("--fork-policy", choices=_FORK_POLICY_CHOICES, default=_FORK_POLICY_CHOICES[0], help="Divergence resolution policy.")
     sub_p.add_argument(
         "--include-interrupted",
         action="store_true",
@@ -228,8 +240,8 @@ def _resolve_paths(args: argparse.Namespace, env: Mapping[str, str] | None = Non
 def _run_status_cmd(bridge: SyncBridge, workspace_arg: str, include_subagents: bool) -> dict[str, Any]:
     binding = bridge.registry.resolve_readonly_binding(workspace_arg)
     sessions = bridge.registry.list_workspace_sessions(binding, include_subagents=include_subagents)
-    diag = diagnose_workspace_binding(bridge.paths, binding.workspace_path)
-    handoff_summary = summarize_workspace_handoffs(bridge.paths, binding.workspace_path)
+    diag = _load_attr(".bridge", "diagnose_workspace_binding")(bridge.paths, binding.workspace_path)
+    handoff_summary = _load_attr(".bridge", "summarize_workspace_handoffs")(bridge.paths, binding.workspace_path)
     return {
         "workspace": _binding_to_dict(binding),
         "sessions": [
@@ -266,6 +278,15 @@ def _run_status_cmd(bridge: SyncBridge, workspace_arg: str, include_subagents: b
 
 
 def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> dict[str, Any]:
+    ev_mod = importlib.import_module(".events", __package__ or "codex_agy_sync")
+    event_counts = (
+        ("user_inputs", ev_mod.UserInputEvent),
+        ("assistant_texts", ev_mod.AssistantTextEvent),
+        ("thinking_events", ev_mod.ThinkingEvent),
+        ("tool_calls", ev_mod.ToolCallEvent),
+        ("tool_results", ev_mod.ToolResultEvent),
+        ("checkpoints", ev_mod.CheckpointEvent),
+    )
     ledger = bridge.inspect_session_ledger(
         workspace_arg,
         cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
@@ -280,14 +301,7 @@ def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
         "total_events": len(ledger.events),
         "completed_turns": len(ledger.completed_turn_watermarks),
         "has_inflight_turn": ledger.has_inflight_turn,
-        "counts": {
-            "user_inputs": sum(1 for e in ledger.events if isinstance(e, UserInputEvent)),
-            "assistant_texts": sum(1 for e in ledger.events if isinstance(e, AssistantTextEvent)),
-            "thinking_events": sum(1 for e in ledger.events if isinstance(e, ThinkingEvent)),
-            "tool_calls": sum(1 for e in ledger.events if isinstance(e, ToolCallEvent)),
-            "tool_results": sum(1 for e in ledger.events if isinstance(e, ToolResultEvent)),
-            "checkpoints": sum(1 for e in ledger.events if isinstance(e, CheckpointEvent)),
-        },
+        "counts": {key: sum(1 for e in ledger.events if isinstance(e, cls)) for key, cls in event_counts},
         "latest_watermark": {
             "turn_id": str(wm.turn_id),
             "boundary_digest": str(wm.boundary_digest),
@@ -325,7 +339,7 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
     if args.auto_pair and args.pair_if_offline:
         parser.error("--auto-pair cannot be combined with --pair-if-offline.")
     try:
-        validate_handoff_selector_flags(
+        _load_attr(".bridge", "validate_handoff_selector_flags")(
             source_id=args.source_id,
             latest=bool(args.latest),
             chain=bool(args.chain),
@@ -337,20 +351,19 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
 
 def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
     if args.status:
-        print(json.dumps(query_workbench_status(paths), ensure_ascii=False, indent=2))
+        print(json.dumps(_load_attr(".workbench", "query_workbench_status")(paths), ensure_ascii=False, indent=2))
         return 0
     if args.stop:
-        print(json.dumps(stop_workbench_server(paths), ensure_ascii=False, indent=2))
+        print(json.dumps(_load_attr(".workbench", "stop_workbench_server")(paths), ensure_ascii=False, indent=2))
         return 0
     ui_path: Path | None = None
     if args.ui is not None:
         ui_path = Path(args.ui).expanduser()
         if not ui_path.is_file():
             raise FileNotFoundError(f"UI file not found: {args.ui}")
-    seeds = [item for raw in (args.workspace or ()) if (item := normalize_workspace_spec(raw))]
-    return run_serve_server(
+    return _load_attr(".workbench", "run_serve_server")(
         paths,
-        seed_workspaces=seeds,
+        seed_workspaces=_parse_seed_workspaces(args.workspace),
         ui_path=ui_path,
         port=int(args.port),
         idle_timeout_sec=int(args.idle_timeout),
@@ -360,15 +373,18 @@ def _run_serve_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int
 
 
 def _run_menubar_feed_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
-    seeds = [item for raw in (args.workspace or ()) if (item := normalize_workspace_spec(raw))]
-    snapshot = build_menubar_feed(paths, limit=int(args.limit), seed_workspaces=seeds)
+    snapshot = _load_attr(".workbench", "build_menubar_feed")(
+        paths,
+        limit=int(args.limit),
+        seed_workspaces=_parse_seed_workspaces(args.workspace),
+    )
     print(json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2))
     return 0
 
 
 def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
     if args.reconcile:
-        result = reconcile_workspace_handoffs(
+        result = _load_attr(".bridge", "reconcile_workspace_handoffs")(
             bridge.paths,
             workspace_arg,
             source_id=args.source_id,
@@ -376,10 +392,11 @@ def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    receipt, _ = execute_handoff(
+    sync_direction_cls = _load_attr(".bridge", "SyncDirection")
+    receipt, _ = _load_attr(".bridge", "execute_handoff")(
         bridge.paths,
         workspace_arg,
-        direction=SyncDirection(args.direction) if args.direction else None,
+        direction=sync_direction_cls(args.direction) if args.direction else None,
         source_id=args.source_id,
         title=args.title,
         latest=bool(args.latest),
@@ -393,25 +410,37 @@ def _run_handoff_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
     return 0
 
 
+def _matches_exc(exc: Exception, rel_mod: str, attr: str) -> bool:
+    if isinstance(exc, _load_attr(rel_mod, attr)):
+        return True
+    target_mod = f"{__package__ or 'codex_agy_sync'}{rel_mod}"
+    return any(base.__name__ == attr and base.__module__ == target_mod for base in type(exc).__mro__)
+
+
 def _exception_to_error_payload(exc: Exception, subcommand: str) -> dict[str, Any]:
-    if isinstance(exc, (UnpairedWorkspaceError, SyncBusyLockError)):
+    if isinstance(exc, SyncBusyLockError):
         return exc.to_error_payload()
-    if isinstance(exc, HandoffPendingError):
-        return {
-            **dataclasses.asdict(exc.receipt),
-            "error": "handoff_pending",
-            "message": str(exc),
-            "cause": exc.receipt.error,
-            "receipt": dataclasses.asdict(exc.receipt),
-        }
-    if isinstance(exc, HandoffCancelledError):
-        return {"error": "handoff_cancelled", "message": str(exc)}
-    if isinstance(exc, EmptySessionError):
-        return {"error": "empty_session", "message": str(exc)}
-    if isinstance(exc, OnlineRpcUnavailableError):
-        return {"error": "online_rpc_unavailable", "message": str(exc)}
     if isinstance(exc, FileNotFoundError):
         return {"error": "file_not_found", "message": str(exc)}
+    if _matches_exc(exc, ".bridge.registry", "UnpairedWorkspaceError"):
+        return exc.to_error_payload()  # type: ignore[attr-defined]
+    if _matches_exc(exc, ".bridge.handoff_store", "HandoffPendingError"):
+        receipt = exc.receipt  # type: ignore[attr-defined]
+        receipt_dict = dataclasses.asdict(receipt)
+        return {
+            **receipt_dict,
+            "error": "handoff_pending",
+            "message": str(exc),
+            "cause": receipt.error,
+            "receipt": receipt_dict,
+        }
+    for rel_mod, attr, code in (
+        (".bridge.handoff_store", "HandoffCancelledError", "handoff_cancelled"),
+        (".bridge.state_machine", "EmptySessionError", "empty_session"),
+        (".bridge.project_rpc", "OnlineRpcUnavailableError", "online_rpc_unavailable"),
+    ):
+        if _matches_exc(exc, rel_mod, attr):
+            return {"error": code, "message": str(exc)}
     if isinstance(exc, ValueError):
         code = "invalid_handoff_request" if subcommand == "handoff" else "invalid_argument"
         return {"error": code, "message": str(exc)}
@@ -423,7 +452,7 @@ def _dispatch_subcommand(args: argparse.Namespace, paths: HostEnvironmentPaths) 
         return _run_serve_cmd(paths, args)
     if args.subcommand == "menubar-feed":
         return _run_menubar_feed_cmd(paths, args)
-    bridge = SyncBridge(paths=paths)
+    bridge = _load_attr(".bridge", "SyncBridge")(paths=paths)
     workspace_arg = normalize_workspace_spec(args.workspace) if args.workspace is not None else os.getcwd()
     if args.subcommand == "pair":
         print(json.dumps(_binding_to_dict(bridge.pair_workspace(workspace_arg)), ensure_ascii=False, indent=2))
@@ -436,25 +465,27 @@ def _dispatch_subcommand(args: argparse.Namespace, paths: HostEnvironmentPaths) 
         return 0
     if args.subcommand == "handoff":
         return _run_handoff_cmd(bridge, workspace_arg, args)
-    if args.subcommand == "sync-session":
-        receipt = bridge.sync_session(
-            workspace_arg,
-            cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
-            codex_thread_id=CodexThreadId(args.codex_thread_id) if args.codex_thread_id else None,
-            direction=SyncDirection(args.direction),
-            mode=TransportMode(args.mode),
-            fork_policy=ForkResolutionPolicy(args.fork_policy),
-            source_tag=AgyGuiSafeSource[args.source_tag.upper()],
-            include_interrupted=bool(args.include_interrupted),
-        )
-        print(json.dumps(_receipt_to_dict(receipt), ensure_ascii=False, indent=2))
-        return 0
-    if args.subcommand == "sync-workspace":
+    if args.subcommand in ("sync-session", "sync-workspace"):
+        sync_direction_cls = _load_attr(".bridge", "SyncDirection")
+        fork_policy_cls = _load_attr(".bridge", "ForkResolutionPolicy")
+        if args.subcommand == "sync-session":
+            receipt = bridge.sync_session(
+                workspace_arg,
+                cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
+                codex_thread_id=CodexThreadId(args.codex_thread_id) if args.codex_thread_id else None,
+                direction=sync_direction_cls(args.direction),
+                mode=TransportMode(args.mode),
+                fork_policy=fork_policy_cls(args.fork_policy),
+                source_tag=AgyGuiSafeSource[args.source_tag.upper()],
+                include_interrupted=bool(args.include_interrupted),
+            )
+            print(json.dumps(_receipt_to_dict(receipt), ensure_ascii=False, indent=2))
+            return 0
         receipts = bridge.sync_workspace(
             workspace_arg,
-            direction=SyncDirection(args.direction),
+            direction=sync_direction_cls(args.direction),
             mode=TransportMode(args.mode),
-            fork_policy=ForkResolutionPolicy(args.fork_policy),
+            fork_policy=fork_policy_cls(args.fork_policy),
             include_subagents=bool(args.include_subagents),
             include_interrupted=bool(args.include_interrupted),
         )

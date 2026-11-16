@@ -69,11 +69,13 @@ public struct SemanticVersion: Comparable, Equatable, Sendable, CustomStringConv
         self.prerelease = prerelease
     }
 
+    private static let versionRegex = try! NSRegularExpression(
+        pattern: #"(?:^|[^0-9])v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?"#
+    )
+
     public static func parse(_ raw: String) -> SemanticVersion? {
-        let pattern = #"(?:^|[^0-9])v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let nsRange = NSRange(raw.startIndex..<raw.endIndex, in: raw)
-        guard let match = regex.firstMatch(in: raw, range: nsRange),
+        guard let match = versionRegex.firstMatch(in: raw, range: nsRange),
               let r1 = Range(match.range(at: 1), in: raw),
               let r2 = Range(match.range(at: 2), in: raw),
               let r3 = Range(match.range(at: 3), in: raw),
@@ -452,27 +454,17 @@ public final class DefaultSystemCommandRunner: SystemCommandRunning, @unchecked 
         environment: [String: String],
         timeoutSeconds: TimeInterval
     ) async throws -> CommandExecutionResult {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let out = try SubprocessCLIClient.runProcessSync(
-                        executableURL: executableURL,
-                        arguments: arguments,
-                        environment: environment,
-                        timeoutSeconds: timeoutSeconds
-                    )
-                    continuation.resume(
-                        returning: CommandExecutionResult(
-                            exitCode: out.exitCode,
-                            stdout: out.stdout,
-                            stderr: out.stderr
-                        )
-                    )
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        let out = try await SubprocessCLIClient.runProcessAsync(
+            executableURL: executableURL,
+            arguments: arguments,
+            environment: environment,
+            timeoutSeconds: timeoutSeconds
+        )
+        return CommandExecutionResult(
+            exitCode: out.exitCode,
+            stdout: out.stdout,
+            stderr: out.stderr
+        )
     }
 }
 
@@ -866,18 +858,20 @@ public final class UpdateViewModel: ObservableObject {
         return fileManager.fileExists(atPath: pyproject) && fileManager.isExecutableFile(atPath: buildScript)
     }
 
+    private static let pyprojectVersionRegex = try! NSRegularExpression(
+        pattern: #"(?m)^version\s*=\s*"([^"]+)""#
+    )
+
     public static func parsePyprojectVersion(in repoURL: URL) -> String? {
         guard let validatedURL = try? UpdatePathGuard.validateNonTemporaryURL(repoURL) else {
             return nil
         }
         let pyprojectURL = validatedURL.appendingPathComponent("pyproject.toml")
-        guard let text = try? String(contentsOf: pyprojectURL, encoding: .utf8),
-              let regex = try? NSRegularExpression(pattern: #"(?m)^version\s*=\s*"([^"]+)""#)
-        else {
+        guard let text = try? String(contentsOf: pyprojectURL, encoding: .utf8) else {
             return nil
         }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
+        guard let match = pyprojectVersionRegex.firstMatch(in: text, range: range),
               let verRange = Range(match.range(at: 1), in: text)
         else {
             return nil

@@ -31,7 +31,7 @@ INTERRUPTED_TOOL_OUTPUT = "[Interrupted before tool completion]"
 INTERRUPTED_TURN_TEXT = "[Turn interrupted before completion]"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HostExtensionEnvelope:
     host: HostKind
     extension_type: str
@@ -39,7 +39,7 @@ class HostExtensionEnvelope:
     metadata: Tuple[Tuple[str, str], ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EventOriginAnchor:
     origin_host: HostKind
     turn_id: TurnId
@@ -51,7 +51,7 @@ class EventOriginAnchor:
     host_extensions: Tuple[HostExtensionEnvelope, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TokenUsageAccounting:
     input_tokens: int = 0
     output_tokens: int = 0
@@ -59,7 +59,7 @@ class TokenUsageAccounting:
     thinking_duration_ms: int | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MediaAttachment:
     mime_type: str
     uri: str
@@ -67,7 +67,7 @@ class MediaAttachment:
     caption: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SubagentLineage:
     parent_cascade_id: CascadeId | None = None
     root_cascade_id: CascadeId | None = None
@@ -86,7 +86,7 @@ class SubagentLineage:
         return self.nesting_depth > 0 or self.spawn_step_index is not None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UserInputEvent:
     kind: Literal["user_input"]
     anchor: EventOriginAnchor
@@ -95,7 +95,7 @@ class UserInputEvent:
     media: Tuple[MediaAttachment, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ThinkingEvent:
     kind: Literal["thinking"]
     anchor: EventOriginAnchor
@@ -105,7 +105,7 @@ class ThinkingEvent:
     token_usage: TokenUsageAccounting = TokenUsageAccounting()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AssistantTextEvent:
     kind: Literal["assistant_text"]
     anchor: EventOriginAnchor
@@ -116,7 +116,7 @@ class AssistantTextEvent:
     token_usage: TokenUsageAccounting = TokenUsageAccounting()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ToolCallEvent:
     kind: Literal["tool_call"]
     anchor: EventOriginAnchor
@@ -127,7 +127,7 @@ class ToolCallEvent:
     thinking_signature: bytes | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ToolResultEvent:
     kind: Literal["tool_result"]
     anchor: EventOriginAnchor
@@ -139,7 +139,7 @@ class ToolResultEvent:
     full_output_uri: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TaskBoundaryEvent:
     kind: Literal["task_boundary"]
     anchor: EventOriginAnchor
@@ -152,7 +152,7 @@ class TaskBoundaryEvent:
     review_uris: Tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CheckpointEvent:
     kind: Literal["checkpoint"]
     anchor: EventOriginAnchor
@@ -163,7 +163,7 @@ class CheckpointEvent:
     conversation_title: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SystemEvent:
     kind: Literal["system_message"]
     anchor: EventOriginAnchor
@@ -177,7 +177,7 @@ CanonicalEvent: TypeAlias = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CompletedTurnWatermark:
     turn_id: TurnId
     last_ledger_seq: LedgerSeqNo
@@ -186,7 +186,7 @@ class CompletedTurnWatermark:
     boundary_digest: ContentDigest
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TranscriptRowProjection:
     """Pure view row for `brain/<cascade_id>/.system_generated/logs/transcript.jsonl`."""
 
@@ -205,7 +205,7 @@ class TranscriptRowProjection:
     truncated_fields: Tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AnnotationPbtxtProjection:
     """Pure view projection for `~/.gemini/antigravity/annotations/<cascade_id>.pbtxt`."""
 

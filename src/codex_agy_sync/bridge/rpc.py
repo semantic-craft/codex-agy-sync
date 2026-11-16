@@ -159,6 +159,9 @@ def _post_agy_proto(
     was_reused = conn.sock is not None
     try:
         return _send_agy_proto_once(conn, path, body, headers, timeout_s)
+    except TimeoutError:
+        conn.close()
+        raise
     except (http.client.HTTPException, ConnectionError, OSError):
         conn.close()
         if not was_reused:
