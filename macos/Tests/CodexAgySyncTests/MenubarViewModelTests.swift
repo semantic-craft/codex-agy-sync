@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 import XCTest
-@testable import CodexAgyHandoffCore
+@testable import CodexAgySyncCore
 
 private let forbiddenJargonTokens = ["抢救", "no_op", "挂起交接", "晋升"]
 
@@ -318,7 +318,7 @@ final class MenubarViewModelTests: XCTestCase {
         )
         let pendingPres = pending.presentation()
         XCTAssertTrue(pendingPres.isActionable)
-        XCTAssertEqual(pendingPres.subtitle, "bridge · 上次切换未完成确认")
+        XCTAssertEqual(pendingPres.subtitle, "bridge · 上次同步未完成确认")
         XCTAssertEqual(pendingPres.selectedActionTitle, "重新同步状态")
         XCTAssertEqual(pendingPres.unselectedTrailingTitle, "重试")
         XCTAssertEqual(pendingPres.accessibilityLabel, "重新同步状态 · Sync workspace")
@@ -579,7 +579,7 @@ final class MenubarViewModelTests: XCTestCase {
             return XCTFail("Expected error banner for pending receipt")
         }
         XCTAssertEqual(pendingBanner.kind, .error)
-        XCTAssertEqual(pendingBanner.text, "切换尚未完成确认，请稍后点击重试同步状态。")
+        XCTAssertEqual(pendingBanner.text, "同步尚未完成确认，请稍后点击重试同步状态。")
         assertNoForbiddenJargon(pendingBanner.text)
     }
 
@@ -700,7 +700,7 @@ final class MenubarViewModelTests: XCTestCase {
         guard case .error(let errMsg)? = vm.banner else {
             return XCTFail("Expected structured error banner")
         }
-        XCTAssertTrue(errMsg.hasPrefix("切换未成功："))
+        XCTAssertTrue(errMsg.hasPrefix("同步未成功："))
         XCTAssertTrue(errMsg.contains("Source session is active"))
         XCTAssertTrue(errMsg.contains("cascade_run_status=2"))
         assertNoForbiddenJargon(errMsg)
@@ -736,12 +736,26 @@ final class MenubarViewModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
+        let argsLogURL = dir.appendingPathComponent("argv.log")
         let scriptURL = dir.appendingPathComponent("codex-agy-sync")
         let script = """
         #!/bin/sh
+        printf '%s\\n' "$*" >> "\(argsLogURL.path)"
         if [ "$1" = "menubar-feed" ]; then
           cat <<'JSON'
         {"generated_at_iso":"2026-11-15T08:06:40Z","agy_daemon_active":true,"codex_daemon_active":true,"hero":null,"recent":[]}
+        JSON
+          exit 0
+        fi
+        if [ "$1" = "sync" ] && [ "$2" = "--reconcile" ]; then
+          cat <<'JSON'
+        {"workspace":"","dry_run":false,"promoted":[],"cleared":[],"unresolved":[],"total_pending_before":0,"total_pending_after":0}
+        JSON
+          exit 0
+        fi
+        if [ "$1" = "sync" ] && [ "$4" = "--reconcile" ]; then
+          cat <<'JSON'
+        {"workspace":"/repos/alpha","dry_run":false,"promoted":[],"cleared":[],"unresolved":[],"total_pending_before":0,"total_pending_after":0}
         JSON
           exit 0
         fi
@@ -774,6 +788,24 @@ final class MenubarViewModelTests: XCTestCase {
                 )
             )
         }
+
+        let recWorkspace = try await client.reconcilePending(workspacePath: "/repos/alpha")
+        XCTAssertEqual(recWorkspace.workspace, "/repos/alpha")
+        let recGlobal = try await client.reconcilePending()
+        XCTAssertEqual(recGlobal.workspace, "")
+
+        let loggedLines = try String(contentsOf: argsLogURL, encoding: .utf8)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+        XCTAssertEqual(
+            loggedLines,
+            [
+                "menubar-feed --limit 10",
+                "sync --workspace /repos/alpha --source-id cid-1 --auto-pair --include-interrupted",
+                "sync --workspace /repos/alpha --reconcile",
+                "sync --reconcile",
+            ]
+        )
     }
 
     @MainActor
@@ -988,7 +1020,7 @@ final class MenubarViewModelTests: XCTestCase {
         _ = try makeExec(in: py39Bin)
         let py312CLI = try makeExec(in: py312Bin)
 
-        let suiteName = "dev.semanticcraft.codex-agy-handoff.cli.\(UUID().uuidString)"
+        let suiteName = "dev.semanticcraft.codex-agy-sync.cli.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
@@ -1094,7 +1126,7 @@ final class MenubarViewModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: pathBin, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let suiteName = "dev.semanticcraft.codex-agy-handoff.parity.\(UUID().uuidString)"
+        let suiteName = "dev.semanticcraft.codex-agy-sync.parity.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
@@ -1201,7 +1233,7 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertTrue(ready.matchesSearchQuery("6 轮"))
         XCTAssertTrue(ready.matchesSearchQuery("Antigravity"))
 
-        XCTAssertTrue(pending.matchesSearchQuery("上次切换未完成确认"))
+        XCTAssertTrue(pending.matchesSearchQuery("上次同步未完成确认"))
         XCTAssertFalse(pending.matchesSearchQuery("7 轮"))
 
         XCTAssertTrue(handed.matchesSearchQuery("已同步"))
@@ -1214,10 +1246,17 @@ final class MenubarViewModelTests: XCTestCase {
     @MainActor
     func testLiveLanguageSwitchingUpdatesBannerSectionsPresentationAndSearchQuery() async {
         for key in AppCopyKey.allCases {
-            assertNoForbiddenJargon(AppCopy.text(key, in: .zhHans))
+            let zh = AppCopy.text(key, in: .zhHans)
+            let en = AppCopy.text(key, in: .en)
+            assertNoForbiddenJargon(zh)
+            XCTAssertFalse(zh.contains("接力") || zh.contains("交接"), "Legacy handoff copy in \(key): \(zh)")
+            XCTAssertFalse(
+                en.localizedCaseInsensitiveContains("handoff") || en.localizedCaseInsensitiveContains("hand off"),
+                "Legacy handoff copy in \(key): \(en)"
+            )
         }
 
-        let suiteName = "dev.semanticcraft.codex-agy-handoff.lang-vm.\(UUID().uuidString)"
+        let suiteName = "dev.semanticcraft.codex-agy-sync.lang-vm.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -1274,7 +1313,7 @@ final class MenubarViewModelTests: XCTestCase {
 
         XCTAssertEqual(interrupted.presentation(language: .en).subtitle, "beta · 4 turns · Incomplete Reply")
         XCTAssertEqual(interrupted.presentation(language: .en).selectedActionTitle, "Continue in Codex")
-        XCTAssertEqual(pending.presentation(language: .en).subtitle, "gamma · Previous handoff unconfirmed")
+        XCTAssertEqual(pending.presentation(language: .en).subtitle, "gamma · Previous sync unconfirmed")
         XCTAssertEqual(pending.presentation(language: .en).selectedActionTitle, "Resync Status")
         XCTAssertEqual(pending.presentation(language: .en).unselectedTrailingTitle, "Retry")
         XCTAssertEqual(handed.presentation(language: .en).subtitle, "delta · 5 turns · Synced")
@@ -1285,7 +1324,7 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertTrue(interrupted.matchesSearchQuery("incomplete reply"))
         XCTAssertTrue(interrupted.matchesSearchQuery("4 turns"))
         XCTAssertTrue(pending.matchesSearchQuery("needs confirm"))
-        XCTAssertTrue(pending.matchesSearchQuery("previous handoff unconfirmed"))
+        XCTAssertTrue(pending.matchesSearchQuery("previous sync unconfirmed"))
         XCTAssertTrue(handed.matchesSearchQuery("synced"))
         XCTAssertTrue(running.matchesSearchQuery("session active"))
 
@@ -1361,7 +1400,7 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(installFailure.text(in: .zhHans), AppCopy.text(.updatesErrInstallationInProgress, in: .zhHans))
         XCTAssertEqual(installFailure.text(in: .en), AppCopy.text(.updatesErrInstallationInProgress, in: .en))
 
-        let suiteName = "dev.semanticcraft.codex-agy-handoff.guard.\(UUID().uuidString)"
+        let suiteName = "dev.semanticcraft.codex-agy-sync.guard.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         defer { defaults.removePersistentDomain(forName: suiteName) }

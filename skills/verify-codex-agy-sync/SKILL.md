@@ -11,14 +11,14 @@ Run the repository gate `./scripts/check` alongside this skill whenever source o
 
 ## Native macOS menu bar app route
 
-For the zero-polling macOS menu bar app (`CodexAgyHandoff.app` backed by `./bin/codex-agy-sync menubar-feed`), run:
+For the zero-polling macOS menu bar app (`CodexAgySync.app` backed by `./bin/codex-agy-sync menubar-feed`), run:
 
 ```bash
 python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py doctor
 python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py suite
 ```
 
-`suite` builds `CodexAgyHandoff.app` with an isolated QA bundle ID (`bundle_id` and `AppIcon.icns` checks) outside `/tmp`, seeds an unpaired stopped interrupted Antigravity session with active `-wal` and `presence/<cid>.lock` inside `_sandbox/`, starts loopback AGY Connect-RPC, Codex `AF_UNIX` WebSocket JSON-RPC (`CreateProject`, `GetCascadeTrajectory` returning `cascade_run_status=1`, `project/list`, `project/create`, `thread/fork`, `thread/metadata/update`, `thread/name/set`, `thread/read`, `thread/unsubscribe`), and local Release API HTTP stubs, drives the panel via `cua-driver` across Raycast search filtering, hero rescue (`--auto-pair --include-interrupted`), ready receipt and staging cleanup, native `Settings` window (`⌘,`) live status icon persistence (`pulse_bolt`), and update check (`release_api_hits == 1`), saves `screenshots/01-hero-ready.png` through `04-settings-update.png`, confirms host DB fingerprint parity, and tears down processes, LaunchServices registration, QA prefs, and `_sandbox/`.
+`suite` builds `CodexAgySync.app` with an isolated QA bundle ID (`bundle_id`, `CFBundleExecutable`, `CFBundleLocalizations`, and `AppIcon.icns` checks) outside `/tmp`, seeds an unpaired stopped interrupted Antigravity session with active `-wal` and `presence/<cid>.lock` inside `_sandbox/`, starts loopback AGY Connect-RPC, Codex `AF_UNIX` WebSocket JSON-RPC (`CreateProject`, `GetCascadeTrajectory` returning `cascade_run_status=1`, `project/list`, `project/create`, `thread/fork`, `thread/metadata/update`, `thread/name/set`, `thread/read`, `thread/unsubscribe`), and local Release API HTTP stubs, drives the panel via `cua-driver` across Raycast search filtering, hero rescue (`--auto-pair --include-interrupted`), ready receipt and staging cleanup, native `Settings` window (`⌘,`, `CodexAgySync 设置` / `CodexAgySync Settings`) live bilingual switching (`zh-Hans` <-> `en`), auto-update policy controls, and update check, saves `screenshots/01-hero-ready.png` through `05-settings-english.png`, confirms host DB fingerprint parity, and tears down processes, LaunchServices registration, QA prefs, and `_sandbox/`.
 
 ## Live Stage-1 workbench route
 
@@ -63,7 +63,7 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py doctor --run
 `doctor` performs a strictly read-only check and exits `0` with `"status": "PASS"` only when all conditions hold:
 - `RUN_DIR` resolves via `Path.resolve()` outside `/tmp` and `/private/tmp`.
 - `_sandbox/owner.json` exists and carries `"marker": "codex-agy-sync-verify-sandbox"`.
-- `./bin/codex-agy-sync --help` exits `0` and exposes all eight subcommands (`pair`, `status`, `inspect`, `sync-session`, `handoff`, `menubar-feed`, `sync-workspace`, `serve`).
+- `./bin/codex-agy-sync --help` exits `0` and exposes all eight subcommands (`pair`, `status`, `inspect`, `sync-session`, `sync`, `menubar-feed`, `sync-workspace`, `serve`).
 - Live host files (`$HOME/.gemini/antigravity/conversation_summaries.db` and `$HOME/.codex/state_5.sqlite`, when present) match the `(inode, size, mtime_ns)` fingerprint captured at `init`.
 
 ## Drive
@@ -134,6 +134,6 @@ python3 skills/verify-codex-agy-sync/scripts/control_sync_verify.py cleanup --ru
 - `doctor [--prototype <path>]`
 - `suite [--prototype <path>] [--run-dir <dir>] [--timeout <seconds>]`
 
-`skills/verify-codex-agy-sync/scripts/menubar_verify.py` is an executable Python 3 script for isolated `CodexAgyHandoff.app` GUI verification via `cua-driver` supporting two subcommands:
+`skills/verify-codex-agy-sync/scripts/menubar_verify.py` (with helper `_menubar_qa_helpers.py`) is an executable Python 3 script for isolated `CodexAgySync.app` GUI verification via `cua-driver` supporting two subcommands:
 - `doctor`
 - `suite [--run-dir <dir>]`

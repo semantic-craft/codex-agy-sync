@@ -85,7 +85,7 @@ public struct BilingualText: Equatable, Sendable {
 }
 
 public enum SettingsWindowIdentity {
-    public static let identifier = NSUserInterfaceItemIdentifier("dev.semanticcraft.codex-agy-handoff.settings")
+    public static let identifier = NSUserInterfaceItemIdentifier("dev.semanticcraft.codex-agy-sync.settings")
 }
 
 @MainActor
@@ -308,9 +308,9 @@ public enum AppCopy {
     public static func entry(for key: AppCopyKey) -> BilingualText {
         switch key {
         case .appTitle:
-            return BilingualText(zhHans: "CodexAgyHandoff", en: "CodexAgyHandoff")
+            return BilingualText(zhHans: "CodexAgySync", en: "CodexAgySync")
         case .statusItemLabel:
-            return BilingualText(zhHans: "对话接力", en: "Session Handoff")
+            return BilingualText(zhHans: "会话同步", en: "Session Sync")
         case .languageSystem:
             return BilingualText(zhHans: "跟随系统", en: "Follow System")
 
@@ -329,7 +329,7 @@ public enum AppCopy {
         case .stateActiveBadge:
             return BilingualText(zhHans: "对话中", en: "Active")
         case .pendingSubtitle:
-            return BilingualText(zhHans: "上次切换未完成确认", en: "Previous handoff unconfirmed")
+            return BilingualText(zhHans: "上次同步未完成确认", en: "Previous sync unconfirmed")
         case .pendingActionTitle:
             return BilingualText(zhHans: "重新同步状态", en: "Resync Status")
         case .pendingTrailingTitle:
@@ -355,8 +355,8 @@ public enum AppCopy {
 
         case .handoffUnconfirmedBanner:
             return BilingualText(
-                zhHans: "切换尚未完成确认，请稍后点击重试同步状态。",
-                en: "Handoff is not confirmed yet. Click Retry to resync status."
+                zhHans: "同步尚未完成确认，请稍后点击重试同步状态。",
+                en: "Sync is not confirmed yet. Click Retry to resync status."
             )
         case .reconcileSyncedBanner:
             return BilingualText(zhHans: "状态已同步", en: "Status synced")
@@ -407,11 +407,11 @@ public enum AppCopy {
             return BilingualText(zhHans: "双端未运行", en: "Both Offline")
 
         case .settingsWindowTitle:
-            return BilingualText(zhHans: "CodexAgyHandoff 设置", en: "CodexAgyHandoff Settings")
+            return BilingualText(zhHans: "CodexAgySync 设置", en: "CodexAgySync Settings")
         case .settingsTabGeneral:
-            return BilingualText(zhHans: "常规与接力", en: "General & Handoff")
+            return BilingualText(zhHans: "常规与同步", en: "General & Sync")
         case .settingsTabUpdates:
-            return BilingualText(zhHans: "版本与同步更新", en: "Updates & Sync")
+            return BilingualText(zhHans: "版本与更新", en: "Version & Updates")
         case .settingsLanguageTitle:
             return BilingualText(zhHans: "界面语言", en: "Language")
         case .settingsLanguageSubtitle:
@@ -423,7 +423,7 @@ public enum AppCopy {
         case .settingsHotKeyTitle:
             return BilingualText(zhHans: "全局快捷键", en: "Global Shortcut")
         case .settingsHotKeySubtitle:
-            return BilingualText(zhHans: "随时从任意桌面空间唤起会话接力", en: "Open session handoff from any Space")
+            return BilingualText(zhHans: "随时从任意桌面空间唤起会话同步", en: "Open session sync from any Space")
         case .settingsHotKeyEnableAX:
             return BilingualText(zhHans: "启用全局快捷键", en: "Enable Global Shortcut")
         case .settingsHotKeyRecordingPrompt:
@@ -444,16 +444,16 @@ public enum AppCopy {
                 en: "Toggles the panel without auto-continuing so you can pick a session first."
             )
         case .hotKeyInstantContinueLabel:
-            return BilingualText(zhHans: "展开并自动接力首个对话", en: "Open & Continue Top Session")
+            return BilingualText(zhHans: "展开并自动同步首个对话", en: "Open & Sync Top Session")
         case .hotKeyInstantContinueHelper:
             return BilingualText(
-                zhHans: "按下快捷键后立即展开面板，并自动将首条可操作对话交接到目标端。",
-                en: "Opens the panel and immediately continues the top actionable session in the target app."
+                zhHans: "按下快捷键后立即展开面板，并自动将首条可操作对话同步到目标端。",
+                en: "Opens the panel and immediately syncs the top actionable session to the target app."
             )
         case .settingsAutoActivateTitle:
-            return BilingualText(zhHans: "交接完成后自动切到目标端应用", en: "Switch to Target App After Handoff")
+            return BilingualText(zhHans: "同步完成后自动切到目标端应用", en: "Switch to Target App After Sync")
         case .settingsAutoActivateSubtitle:
-            return BilingualText(zhHans: "关闭后可在菜单栏面板连续批量交接多条会话，不切换前台窗口", en: "Turn off to hand off multiple sessions without switching focus")
+            return BilingualText(zhHans: "关闭后可在菜单栏面板连续批量同步多条对话，不切换前台窗口", en: "Turn off to sync multiple sessions without switching focus")
         case .settingsFeedLimitTitle:
             return BilingualText(zhHans: "面板最近会话条数", en: "Recent Sessions Shown")
         case .settingsFeedLimitSubtitle:
@@ -539,10 +539,10 @@ public enum AppCopy {
         case .updatesAlignmentUnavailable:
             return BilingualText(zhHans: "CLI 未就绪", en: "CLI Unavailable")
         case .updatesDefaultNotesSummary:
-            return BilingualText(zhHans: "包含最新双端接力与菜单栏改进", en: "Includes the latest handoff and menu bar improvements")
+            return BilingualText(zhHans: "包含最新双端同步与菜单栏改进", en: "Includes the latest sync and menu bar improvements")
 
         case .updatesStepBuildingLocal:
-            return BilingualText(zhHans: "正在从源码仓构建并签名 CodexAgyHandoff.app…", en: "Building and signing CodexAgyHandoff.app from local repo…")
+            return BilingualText(zhHans: "正在从源码仓构建并签名 CodexAgySync.app…", en: "Building and signing CodexAgySync.app from local repo…")
         case .updatesStepUpgradingLocalCLI:
             return BilingualText(zhHans: "正在升级 Python CLI 环境…", en: "Upgrading Python CLI environment…")
         case .updatesStepDownloadingChecksums:
@@ -565,8 +565,8 @@ public enum AppCopy {
             )
         case .updatesErrMissingAssets:
             return BilingualText(
-                zhHans: "远端 Release 未包含可用的安装包资产（.whl 或 CodexAgyHandoff-macos.zip）。",
-                en: "Remote release has no installable assets (.whl or CodexAgyHandoff-macos.zip)."
+                zhHans: "远端 Release 未包含可用的安装包资产（.whl 或 CodexAgySync-macos.zip）。",
+                en: "Remote release has no installable assets (.whl or CodexAgySync-macos.zip)."
             )
         case .updatesErrPythonMissing:
             return BilingualText(
@@ -575,8 +575,8 @@ public enum AppCopy {
             )
         case .updatesErrHandoffInProgress:
             return BilingualText(
-                zhHans: "正在执行对话交接，请等待当前操作完成后再安装更新。",
-                en: "A session handoff is in progress; wait for it to finish before installing."
+                zhHans: "正在执行会话同步，请等待当前操作完成后再安装更新。",
+                en: "A session sync is in progress; wait for it to finish before installing."
             )
         case .updatesErrInstallationInProgress:
             return BilingualText(
@@ -597,7 +597,7 @@ public enum AppCopy {
         case .menuSettings:
             return BilingualText(zhHans: "设置…", en: "Settings…")
         case .menuQuit:
-            return BilingualText(zhHans: "退出 CodexAgyHandoff", en: "Quit CodexAgyHandoff")
+            return BilingualText(zhHans: "退出 CodexAgySync", en: "Quit CodexAgySync")
         case .menuEdit:
             return BilingualText(zhHans: "编辑", en: "Edit")
         case .menuUndo:
@@ -675,9 +675,9 @@ public enum AppCopy {
     public static func handoffFailedBanner(_ detail: String, in language: ResolvedLanguage) -> String {
         switch language {
         case .zhHans:
-            return "切换未成功：\(detail)"
+            return "同步未成功：\(detail)"
         case .en:
-            return "Handoff failed: \(detail)"
+            return "Sync failed: \(detail)"
         }
     }
 
@@ -1237,7 +1237,7 @@ public enum AppMenuBuilder {
 
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
-        let appMenu = NSMenu(title: "CodexAgyHandoff")
+        let appMenu = NSMenu(title: "CodexAgySync")
 
         let settingsItem = NSMenuItem(
             title: AppCopy.text(.menuSettings, in: language),

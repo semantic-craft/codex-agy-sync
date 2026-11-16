@@ -211,7 +211,7 @@ public final class UpdateViewModel: ObservableObject {
         self.appVersion = resolvedAppVer
         self.currentBundleIdentifier = currentBundleIdentifier
             ?? Bundle.main.bundleIdentifier
-            ?? "dev.semanticcraft.codex-agy-handoff"
+            ?? "dev.semanticcraft.codex-agy-sync"
         if let currentAppBundleURL {
             self.currentAppBundleURL = currentAppBundleURL
         } else if Bundle.main.bundleURL.pathExtension == "app" {
@@ -424,7 +424,7 @@ public final class UpdateViewModel: ObservableObject {
                 from: url,
                 headers: [
                     "Accept": "application/vnd.github+json",
-                    "User-Agent": "CodexAgyHandoff/\(appVersion)",
+                    "User-Agent": "CodexAgySync/\(appVersion)",
                 ],
                 timeoutSeconds: 10.0
             )
@@ -1414,7 +1414,7 @@ public final class UpdateViewModel: ObservableObject {
         }
         let (checksumsData, checksumsStatus) = try await httpFetcher.fetchData(
             from: checksumsAsset.browserDownloadURL,
-            headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
+            headers: ["User-Agent": "CodexAgySync/\(appVersion)"],
             timeoutSeconds: 15.0
         )
         guard (200..<300).contains(checksumsStatus),
@@ -1434,7 +1434,7 @@ public final class UpdateViewModel: ObservableObject {
             }
             let (wheelData, wheelStatus) = try await httpFetcher.fetchData(
                 from: wheelAsset.browserDownloadURL,
-                headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
+                headers: ["User-Agent": "CodexAgySync/\(appVersion)"],
                 timeoutSeconds: 30.0
             )
             guard (200..<300).contains(wheelStatus) else {
@@ -1456,7 +1456,7 @@ public final class UpdateViewModel: ObservableObject {
             }
             let (zipData, zipStatus) = try await httpFetcher.fetchData(
                 from: appZipAsset.browserDownloadURL,
-                headers: ["User-Agent": "CodexAgyHandoff/\(appVersion)"],
+                headers: ["User-Agent": "CodexAgySync/\(appVersion)"],
                 timeoutSeconds: 60.0
             )
             guard (200..<300).contains(zipStatus) else {
@@ -1483,7 +1483,7 @@ public final class UpdateViewModel: ObservableObject {
                     detail: dittoOut.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
                 )
             }
-            let extractedApp = extractDir.appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+            let extractedApp = Self.resolveExtractedAppBundle(in: extractDir)
             try await verifyCodesign(of: extractedApp, childEnv: childEnv)
             verifiedExtractedAppURL = extractedApp
         }
@@ -1567,7 +1567,7 @@ public final class UpdateViewModel: ObservableObject {
                 )
             }
 
-            let builtAppURL = appStageDir.appendingPathComponent("CodexAgyHandoff.app", isDirectory: true)
+            let builtAppURL = appStageDir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
             try await verifyCodesign(of: builtAppURL, childEnv: childEnv)
 
             setSemanticState(.updating(step: .upgradingLocalCLI))
@@ -1683,6 +1683,27 @@ public final class UpdateViewModel: ObservableObject {
             await probeEnvironment()
             setSemanticState(.failed(.from(error)))
         }
+    }
+
+    nonisolated static func resolveExtractedAppBundle(
+        in extractDir: URL,
+        fileManager: FileManager = .default
+    ) -> URL {
+        let preferred = extractDir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        if fileManager.fileExists(atPath: preferred.path) {
+            return preferred
+        }
+        if let children = try? fileManager.contentsOfDirectory(
+            at: extractDir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            let apps = children.filter { $0.pathExtension.lowercased() == "app" }
+            if apps.count == 1 {
+                return apps[0]
+            }
+        }
+        return preferred
     }
 
     private func verifyCodesign(of appURL: URL, childEnv: [String: String]) async throws {

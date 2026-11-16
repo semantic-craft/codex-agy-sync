@@ -97,7 +97,7 @@ private final class LockedBox<Value>: @unchecked Sendable {
 }
 
 private final class AsyncProcessCoordinator: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "dev.semanticcraft.codex-agy-handoff.process")
+    private let queue = DispatchQueue(label: "dev.semanticcraft.codex-agy-sync.process")
     private let process = Process()
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
@@ -457,7 +457,7 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         try await runAndDecode(
             HandoffReceiptPayload.self,
             arguments: [
-                "handoff",
+                "sync",
                 "--workspace",
                 workspacePath,
                 "--source-id",
@@ -469,7 +469,7 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
     }
 
     public func reconcilePending(workspacePath: String?) async throws -> ReconcileSummaryPayload {
-        var args = ["handoff"]
+        var args = ["sync"]
         if let workspacePath, !workspacePath.isEmpty {
             args.append(contentsOf: ["--workspace", workspacePath])
         }

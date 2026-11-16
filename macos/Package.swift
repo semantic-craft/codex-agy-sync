@@ -3,34 +3,34 @@
 import PackageDescription
 
 let package = Package(
-    name: "CodexAgyHandoff",
+    name: "CodexAgySync",
     platforms: [
         .macOS(.v14),
     ],
     products: [
         .library(
-            name: "CodexAgyHandoffCore",
-            targets: ["CodexAgyHandoffCore"]
+            name: "CodexAgySyncCore",
+            targets: ["CodexAgySyncCore"]
         ),
         .executable(
-            name: "CodexAgyHandoff",
-            targets: ["CodexAgyHandoff"]
+            name: "CodexAgySync",
+            targets: ["CodexAgySync"]
         ),
     ],
     targets: [
         .target(
-            name: "CodexAgyHandoffCore"
+            name: "CodexAgySyncCore"
         ),
         .executableTarget(
-            name: "CodexAgyHandoff",
-            dependencies: ["CodexAgyHandoffCore"],
+            name: "CodexAgySync",
+            dependencies: ["CodexAgySyncCore"],
             linkerSettings: [
                 .linkedFramework("Carbon"),
             ]
         ),
         .testTarget(
-            name: "CodexAgyHandoffTests",
-            dependencies: ["CodexAgyHandoffCore"]
+            name: "CodexAgySyncTests",
+            dependencies: ["CodexAgySyncCore"]
         ),
     ]
 )
