@@ -1,18 +1,31 @@
-import CoreFoundation
 import Foundation
 
-func cleanupIsolatedTestDefaults(_ defaults: UserDefaults, suiteName: String) {
-    defaults.removePersistentDomain(forName: suiteName)
-    if let anyKeys = CFPreferencesCopyKeyList(suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) {
-        CFPreferencesSetMultiple(nil, anyKeys, suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+struct IsolatedTestDefaults {
+    let defaults: UserDefaults
+    let suiteName: String
+    let containerURL: URL
+
+    func cleanup() {
+        defaults.removePersistentDomain(forName: suiteName)
+        try? FileManager.default.removeItem(at: containerURL)
     }
-    if let hostKeys = CFPreferencesCopyKeyList(suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) {
-        CFPreferencesSetMultiple(nil, hostKeys, suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+}
+
+func makeIsolatedTestDefaultsSuite(label: String = "tests") -> IsolatedTestDefaults {
+    let repoRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let containerURL = repoRoot
+        .appendingPathComponent("out", isDirectory: true)
+        .appendingPathComponent("test-prefs-sandboxes", isDirectory: true)
+        .appendingPathComponent("\(label)-\(UUID().uuidString)", isDirectory: true)
+    let nestedDir = containerURL.appendingPathComponent("prefs", isDirectory: true)
+    try? FileManager.default.createDirectory(at: nestedDir, withIntermediateDirectories: true)
+    let suitePath = nestedDir.appendingPathComponent("suite", isDirectory: false).path
+    guard let defaults = UserDefaults(suiteName: suitePath) else {
+        fatalError("Failed to create sandbox UserDefaults at \(suitePath)")
     }
-    _ = CFPreferencesSynchronize(suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
-    _ = CFPreferencesAppSynchronize(suiteName as CFString)
-    let plistURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Preferences", isDirectory: true)
-        .appendingPathComponent("\(suiteName).plist", isDirectory: false)
-    try? FileManager.default.removeItem(at: plistURL)
+    return IsolatedTestDefaults(defaults: defaults, suiteName: suitePath, containerURL: containerURL)
 }

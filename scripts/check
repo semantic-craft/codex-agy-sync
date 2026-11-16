@@ -100,7 +100,7 @@ for sym in ("__version__", "OnlineRpcUnavailableError", "AgyRpcReadResult", "Cod
 pyproject_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("pyproject.toml").read_text(encoding="utf-8"), re.M)
 assert pyproject_match is not None, "Missing version in pyproject.toml"
 pyproject_ver = pyproject_match.group(1)
-assert pkg.__version__ == pyproject_ver == "0.4.2", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
+assert pkg.__version__ == pyproject_ver == "0.4.3", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
 build_sh_src = pathlib.Path("scripts/build_menubar_app.sh").read_text(encoding="utf-8")
 assert f"\"CFBundleShortVersionString\": \"{pyproject_ver}\"" not in build_sh_src and f"\"{pyproject_ver}\"" not in build_sh_src, "build_menubar_app.sh must not hardcode CFBundleShortVersionString"
 assert "pyproject.toml" in build_sh_src and "CFBundleIconFile" in build_sh_src, "build_menubar_app.sh must derive version from pyproject.toml and set CFBundleIconFile"
@@ -299,11 +299,38 @@ for swift_file in swift_files:
             line_no = swift_src.count("\n", 0, match.start()) + 1
             bad.append(f"{swift_file}:{line_no}: forbidden handoff Swift literal {inner!r}")
 
+swift_test_files = sorted(pathlib.Path("macos/Tests").rglob("*.swift"))
+if not swift_test_files:
+    bad.append("No Swift test files found under macos/Tests")
+rev_dns_suite_re = re.compile(
+    r'UserDefaults\s*\(\s*suiteName\s*:\s*"dev\.semanticcraft\.|'
+    r'defaultsSuiteName\s*:\s*"dev\.semanticcraft\.|'
+    r'"dev\.semanticcraft\.codex-agy-sync\.[A-Za-z0-9_-]+\.\\?\('
+)
+for test_file in swift_test_files:
+    test_src = test_file.read_text(encoding="utf-8")
+    for line_no, line in enumerate(test_src.splitlines(), start=1):
+        if rev_dns_suite_re.search(line) or "cleanupIsolatedTestDefaults" in line:
+            bad.append(f"{test_file}:{line_no}: reverse-DNS test UserDefaults suite forbidden (use sandbox file path)")
+
+skill_py_files = sorted(pathlib.Path("skills/verify-codex-agy-sync").rglob("*.py"))
+if not skill_py_files:
+    bad.append("No Python files found under skills/verify-codex-agy-sync")
+qa_rev_dns_re = re.compile(
+    r'QA_BUNDLE_ID\}\.prefs\.|'
+    r'"MENUBAR_PREFS_SUITE"\s*:\s*f?"(?:dev\.semanticcraft\.|\{QA_BUNDLE_ID\})'
+)
+for skill_py in skill_py_files:
+    skill_src = skill_py.read_text(encoding="utf-8")
+    for line_no, line in enumerate(skill_src.splitlines(), start=1):
+        if qa_rev_dns_re.search(line):
+            bad.append(f"{skill_py}:{line_no}: reverse-DNS QA prefs_suite forbidden (use sandbox file path)")
+
 if bad:
     for b in bad:
         print("SECURITY/HYGIENE FAIL:", b, file=sys.stderr)
     sys.exit(1)
-print("  Hygiene, naming unification & credential isolation check passed (0 hardcoded user paths, 0 legacy app/bundle names, CLI sync contract verified, 0 csrfToken leaks).")
+print("  Hygiene, naming unification, test UserDefaults sandbox & credential isolation check passed.")
 PY
 
 echo "[5/5] Running behavioral test suite..."
@@ -311,9 +338,12 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 if [[ "$(uname -s)" == "Darwin" ]] && command -v swift >/dev/null 2>&1; then
     echo "[5b/5] Running Swift macOS menubar tests..."
     python3 - <<'PY'
-import pathlib, plistlib, subprocess, sys
+import pathlib, plistlib, shutil, subprocess, sys, time
 
 prefs_dir = pathlib.Path.home() / "Library" / "Preferences"
+sandbox_prefs_root = pathlib.Path("out/test-prefs-sandboxes")
+shutil.rmtree(sandbox_prefs_root, ignore_errors=True)
+
 patterns = (
     "dev.semanticcraft.codex-agy-sync*.plist",
     "dev.semanticcraft.codex-agy-" + "handoff*.plist",
@@ -343,10 +373,23 @@ before_prod_sig = plist_stat_sig(prod_plist)
 
 res = subprocess.run(["swift", "test", "--package-path", "macos", "--scratch-path", "out/swift-test-check"])
 
+if res.returncode == 0:
+    print("  Waiting 7.5s for macOS cfprefsd delayed flush window...", flush=True)
+    time.sleep(7.5)
+
 after_plists = collect_plists()
 after_prod_sig = plist_stat_sig(prod_plist)
 
 errors: list[str] = []
+if sandbox_prefs_root.exists():
+    leftover_sandboxes = sorted(str(p) for p in sandbox_prefs_root.iterdir())
+    if leftover_sandboxes:
+        errors.append(
+            f"ERROR: Swift tests left {len(leftover_sandboxes)} uncleaned sandbox item(s) in {sandbox_prefs_root}:"
+        )
+        for p in leftover_sandboxes:
+            errors.append(f"  {p}")
+
 leaked = sorted(str(p) for p in (after_plists - before_plists))
 if leaked:
     errors.append(f"ERROR: Swift tests leaked {len(leaked)} plist file(s) into ~/Library/Preferences:")

@@ -603,55 +603,49 @@ public enum UpdatePathGuard {
                 for domain in [legacyBundleID, legacyAppName] {
                     let plistURL = targetPrefsDir.appendingPathComponent("\(domain).plist", isDirectory: false)
                     let hasPlistItem = (try? fileManager.attributesOfItem(atPath: plistURL.path)) != nil
-                    let hasAnyHostKeys = (CFPreferencesCopyKeyList(
+                    let anyKeys = (CFPreferencesCopyKeyList(
                         domain as CFString,
                         kCFPreferencesCurrentUser,
                         kCFPreferencesAnyHost
-                    ) as? [String])?.isEmpty == false
-                    let hasCurrentHostKeys = (CFPreferencesCopyKeyList(
+                    ) as? [String]) ?? []
+                    let hostKeys = (CFPreferencesCopyKeyList(
                         domain as CFString,
                         kCFPreferencesCurrentUser,
                         kCFPreferencesCurrentHost
-                    ) as? [String])?.isEmpty == false
+                    ) as? [String]) ?? []
 
-                    guard hasPlistItem || hasAnyHostKeys || hasCurrentHostKeys else {
-                        continue
-                    }
-
-                    UserDefaults(suiteName: domain)?.removePersistentDomain(forName: domain)
-                    if let anyKeys = CFPreferencesCopyKeyList(
-                        domain as CFString,
-                        kCFPreferencesCurrentUser,
-                        kCFPreferencesAnyHost
-                    ) {
-                        CFPreferencesSetMultiple(
-                            nil,
-                            anyKeys,
+                    if !anyKeys.isEmpty || !hostKeys.isEmpty {
+                        if !anyKeys.isEmpty {
+                            CFPreferencesSetMultiple(
+                                nil,
+                                anyKeys as CFArray,
+                                domain as CFString,
+                                kCFPreferencesCurrentUser,
+                                kCFPreferencesAnyHost
+                            )
+                        }
+                        if !hostKeys.isEmpty {
+                            CFPreferencesSetMultiple(
+                                nil,
+                                hostKeys as CFArray,
+                                domain as CFString,
+                                kCFPreferencesCurrentUser,
+                                kCFPreferencesCurrentHost
+                            )
+                        }
+                        _ = CFPreferencesSynchronize(
                             domain as CFString,
                             kCFPreferencesCurrentUser,
                             kCFPreferencesAnyHost
                         )
+                        _ = CFPreferencesAppSynchronize(domain as CFString)
+                        try? fileManager.removeItem(at: plistURL)
+                        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8.0) {
+                            try? FileManager.default.removeItem(at: plistURL)
+                        }
+                    } else if hasPlistItem {
+                        try? fileManager.removeItem(at: plistURL)
                     }
-                    if let hostKeys = CFPreferencesCopyKeyList(
-                        domain as CFString,
-                        kCFPreferencesCurrentUser,
-                        kCFPreferencesCurrentHost
-                    ) {
-                        CFPreferencesSetMultiple(
-                            nil,
-                            hostKeys,
-                            domain as CFString,
-                            kCFPreferencesCurrentUser,
-                            kCFPreferencesCurrentHost
-                        )
-                    }
-                    _ = CFPreferencesSynchronize(
-                        domain as CFString,
-                        kCFPreferencesCurrentUser,
-                        kCFPreferencesAnyHost
-                    )
-                    _ = CFPreferencesAppSynchronize(domain as CFString)
-                    try? fileManager.removeItem(at: plistURL)
                 }
             } else {
                 let legacyBundlePlist = targetPrefsDir.appendingPathComponent("\(legacyBundleID).plist", isDirectory: false)

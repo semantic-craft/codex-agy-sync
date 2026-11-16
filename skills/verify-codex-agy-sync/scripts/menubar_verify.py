@@ -106,6 +106,7 @@ def _make_sandbox_env(run_dir: Path, release_api_url: str) -> tuple[dict[str, Pa
         "agy_data": sb / "gemini-home" / "antigravity",
         "codex_home": sb / "codex-home",
         "sync_state": sb / "sync-state",
+        "prefs_dir": sb / "prefs",
         "sock_path": run_dir / "c.sock",
         "app_dir": run_dir / "app",
         "shots_dir": run_dir / "screenshots",
@@ -113,7 +114,7 @@ def _make_sandbox_env(run_dir: Path, release_api_url: str) -> tuple[dict[str, Pa
     for k, p in dirs.items():
         if k not in {"sandbox", "sock_path"}:
             p.mkdir(parents=True, exist_ok=True)
-    prefs_suite = f"{QA_BUNDLE_ID}.prefs.{os.getpid()}.{int(time.time())}"
+    prefs_suite = str(dirs["prefs_dir"] / "menubar-qa")
     env = {
         "GEMINI_HOME": str(dirs["gemini_home"]),
         "GEMINI_CONFIG_DIR": str(dirs["gemini_config"]),
@@ -494,14 +495,10 @@ def _teardown_suite(ctx: dict[str, Any]) -> dict[str, Any]:
             receipt["unregistered"] = run_cmd([LSREGISTER, "-u", str(app_bundle)], check=False).returncode == 0
     prefs_dir = Path.home() / "Library" / "Preferences"
     removed_any = False
-    for domain in filter(None, [QA_BUNDLE_ID, ctx.get("prefs_suite")]):
-        run_cmd(["defaults", "delete", str(domain)], check=False)
-        plist = prefs_dir / f"{domain}.plist"
-        if plist.is_file():
-            plist.unlink(missing_ok=True)
+    for cand in [prefs_dir / f"{QA_BUNDLE_ID}.plist", *prefs_dir.glob(f"ByHost/{QA_BUNDLE_ID}.*.plist")]:
+        if cand.exists() or cand.is_symlink():
+            cand.unlink(missing_ok=True)
             removed_any = True
-    if removed_any:
-        run_cmd(["killall", "cfprefsd"], check=False)
     receipt["plist_removed"] = removed_any
     for key in ("sock_path", "sandbox", "app_dir"):
         if isinstance(target := ctx.get(key), Path) and target.exists():
