@@ -188,13 +188,33 @@ if daemon_dir.is_dir():
         except Exception:
             pass
 
+tracked_proc = subprocess.run(
+    ["git", "ls-files", "-z"],
+    capture_output=True,
+    check=True,
+)
+tracked_files = {
+    entry.decode("utf-8", errors="surrogateescape")
+    for entry in tracked_proc.stdout.split(b"\0")
+    if entry
+}
+
 bad = []
 for p in repo.rglob("*"):
     if not p.is_file():
         continue
     rel = p.relative_to(repo)
+    rel_posix = rel.as_posix()
+    is_untracked_build_artifact = (
+        rel_posix not in tracked_files
+        and (
+            rel.parts[0] in ("build", "dist")
+            or any(part.endswith(".egg-info") for part in rel.parts)
+        )
+    )
     if (
         rel.parts[0] in (".git", "out")
+        or is_untracked_build_artifact
         or ".build" in rel.parts
         or ".swiftpm" in rel.parts
         or "__pycache__" in rel.parts
@@ -290,6 +310,74 @@ echo "[5/5] Running behavioral test suite..."
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 if [[ "$(uname -s)" == "Darwin" ]] && command -v swift >/dev/null 2>&1; then
     echo "[5b/5] Running Swift macOS menubar tests..."
-    swift test --package-path macos --scratch-path out/swift-test-check
+    python3 - <<'PY'
+import pathlib, plistlib, subprocess, sys
+
+prefs_dir = pathlib.Path.home() / "Library" / "Preferences"
+patterns = (
+    "dev.semanticcraft.codex-agy-sync*.plist",
+    "dev.semanticcraft.codex-agy-" + "handoff*.plist",
+    "CodexAgySync*.plist",
+    "CodexAgy" + "Handoff*.plist",
+)
+prod_plist = prefs_dir / "dev.semanticcraft.codex-agy-sync.plist"
+xctest_plist = prefs_dir / "com.apple.dt.xctest.tool.plist"
+
+def collect_plists() -> set[pathlib.Path]:
+    if not prefs_dir.is_dir():
+        return set()
+    found: set[pathlib.Path] = set()
+    for pat in patterns:
+        found.update(prefs_dir.glob(pat))
+    return found
+
+def plist_stat_sig(path: pathlib.Path) -> tuple[int, int] | None:
+    try:
+        st = path.lstat()
+        return (st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
+        return None
+
+before_plists = collect_plists()
+before_prod_sig = plist_stat_sig(prod_plist)
+
+res = subprocess.run(["swift", "test", "--package-path", "macos", "--scratch-path", "out/swift-test-check"])
+
+after_plists = collect_plists()
+after_prod_sig = plist_stat_sig(prod_plist)
+
+errors: list[str] = []
+leaked = sorted(str(p) for p in (after_plists - before_plists))
+if leaked:
+    errors.append(f"ERROR: Swift tests leaked {len(leaked)} plist file(s) into ~/Library/Preferences:")
+    for p in leaked:
+        errors.append(f"  {p}")
+
+if after_prod_sig != before_prod_sig:
+    errors.append(
+        f"ERROR: Production plist {prod_plist} was mutated during Swift tests "
+        f"(before={before_prod_sig}, after={after_prod_sig})"
+    )
+
+if xctest_plist.is_file():
+    try:
+        with xctest_plist.open("rb") as fh:
+            xctest_data = plistlib.load(fh)
+        if isinstance(xctest_data, dict):
+            leaked_keys = [k for k in ("appPreferences", "cliExecutablePath") if k in xctest_data]
+            if leaked_keys:
+                errors.append(
+                    f"ERROR: Swift tests polluted {xctest_plist} with keys: {', '.join(leaked_keys)}"
+                )
+    except Exception as exc:
+        errors.append(f"ERROR: Failed to inspect {xctest_plist}: {exc}")
+
+for err in errors:
+    print(err, file=sys.stderr)
+if res.returncode != 0:
+    sys.exit(res.returncode)
+if errors:
+    sys.exit(1)
+PY
 fi
 echo "All checks passed."

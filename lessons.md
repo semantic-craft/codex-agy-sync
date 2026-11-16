@@ -155,3 +155,14 @@
 - 正确做法（Done right）：破坏性 CLI 契约变更必升版本号；Bundle ID 变更必配一次性只读偏好迁移与旧包 LaunchServices 注销；用 `scripts/check` 词法扫描守住全部用户可见文案边界。
 - 验证点：运行 `./scripts/check` 与 `python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py suite`。
 - 复发记录：Seen 1x (2026-11-16)，由实屏截图核验与三模型 `/interrogate` 对抗审查捕获并固化。
+
+### 测试套件与退役域偏好清理必须强制同步并显式解除磁盘 plist 链接
+
+**macOS 下 `UserDefaults.removePersistentDomain(forName:)` 会驱动 `cfprefsd` 向 `~/Library/Preferences/<suite>.plist` 写入 42 字节空 `bplist00` 文件，且 XCTest 进程中未隔离的 `PreferencesStore()` 会污染 `com.apple.dt.xctest.tool` 域或误触宿主清理；偏好清理必须通过 `CFPreferencesCopyKeyList` 枚举键集清空后调用 `CFPreferencesSynchronize(..., kCFPreferencesCurrentUser, kCFPreferencesAnyHost)` 与 `CFPreferencesAppSynchronize` 并显式 `removeItem`，同时以 `PreferencesStore.isProductionAppBundleProcess` 严格隔离宿主持久化。**
+
+- 标签：#macOS原生 #测试隔离 #残余清理
+- 起因与后果：单元测试仅调用 `defaults.removePersistentDomain(forName:)` 或传入 `CFPreferencesSetMultiple(nil, nil, ...)`（空键表在 CoreFoundation 中为无操作）会让 `cfprefsd` 在 `~/Library/Preferences/` 残留 42 字节空 plist 孤儿文件；同时非正式 `.app` 捆绑包进程（如 `xctest`）若在默认参数下隐式读写 `UserDefaults.standard` 或在 `probeEnvironment` 触发宿主残余清理，会向 `com.apple.dt.xctest.tool.plist` 写入 `appPreferences`/`cliExecutablePath` 并干扰宿主目录。
+- 修复与证据：在 `cleanupIsolatedTestDefaults` 与 `UpdatePathGuard.cleanupLegacyUpdateResidue` 中通过 `CFPreferencesCopyKeyList` 获取 `AnyHost` 与 `CurrentHost` 真实键列表并传入 `CFPreferencesSetMultiple(nil, ...)`，同步执行 `CFPreferencesSynchronize(..., kCFPreferencesCurrentUser, kCFPreferencesAnyHost)` 与 `CFPreferencesAppSynchronize` 后再 `removeItem` 删除 plist（含悬空符号链接）；新增 `PreferencesStore.isProductionAppBundleProcess` 使测试中未显式指定 suite 的 `PreferencesStore` 仅在内存中运行且不触发宿主清理，正式应用则在退役旧域前先同步刷盘主域；在 `scripts/check` `[5b/5]` 监控 4 类 plist 通配符、校验正式 `dev.semanticcraft.codex-agy-sync.plist` 的 `(st_mtime_ns, st_size)` 未被篡改并核查 `com.apple.dt.xctest.tool.plist` 无键污染。
+- 正确做法（Done right）：凡清理临时测试 `UserDefaults` 域或退役历史 Bundle ID 域，必须用 `CFPreferencesCopyKeyList` 显式清空键集并执行 `CFPreferencesSynchronize(..., kCFPreferencesCurrentUser, kCFPreferencesAnyHost)` + `CFPreferencesAppSynchronize` + `FileManager.removeItem`；宿主级默认存储读写与历史目录回收集体收口于 `PreferencesStore.isProductionAppBundleProcess` 守卫之后。
+- 验证点：运行 `./scripts/check`，确认 `[5b/5]` 全部泄漏与宿主不变性断言通过，且 `testCleanupIsolatedTestDefaultsRemovesPlistFileFromDisk`、`testCleanupLegacyUpdateResidueRemovesLegacyDirsAndPlistsWhilePreservingCurrent` 与 `testUnisolatedPreferencesStoreInTestsSkipsHostPersistence` 均通过。
+- 复发记录：Seen 1x (2026-11-16)，由单元测试磁盘 plist 泄漏核验与三模型 /interrogate 对抗审查捕获并修复。

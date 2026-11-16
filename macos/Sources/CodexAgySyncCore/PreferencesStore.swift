@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import CoreFoundation
 import Foundation
 import ServiceManagement
 
@@ -310,8 +311,16 @@ public final class PreferencesStore: ObservableObject {
     public nonisolated static let preferencesDefaultsKey = "appPreferences"
     public nonisolated static let prefsSuiteEnvKey = "MENUBAR_PREFS_SUITE"
     public nonisolated static let disableLoginItemEnvKey = "MENUBAR_DISABLE_LOGIN_ITEM"
+    public nonisolated static let appBundleIdentifier = "dev.semanticcraft.codex-agy-sync"
+    public nonisolated static let legacyAppName = ["Codex", "Agy", "Hand" + "off"].joined()
     public nonisolated static let legacyPreferencesSuiteName =
         "dev.semanticcraft." + ["codex", "agy", "hand" + "off"].joined(separator: "-")
+
+    public nonisolated static var isProductionAppBundleProcess: Bool {
+        Bundle.main.bundleIdentifier == appBundleIdentifier
+            && NSClassFromString("XCTestCase") == nil
+            && ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+    }
 
     @Published public private(set) var preferences: AppPreferences
     @Published public private(set) var effectiveLanguage: ResolvedLanguage
@@ -321,6 +330,8 @@ public final class PreferencesStore: ObservableObject {
     @Published public private(set) var hotKeyRegistrationFailed: Bool = false
 
     public let defaults: UserDefaults
+    public let usesHostStandardDefaults: Bool
+    private let skipsImplicitStandardPersistence: Bool
     private let loginItemManager: any LoginItemManaging
     private let preferredLanguagesProvider: @Sendable () -> [String]
     nonisolated(unsafe) private var localeObserver: NSObjectProtocol?
@@ -362,25 +373,45 @@ public final class PreferencesStore: ObservableObject {
         self.preferredLanguagesProvider = preferredLanguagesProvider
 
         let explicitSuite = (environment[Self.prefsSuiteEnvKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let isImplicitStandard = (defaults == nil && explicitSuite.isEmpty)
+        let usesHostStandardDefaults = (isImplicitStandard && legacyDefaults == nil && Self.isProductionAppBundleProcess)
+        let skipsImplicitStandardPersistence = (isImplicitStandard && !Self.isProductionAppBundleProcess)
+        self.usesHostStandardDefaults = usesHostStandardDefaults
+        self.skipsImplicitStandardPersistence = skipsImplicitStandardPersistence
+
         let fallbackDefaults: UserDefaults?
         if let legacyDefaults {
             fallbackDefaults = legacyDefaults
-        } else if defaults == nil, explicitSuite.isEmpty {
+        } else if usesHostStandardDefaults {
             fallbackDefaults = UserDefaults(suiteName: Self.legacyPreferencesSuiteName)
         } else {
             fallbackDefaults = nil
         }
 
-        let loaded = Self.loadPreferencesWithLegacyFallback(
-            from: resolvedDefaults,
-            legacyDefaults: fallbackDefaults
-        )
+        let loaded: AppPreferences
+        if skipsImplicitStandardPersistence, legacyDefaults == nil {
+            loaded = AppPreferences()
+        } else {
+            loaded = Self.loadPreferencesWithLegacyFallback(
+                from: resolvedDefaults,
+                legacyDefaults: fallbackDefaults
+            )
+        }
 
         self.preferences = loaded
         self.effectiveLanguage = loaded.language.resolve(preferredLanguages: preferredLanguagesProvider())
         self.launchAtLogin = resolvedLoginManager.isEnabled
         self.loginItemError = nil
         persist(loaded)
+        if usesHostStandardDefaults {
+            _ = CFPreferencesAppSynchronize(Self.appBundleIdentifier as CFString)
+            _ = CFPreferencesSynchronize(
+                Self.appBundleIdentifier as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost
+            )
+            UpdatePathGuard.cleanupLegacyUpdateResidue(removeLegacyPreferencesDomains: true)
+        }
 
         self.localeObserver = NotificationCenter.default.addObserver(
             forName: NSLocale.currentLocaleDidChangeNotification,
@@ -484,6 +515,7 @@ public final class PreferencesStore: ObservableObject {
 
     public func resetCustomCLIPath() {
         update { $0.customCLIPath = nil }
+        guard !skipsImplicitStandardPersistence else { return }
         defaults.removeObject(forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
     }
 
@@ -552,6 +584,7 @@ public final class PreferencesStore: ObservableObject {
     }
 
     private func persist(_ value: AppPreferences) {
+        guard !skipsImplicitStandardPersistence else { return }
         if let encoded = try? JSONEncoder().encode(value),
            let jsonObject = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]
         {

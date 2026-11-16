@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import Combine
+import CoreFoundation
 import Foundation
 import XCTest
 @testable import CodexAgySyncCore
@@ -150,14 +151,27 @@ final class PreferencesAndUpdateTests: XCTestCase {
     private func makeIsolatedDefaults() -> (UserDefaults, String) {
         let suiteName = "dev.semanticcraft.codex-agy-sync.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
         return (defaults, suiteName)
+    }
+
+    private func makeSandboxDir() throws -> URL {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let dir = repoRoot
+            .appendingPathComponent("out", isDirectory: true)
+            .appendingPathComponent("test-sandboxes", isDirectory: true)
+            .appendingPathComponent("sandbox-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }
 
     @MainActor
     func testPreferencesPersistenceMigrationAndLoginItemToggle() throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         defaults.set("/custom/legacy/codex-agy-sync", forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
 
@@ -260,7 +274,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testHandoffViewModelRespectsDynamicFeedLimitActivationPreferenceAndAttentionBadge() async {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
         prefs.setRecentFeedLimit(4)
@@ -395,7 +409,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testUpdateViewModelAlignmentReleaseCheckAndChecksumVerification() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-update-test-\(UUID().uuidString)", isDirectory: true)
@@ -544,7 +558,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testUpdateViewModelLocalRepoSync() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-localrepo-\(UUID().uuidString)", isDirectory: true)
@@ -663,7 +677,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testTmpRepoPathRejectedAcrossDiscoveryValidationAndSync() async {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         XCTAssertFalse(UpdateViewModel.isValidSourceRepo(URL(fileURLWithPath: "/tmp/codex-agy-sync")))
         XCTAssertFalse(UpdateViewModel.isValidSourceRepo(URL(fileURLWithPath: "/private/tmp/codex-agy-sync")))
@@ -702,7 +716,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testTargetBundleWritabilityCheckedBeforePipMutation() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-writable-\(UUID().uuidString)", isDirectory: true)
@@ -780,7 +794,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testFailedCodesignAbortsBeforePipInstallInReleaseAndLocalSync() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-codesign-\(UUID().uuidString)", isDirectory: true)
@@ -898,7 +912,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testPendingRelaunchVersionKeepsAlignedAndCliUnavailableNeverReportsUpToDate() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-relaunch-\(UUID().uuidString)", isDirectory: true)
@@ -1010,7 +1024,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testPipBreakSystemPackagesConditionalAndShebangPythonResolution() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-shebang-\(UUID().uuidString)", isDirectory: true)
@@ -1144,7 +1158,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(decodedLegacy.recentFeedLimit, 4)
 
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let store = PreferencesStore(
             defaults: defaults,
@@ -1254,7 +1268,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testAutoUpdatePolicyCooldownFailureBackoffAndCheckpointIsolation() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-policy-\(UUID().uuidString)", isDirectory: true)
@@ -1358,7 +1372,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testAutoStageLocalRepoGuardrailPersistenceAndDirectoryPruning() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-autostage-\(UUID().uuidString)", isDirectory: true)
@@ -1497,7 +1511,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testInstallStagedAndRelaunchRespectsCanMutateGuardAndRelaunchHooks() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-install-staged-\(UUID().uuidString)", isDirectory: true)
@@ -1657,7 +1671,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(AppLanguage.system.resolve(preferredLanguages: ["zh-Hant-MO", "en-US"]), .en)
 
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let localeLock = NSLock()
         nonisolated(unsafe) var systemLanguages = ["en-US"]
@@ -1679,7 +1693,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testAutoStageFailureEnforcesOneHourBackoffWithoutThrashing() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-autostage-backoff-\(UUID().uuidString)", isDirectory: true)
@@ -1814,7 +1828,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testReconcilePersistedStagedVersionPrecedenceRepoGuardAndFailureRecovery() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-reconcile-\(UUID().uuidString)", isDirectory: true)
@@ -2094,7 +2108,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         }
 
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-concurrency-\(UUID().uuidString)", isDirectory: true)
@@ -2357,7 +2371,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         }
 
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-skipreplace-\(UUID().uuidString)", isDirectory: true)
@@ -2452,8 +2466,8 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let (primary, primarySuite) = makeIsolatedDefaults()
         let (legacy, legacySuite) = makeIsolatedDefaults()
         defer {
-            primary.removePersistentDomain(forName: primarySuite)
-            legacy.removePersistentDomain(forName: legacySuite)
+            cleanupIsolatedTestDefaults(primary, suiteName: primarySuite)
+            cleanupIsolatedTestDefaults(legacy, suiteName: legacySuite)
         }
 
         let expectedLegacyDomain = "dev.semanticcraft." + ["codex", "agy", "hand" + "off"].joined(separator: "-")
@@ -2510,7 +2524,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     @MainActor
     func testBundleResolutionRejectsPlainFileAndSymlinkAndRenamesLegacyBundleOnReplace() async throws {
         let (defaults, suiteName) = makeIsolatedDefaults()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-agy-hardening-\(UUID().uuidString)", isDirectory: true)
@@ -2568,7 +2582,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
         let installDir = tempRoot.appendingPathComponent("apps", isDirectory: true)
-        let legacyBundleName = ["Codex", "Agy", "Hand" + "off"].joined() + ".app"
+        let legacyBundleName = PreferencesStore.legacyAppName + ".app"
         let legacyAppURL = installDir.appendingPathComponent(legacyBundleName, isDirectory: true)
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: legacyAppURL, withIntermediateDirectories: true)
@@ -2609,7 +2623,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
         let relaunchMock = StubRelaunchExecutor()
-        let legacyBundleID = "dev.semanticcraft." + ["codex", "agy", "hand" + "off"].joined(separator: "-")
+        let legacyBundleID = PreferencesStore.legacyPreferencesSuiteName
         let vm = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.4.1",
@@ -2643,5 +2657,112 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(vm.currentAppBundleURL?.standardizedFileURL, renamedAppURL.standardizedFileURL)
         XCTAssertTrue(vm.relaunchApp())
         XCTAssertEqual(relaunchMock.relaunchedURLs.map(\.standardizedFileURL), [renamedAppURL.standardizedFileURL])
+
+        try "v0.4.0".write(to: renamedAppURL.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: legacyAppURL, withIntermediateDirectories: true)
+        try "v0.4.1".write(to: legacyAppURL.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+        cliVerLock.withLock { cliVer = "0.4.1" }
+        let vmCollision = UpdateViewModel(
+            preferencesStore: prefs,
+            appVersion: "0.4.1",
+            currentBundleIdentifier: legacyBundleID,
+            currentAppBundleURL: legacyAppURL,
+            environment: ["CODEX_AGY_SYNC_BIN": cliBin.path],
+            commandRunner: runner,
+            httpFetcher: StubHTTPFetcher(routes: [:]),
+            relaunchExecutor: relaunchMock,
+            stagingRootOverride: updatesRoot
+        )
+        await vmCollision.syncFromLocalRepo()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyAppURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamedAppURL.path))
+        XCTAssertEqual(
+            try String(contentsOf: renamedAppURL.appendingPathComponent("version.txt"), encoding: .utf8),
+            "v0.4.2"
+        )
+        XCTAssertEqual(vmCollision.currentAppBundleURL?.standardizedFileURL, renamedAppURL.standardizedFileURL)
+    }
+
+    func testCleanupIsolatedTestDefaultsRemovesPlistFileFromDisk() throws {
+        let (defaults, suiteName) = makeIsolatedDefaults()
+        defer { cleanupIsolatedTestDefaults(defaults, suiteName: suiteName) }
+        defaults.set("test-value", forKey: "test-key")
+        _ = CFPreferencesSynchronize(suiteName as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        _ = CFPreferencesAppSynchronize(suiteName as CFString)
+        let plistURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences", isDirectory: true)
+            .appendingPathComponent("\(suiteName).plist", isDirectory: false)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: plistURL.path))
+        cleanupIsolatedTestDefaults(defaults, suiteName: suiteName)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: plistURL.path))
+    }
+
+    func testCleanupLegacyUpdateResidueRemovesLegacyDirsAndPlistsWhilePreservingCurrent() throws {
+        let sandbox = try makeSandboxDir()
+        let appSupport = sandbox.appendingPathComponent("Application Support", isDirectory: true)
+        let caches = sandbox.appendingPathComponent("Caches", isDirectory: true)
+        let prefs = sandbox.appendingPathComponent("Preferences", isDirectory: true)
+
+        try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: caches, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: prefs, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let legacyAppName = PreferencesStore.legacyAppName
+        let legacyBundleID = PreferencesStore.legacyPreferencesSuiteName
+        let currentAppName = "CodexAgySync"
+        let currentBundleID = PreferencesStore.appBundleIdentifier
+
+        let legacySupport = appSupport.appendingPathComponent(legacyAppName, isDirectory: true)
+        let currentSupport = appSupport.appendingPathComponent(currentAppName, isDirectory: true)
+        let legacyCacheBundle = caches.appendingPathComponent(legacyBundleID, isDirectory: true)
+        let legacyCacheApp = caches.appendingPathComponent(legacyAppName, isDirectory: false)
+        let brokenTarget = sandbox.appendingPathComponent("nonexistent-broken-target", isDirectory: true)
+        let legacyBundlePlist = prefs.appendingPathComponent("\(legacyBundleID).plist", isDirectory: false)
+        let legacyAppPlist = prefs.appendingPathComponent("\(legacyAppName).plist", isDirectory: false)
+        let currentBundlePlist = prefs.appendingPathComponent("\(currentBundleID).plist", isDirectory: false)
+
+        try FileManager.default.createDirectory(at: legacySupport, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: currentSupport, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: legacyCacheBundle, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: legacyCacheApp, withDestinationURL: brokenTarget)
+        try Data("legacy-bundle".utf8).write(to: legacyBundlePlist)
+        try Data("legacy-app".utf8).write(to: legacyAppPlist)
+        try Data("current-bundle".utf8).write(to: currentBundlePlist)
+
+        XCTAssertNotNil(try? FileManager.default.attributesOfItem(atPath: legacyCacheApp.path))
+
+        UpdatePathGuard.cleanupLegacyUpdateResidue(
+            appSupportDirectory: appSupport,
+            cachesDirectory: caches,
+            preferencesDirectory: prefs,
+            removeLegacyPreferencesDomains: true
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacySupport.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyCacheBundle.path))
+        XCTAssertNil(try? FileManager.default.attributesOfItem(atPath: legacyCacheApp.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyBundlePlist.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyAppPlist.path))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: currentSupport.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: currentBundlePlist.path))
+    }
+
+    @MainActor
+    func testUnisolatedPreferencesStoreInTestsSkipsHostPersistence() {
+        XCTAssertFalse(PreferencesStore.isProductionAppBundleProcess)
+        let unisolated = PreferencesStore(loginItemManager: NoOpLoginItemManager())
+        XCTAssertFalse(unisolated.usesHostStandardDefaults)
+        unisolated.setLanguage(.en)
+        unisolated.setCustomCLIPath("/opt/in-memory/codex-agy-sync")
+        XCTAssertEqual(unisolated.preferences.language, .en)
+        XCTAssertEqual(unisolated.preferences.customCLIPath, "/opt/in-memory/codex-agy-sync")
+        XCTAssertNil(UserDefaults.standard.object(forKey: PreferencesStore.preferencesDefaultsKey))
+        XCTAssertNil(UserDefaults.standard.object(forKey: SubprocessCLIClient.cliExecutableDefaultsKey))
+        unisolated.resetCustomCLIPath()
+        XCTAssertNil(unisolated.preferences.customCLIPath)
+        XCTAssertNil(UserDefaults.standard.object(forKey: PreferencesStore.preferencesDefaultsKey))
+        XCTAssertNil(UserDefaults.standard.object(forKey: SubprocessCLIClient.cliExecutableDefaultsKey))
     }
 }
