@@ -8,17 +8,21 @@ public enum MenubarCandidateState: String, Codable, Sendable, Equatable, CaseIte
     case activeRunning = "active_running"
 
     public var statusBadgeText: String {
+        statusBadgeText(in: .zhHans)
+    }
+
+    public func statusBadgeText(in language: ResolvedLanguage) -> String {
         switch self {
         case .interruptedStopped:
-            return "未完成回复"
+            return AppCopy.text(.stateInterruptedBadge, in: language)
         case .completedReady:
-            return "可继续"
+            return AppCopy.text(.stateCompletedBadge, in: language)
         case .pendingReconcile:
-            return "待确认"
+            return AppCopy.text(.statePendingBadge, in: language)
         case .alreadyHanded:
-            return "已同步"
+            return AppCopy.text(.stateHandedBadge, in: language)
         case .activeRunning:
-            return "对话中"
+            return AppCopy.text(.stateActiveBadge, in: language)
         }
     }
 }
@@ -98,43 +102,49 @@ public struct MenubarSessionItem: Codable, Sendable, Equatable, Identifiable {
         HostDisplayMeta.displayName(for: targetHost)
     }
 
-    public func presentation(nowEpoch: Double? = nil) -> MenubarRowPresentation {
+    public func presentation(
+        nowEpoch: Double? = nil,
+        language: ResolvedLanguage = .zhHans
+    ) -> MenubarRowPresentation {
         let monogram = HostDisplayMeta.monogram(for: host)
         let isActionable: Bool
         let subtitle: String
         let selectedActionTitle: String
         let unselectedTrailingTitle: String
+        let turnsText = AppCopy.turnsLabel(turnCount, in: language)
 
         switch state {
         case .interruptedStopped:
             isActionable = true
-            subtitle = "\(workspaceName) · \(turnCount) 轮 · 未完成回复"
-            selectedActionTitle = "用 \(targetDisplayName) 继续"
+            subtitle = "\(workspaceName) · \(turnsText) · \(state.statusBadgeText(in: language))"
+            selectedActionTitle = AppCopy.continueInTarget(targetDisplayName, in: language)
             unselectedTrailingTitle = "→ \(targetDisplayName)"
         case .completedReady:
             isActionable = true
-            var base = "\(workspaceName) · \(turnCount) 轮"
+            var base = "\(workspaceName) · \(turnsText)"
             if let nowEpoch, sortEpoch > 0, nowEpoch >= sortEpoch {
-                base += Self.relativeAgeSuffix(elapsedSeconds: nowEpoch - sortEpoch)
+                base += AppCopy.relativeAgeSuffix(elapsedSeconds: nowEpoch - sortEpoch, in: language)
             }
             subtitle = base
-            selectedActionTitle = "用 \(targetDisplayName) 继续"
+            selectedActionTitle = AppCopy.continueInTarget(targetDisplayName, in: language)
             unselectedTrailingTitle = "→ \(targetDisplayName)"
         case .pendingReconcile:
             isActionable = true
-            subtitle = "\(workspaceName) · 上次切换未完成确认"
-            selectedActionTitle = "重新同步状态"
-            unselectedTrailingTitle = "重试"
+            subtitle = "\(workspaceName) · \(AppCopy.text(.pendingSubtitle, in: language))"
+            selectedActionTitle = AppCopy.text(.pendingActionTitle, in: language)
+            unselectedTrailingTitle = AppCopy.text(.pendingTrailingTitle, in: language)
         case .alreadyHanded:
             isActionable = false
-            subtitle = "\(workspaceName) · \(turnCount) 轮 · 已同步"
-            selectedActionTitle = "已同步"
-            unselectedTrailingTitle = "已同步"
+            subtitle = "\(workspaceName) · \(turnsText) · \(state.statusBadgeText(in: language))"
+            let syncedLabel = state.statusBadgeText(in: language)
+            selectedActionTitle = syncedLabel
+            unselectedTrailingTitle = syncedLabel
         case .activeRunning:
             isActionable = false
-            subtitle = "\(workspaceName) · 对话进行中"
-            selectedActionTitle = "对话中"
-            unselectedTrailingTitle = "对话中"
+            subtitle = "\(workspaceName) · \(AppCopy.text(.activeSubtitle, in: language))"
+            let activeLabel = state.statusBadgeText(in: language)
+            selectedActionTitle = activeLabel
+            unselectedTrailingTitle = activeLabel
         }
 
         let accessibilityLabel = isActionable
@@ -151,18 +161,37 @@ public struct MenubarSessionItem: Codable, Sendable, Equatable, Identifiable {
         )
     }
 
-    private var searchableStateText: String {
+    private var searchableStateTexts: [String] {
         switch state {
         case .interruptedStopped:
-            return "未完成回复"
+            return [
+                AppCopy.text(.stateInterruptedBadge, in: .zhHans),
+                AppCopy.text(.stateInterruptedBadge, in: .en),
+            ]
         case .completedReady:
-            return "可继续"
+            return [
+                AppCopy.text(.stateCompletedBadge, in: .zhHans),
+                AppCopy.text(.stateCompletedBadge, in: .en),
+            ]
         case .pendingReconcile:
-            return "上次切换未完成确认"
+            return [
+                AppCopy.text(.pendingSubtitle, in: .zhHans),
+                AppCopy.text(.pendingSubtitle, in: .en),
+                AppCopy.text(.statePendingBadge, in: .zhHans),
+                AppCopy.text(.statePendingBadge, in: .en),
+            ]
         case .alreadyHanded:
-            return "已同步"
+            return [
+                AppCopy.text(.stateHandedBadge, in: .zhHans),
+                AppCopy.text(.stateHandedBadge, in: .en),
+            ]
         case .activeRunning:
-            return "对话进行中"
+            return [
+                AppCopy.text(.activeSubtitle, in: .zhHans),
+                AppCopy.text(.activeSubtitle, in: .en),
+                AppCopy.text(.stateActiveBadge, in: .zhHans),
+                AppCopy.text(.stateActiveBadge, in: .en),
+            ]
         }
     }
 
@@ -178,30 +207,18 @@ public struct MenubarSessionItem: Codable, Sendable, Equatable, Identifiable {
             || matches(host)
             || matches(sourceDisplayName)
             || matches(targetDisplayName)
-            || matches(searchableStateText)
+            || searchableStateTexts.contains(where: matches)
         {
             return true
         }
         switch state {
         case .interruptedStopped, .completedReady, .alreadyHanded:
             return matches("\(turnCount) 轮")
+                || matches("\(turnCount) turns")
+                || (turnCount == 1 && matches("1 turn"))
         case .pendingReconcile, .activeRunning:
             return false
         }
-    }
-
-    private static func relativeAgeSuffix(elapsedSeconds: Double) -> String {
-        let seconds = max(0, Int(elapsedSeconds))
-        if seconds < 60 {
-            return " · 刚刚"
-        }
-        if seconds < 3600 {
-            return " · \(max(1, seconds / 60)) 分钟前"
-        }
-        if seconds < 86_400 {
-            return " · \(max(1, seconds / 3600)) 小时前"
-        }
-        return " · \(max(1, seconds / 86_400)) 天前"
     }
 
     public init(

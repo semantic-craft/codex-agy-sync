@@ -6,7 +6,8 @@ public enum MenuBarIconRenderer {
     public static let pointSize = NSSize(width: 18, height: 18)
 
     public static func image(
-        showAttentionDot: Bool = false
+        showAttentionDot: Bool = false,
+        language: ResolvedLanguage = .zhHans
     ) -> NSImage {
         let img = NSImage(size: pointSize, flipped: false) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else {
@@ -16,7 +17,7 @@ public enum MenuBarIconRenderer {
             return true
         }
         img.isTemplate = true
-        img.accessibilityDescription = "对话接力"
+        img.accessibilityDescription = AppCopy.text(.statusItemLabel, in: language)
         return img
     }
 

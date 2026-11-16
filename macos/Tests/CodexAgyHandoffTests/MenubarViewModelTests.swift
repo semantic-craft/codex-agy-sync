@@ -1211,6 +1211,128 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertFalse(running.matchesSearchQuery("8 轮"))
     }
 
+    @MainActor
+    func testLiveLanguageSwitchingUpdatesBannerSectionsPresentationAndSearchQuery() async {
+        for key in AppCopyKey.allCases {
+            assertNoForbiddenJargon(AppCopy.text(key, in: .zhHans))
+        }
+
+        let suiteName = "dev.semanticcraft.codex-agy-handoff.lang-vm.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
+
+        let singleTurnReady = makeItem(
+            host: "codex",
+            targetHost: "antigravity",
+            sessionId: "tid-1turn",
+            title: "Verify schema",
+            workspacePath: "/repos/alpha",
+            workspaceName: "alpha",
+            state: .completedReady,
+            sortEpoch: 1_000.0,
+            turnCount: 1
+        )
+        let interrupted = makeItem(
+            host: "antigravity",
+            targetHost: "codex",
+            sessionId: "cid-int",
+            title: "Fix parser",
+            workspacePath: "/repos/beta",
+            workspaceName: "beta",
+            state: .interruptedStopped,
+            turnCount: 4
+        )
+        let pending = makeItem(
+            sessionId: "cid-pend",
+            title: "Sync pending",
+            workspaceName: "gamma",
+            state: .pendingReconcile
+        )
+        let handed = makeItem(
+            sessionId: "cid-done",
+            title: "Shipped",
+            workspaceName: "delta",
+            state: .alreadyHanded,
+            turnCount: 5
+        )
+        let running = makeItem(
+            sessionId: "cid-live",
+            title: "Running",
+            workspaceName: "epsilon",
+            state: .activeRunning
+        )
+
+        let readyEn = singleTurnReady.presentation(nowEpoch: 1_025.0, language: .en)
+        XCTAssertEqual(readyEn.subtitle, "alpha · 1 turn · Just now")
+        XCTAssertEqual(readyEn.selectedActionTitle, "Continue in Antigravity")
+        XCTAssertEqual(singleTurnReady.presentation(nowEpoch: 1_300.0, language: .en).subtitle, "alpha · 1 turn · 5m ago")
+        XCTAssertEqual(singleTurnReady.presentation(nowEpoch: 8_200.0, language: .en).subtitle, "alpha · 1 turn · 2h ago")
+        XCTAssertEqual(singleTurnReady.presentation(nowEpoch: 173_800.0, language: .en).subtitle, "alpha · 1 turn · 2d ago")
+
+        XCTAssertEqual(interrupted.presentation(language: .en).subtitle, "beta · 4 turns · Incomplete Reply")
+        XCTAssertEqual(interrupted.presentation(language: .en).selectedActionTitle, "Continue in Codex")
+        XCTAssertEqual(pending.presentation(language: .en).subtitle, "gamma · Previous handoff unconfirmed")
+        XCTAssertEqual(pending.presentation(language: .en).selectedActionTitle, "Resync Status")
+        XCTAssertEqual(pending.presentation(language: .en).unselectedTrailingTitle, "Retry")
+        XCTAssertEqual(handed.presentation(language: .en).subtitle, "delta · 5 turns · Synced")
+        XCTAssertEqual(running.presentation(language: .en).subtitle, "epsilon · Session active")
+
+        XCTAssertTrue(singleTurnReady.matchesSearchQuery("1 turn"))
+        XCTAssertTrue(singleTurnReady.matchesSearchQuery("ready"))
+        XCTAssertTrue(interrupted.matchesSearchQuery("incomplete reply"))
+        XCTAssertTrue(interrupted.matchesSearchQuery("4 turns"))
+        XCTAssertTrue(pending.matchesSearchQuery("needs confirm"))
+        XCTAssertTrue(pending.matchesSearchQuery("previous handoff unconfirmed"))
+        XCTAssertTrue(handed.matchesSearchQuery("synced"))
+        XCTAssertTrue(running.matchesSearchQuery("session active"))
+
+        let snapshot = MenubarFeedSnapshot(
+            generatedAtIso: "2026-11-16T08:00:00Z",
+            agyDaemonActive: true,
+            codexDaemonActive: true,
+            hero: interrupted,
+            recent: [interrupted, singleTurnReady]
+        )
+        let receipt = HandoffReceiptPayload(
+            workspace: "/repos/beta",
+            sourceHost: "antigravity",
+            sourceId: "cid-int",
+            targetHost: "codex",
+            targetId: "tid-99",
+            title: "Fix parser",
+            status: "ready"
+        )
+        let cli = MockCLIRunner(
+            feedResult: .success(snapshot),
+            handoffResult: .success(receipt),
+            reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/beta"))
+        )
+        let vm = HandoffViewModel(cli: cli, activator: MockActivator(), preferencesStore: prefs)
+
+        await vm.refresh()
+        await vm.performPrimaryAction()
+        XCTAssertEqual(vm.sections.map(\.title), ["继续当前工作", "最近对话"])
+        XCTAssertEqual(vm.banner?.text, "已在 Codex 打开对话 · Fix parser")
+
+        prefs.setLanguage(.en)
+        XCTAssertEqual(vm.sections.map(\.title), ["Continue Current Work", "Recent Sessions"])
+        XCTAssertEqual(vm.banner?.text, "Opened session in Codex · Fix parser")
+
+        cli.setFeedResult(.failure(CLIClientError.cliMissing(searchedLocations: ["/usr/bin/codex-agy-sync"])))
+        await vm.refresh()
+        XCTAssertEqual(vm.banner?.text, AppCopy.text(.cliMissingError, in: .en))
+
+        prefs.setLanguage(.zhHans)
+        XCTAssertEqual(vm.banner?.text, AppCopy.text(.cliMissingError, in: .zhHans))
+
+        let timeoutErr = CLIClientError.timedOut(command: ["menubar-feed"], seconds: 15)
+        XCTAssertTrue(timeoutErr.localizedMessage(in: .zhHans).contains("15 秒"))
+        XCTAssertTrue(timeoutErr.localizedMessage(in: .en).contains("15s"))
+    }
+
     func testRunProcessAsyncDrainGraceCompletesPromptlyWithGrandchildHoldingStdout() async throws {
         let start = Date()
         let out = try await SubprocessCLIClient.runProcessAsync(
@@ -1227,5 +1349,103 @@ final class MenubarViewModelTests: XCTestCase {
             "prompt-line"
         )
         XCTAssertLessThan(elapsed, 1.5)
+    }
+
+    @MainActor
+    func testLocalizedFailureUpdateServiceErrorAndUpdaterMutationGuard() async {
+        let httpFailure = LocalizedFailure(error: UpdateServiceError.httpError(statusCode: 503))
+        XCTAssertTrue(httpFailure.text(in: .zhHans).contains("503"))
+        XCTAssertTrue(httpFailure.text(in: .en).contains("Remote release request failed (HTTP 503)"))
+
+        let installFailure = LocalizedFailure(error: UpdateServiceError.updateInstallationInProgress)
+        XCTAssertEqual(installFailure.text(in: .zhHans), AppCopy.text(.updatesErrInstallationInProgress, in: .zhHans))
+        XCTAssertEqual(installFailure.text(in: .en), AppCopy.text(.updatesErrInstallationInProgress, in: .en))
+
+        let suiteName = "dev.semanticcraft.codex-agy-handoff.guard.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
+        let hero = makeItem(sessionId: "cid-guard", state: .completedReady)
+        let pending = makeItem(sessionId: "cid-pend", state: .pendingReconcile)
+        let snapshot = MenubarFeedSnapshot(
+            generatedAtIso: "2026-11-16T08:00:00Z",
+            agyDaemonActive: true,
+            codexDaemonActive: true,
+            hero: hero,
+            recent: [hero, pending]
+        )
+        let receipt = HandoffReceiptPayload(
+            workspace: hero.workspacePath,
+            sourceHost: hero.host,
+            sourceId: hero.sessionId,
+            targetHost: hero.targetHost,
+            targetId: "tid-ok",
+            title: hero.title,
+            status: "ready"
+        )
+        let cli = MockCLIRunner(
+            feedResult: .success(snapshot),
+            handoffResult: .success(receipt),
+            reconcileResult: .success(ReconcileSummaryPayload(workspace: pending.workspacePath))
+        )
+        @MainActor
+        final class GuardState {
+            var updaterInstalling = true
+        }
+        let guardState = GuardState()
+        let vm = HandoffViewModel(
+            cli: cli,
+            activator: MockActivator(),
+            preferencesStore: prefs,
+            canMutateEnvironment: { !guardState.updaterInstalling }
+        )
+
+        await vm.refresh()
+        await vm.handoff(hero)
+        XCTAssertTrue(cli.handoffCalls.isEmpty)
+        XCTAssertEqual(
+            vm.banner,
+            StatusBanner(
+                kind: .error,
+                text: AppCopy.handoffFailedBanner(
+                    AppCopy.text(.updatesErrInstallationInProgress, in: .zhHans),
+                    in: .zhHans
+                )
+            )
+        )
+
+        prefs.setLanguage(.en)
+        XCTAssertEqual(
+            vm.banner,
+            StatusBanner(
+                kind: .error,
+                text: AppCopy.handoffFailedBanner(
+                    AppCopy.text(.updatesErrInstallationInProgress, in: .en),
+                    in: .en
+                )
+            )
+        )
+
+        await vm.reconcile(workspacePath: pending.workspacePath, itemId: pending.id)
+        XCTAssertTrue(cli.reconcileCalls.isEmpty)
+        XCTAssertEqual(
+            vm.banner,
+            StatusBanner(
+                kind: .error,
+                text: AppCopy.reconcileFailedBanner(
+                    AppCopy.text(.updatesErrInstallationInProgress, in: .en),
+                    in: .en
+                )
+            )
+        )
+
+        guardState.updaterInstalling = false
+        await vm.handoff(hero)
+        XCTAssertEqual(cli.handoffCalls.count, 1)
+
+        let updateVM = UpdateViewModel(preferencesStore: prefs, appVersion: "0.4.1")
+        XCTAssertFalse(updateVM.isInstallingUpdate)
     }
 }

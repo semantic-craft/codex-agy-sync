@@ -186,6 +186,7 @@ private struct KeycapBadge: View {
 private struct PaletteSessionRow: View {
     let item: MenubarSessionItem
     let nowEpoch: Double
+    let language: ResolvedLanguage
     let isSelected: Bool
     let isBusy: Bool
     let isDisabled: Bool
@@ -195,7 +196,7 @@ private struct PaletteSessionRow: View {
     @State private var isHovered = false
 
     var body: some View {
-        let presentation = item.presentation(nowEpoch: nowEpoch)
+        let presentation = item.presentation(nowEpoch: nowEpoch, language: language)
         if presentation.isActionable {
             Button(action: onTrigger) {
                 rowContent(presentation: presentation)
@@ -323,12 +324,27 @@ private struct PaletteSessionRow: View {
 public struct PopoverView: View {
     @ObservedObject private var viewModel: HandoffViewModel
     @ObservedObject private var preferencesStore: PreferencesStore
-    private let onOpenSettings: (() -> Void)?
+    @ObservedObject private var updateViewModel: UpdateViewModel
+    private let onOpenSettings: ((SettingsTab) -> Void)?
 
-    public init(viewModel: HandoffViewModel, onOpenSettings: (() -> Void)? = nil) {
+    public init(
+        viewModel: HandoffViewModel,
+        updateViewModel: UpdateViewModel? = nil,
+        onOpenSettings: ((SettingsTab) -> Void)? = nil
+    ) {
         self.viewModel = viewModel
         self.preferencesStore = viewModel.preferencesStore
+        self.updateViewModel = updateViewModel ?? UpdateViewModel(
+            preferencesStore: viewModel.preferencesStore,
+            canMutateEnvironment: { [weak viewModel] in
+                viewModel?.busyItemId == nil
+            }
+        )
         self.onOpenSettings = onOpenSettings
+    }
+
+    private var lang: ResolvedLanguage {
+        preferencesStore.effectiveLanguage
     }
 
     public var body: some View {
@@ -339,6 +355,10 @@ public struct PopoverView: View {
                 bannerSection
             }
             commandStreamSection
+            if let notice = updateViewModel.popoverNotice {
+                hairlineDivider
+                updateNoticeStrip(notice)
+            }
             actionBarFooter
         }
         .frame(width: 392)
@@ -368,8 +388,8 @@ public struct PopoverView: View {
 
             PaletteSearchField(
                 text: $viewModel.searchQuery,
-                placeholder: "筛选项目或对话标题…",
-                accessibilityLabel: "筛选项目或对话标题"
+                placeholder: AppCopy.text(.searchPlaceholder, in: lang),
+                accessibilityLabel: AppCopy.text(.searchAccessibility, in: lang)
             )
             .frame(maxWidth: .infinity, minHeight: 18)
 
@@ -385,7 +405,7 @@ public struct PopoverView: View {
                 }
                 .buttonStyle(FlatSurfaceButtonStyle())
                 .focusEffectDisabled()
-                .accessibilityLabel("清空筛选")
+                .accessibilityLabel(AppCopy.text(.clearSearchAccessibility, in: lang))
                 .accessibilityAction {
                     viewModel.searchQuery = ""
                 }
@@ -433,7 +453,7 @@ public struct PopoverView: View {
                     }
                     .buttonStyle(FlatSurfaceButtonStyle())
                     .focusEffectDisabled()
-                    .accessibilityLabel("关闭提示：\(banner.text)")
+                    .accessibilityLabel(AppCopy.dismissBannerAccessibility(banner.text, in: lang))
                     .accessibilityAction {
                         viewModel.dismissBanner()
                     }
@@ -450,10 +470,11 @@ public struct PopoverView: View {
             }
 
             if viewModel.cliMissing {
+                let chooseTitle = AppCopy.text(.chooseCLIButton, in: lang)
                 Button {
                     pickCLIExecutable()
                 } label: {
-                    Text("选择工具…")
+                    Text(chooseTitle)
                         .font(.system(size: 11.5, weight: .medium))
                         .foregroundStyle(.primary)
                         .padding(.horizontal, 10)
@@ -470,7 +491,7 @@ public struct PopoverView: View {
                 }
                 .buttonStyle(FlatSurfaceButtonStyle())
                 .focusEffectDisabled()
-                .accessibilityLabel("选择工具…")
+                .accessibilityLabel(chooseTitle)
                 .accessibilityAction {
                     pickCLIExecutable()
                 }
@@ -503,6 +524,7 @@ public struct PopoverView: View {
                             PaletteSessionRow(
                                 item: item,
                                 nowEpoch: nowEpoch,
+                                language: lang,
                                 isSelected: viewModel.selectedItemId == item.id,
                                 isBusy: isRowBusy,
                                 isDisabled: viewModel.busyItemId != nil,
@@ -515,38 +537,104 @@ public struct PopoverView: View {
             }
             .padding(6)
         } else if viewModel.snapshot == nil && viewModel.isLoading {
-            emptyStateCard(label: "正在读取最近对话…") {
+            let loadingTitle = AppCopy.text(.loadingSessions, in: lang)
+            emptyStateCard(label: loadingTitle) {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("正在读取最近对话…")
+                    Text(loadingTitle)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
             }
         } else if !viewModel.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            emptyStateCard(label: "未找到匹配的对话 · 换个项目名或关键词试试，按 Esc 清空筛选") {
+            let emptyTitle = AppCopy.text(.searchEmptyTitle, in: lang)
+            let emptyHint = AppCopy.text(.searchEmptyHint, in: lang)
+            emptyStateCard(label: "\(emptyTitle) · \(emptyHint)") {
                 VStack(spacing: 4) {
-                    Text("未找到匹配的对话")
+                    Text(emptyTitle)
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(.primary)
-                    Text("换个项目名或关键词试试，按 Esc 清空筛选")
+                    Text(emptyHint)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
             }
         } else {
-            emptyStateCard(label: "暂无可继续的对话") {
+            let emptyTitle = AppCopy.text(.emptyFeedTitle, in: lang)
+            let emptyHint = AppCopy.text(.emptyFeedHint, in: lang)
+            emptyStateCard(label: emptyTitle) {
                 VStack(spacing: 4) {
-                    Text("暂无可继续的对话")
+                    Text(emptyTitle)
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(.primary)
-                    Text("在 Codex 或 Antigravity 开始对话后会显示在这里")
+                    Text(emptyHint)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
             }
         }
+    }
+
+    private func updateNoticeStrip(_ notice: PopoverUpdateNotice) -> some View {
+        let accentTint: Color = {
+            switch notice.action {
+            case .openUpdatesSettings:
+                return .accentColor
+            case .installStagedAndRelaunch, .relaunchInstalled:
+                return .green
+            }
+        }()
+        let iconName: String = {
+            switch notice.action {
+            case .openUpdatesSettings:
+                return "arrow.down.circle.fill"
+            case .installStagedAndRelaunch:
+                return "checkmark.circle.fill"
+            case .relaunchInstalled:
+                return "arrow.clockwise.circle.fill"
+            }
+        }()
+        let isBusy = updateViewModel.availability.isBusy
+
+        return HStack(spacing: 8) {
+            Image(systemName: iconName)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(accentTint)
+
+            Text(notice.title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                triggerUpdateNoticeAction(notice.action)
+            } label: {
+                Text(notice.actionTitle)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3.5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(isBusy ? accentTint.opacity(0.45) : accentTint)
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(FlatSurfaceButtonStyle())
+            .focusEffectDisabled()
+            .disabled(isBusy)
+            .accessibilityLabel(notice.actionTitle)
+            .accessibilityAction {
+                guard !isBusy else { return }
+                triggerUpdateNoticeAction(notice.action)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(accentTint.opacity(0.08))
     }
 
     private func emptyStateCard<Content: View>(
@@ -563,7 +651,7 @@ public struct PopoverView: View {
     }
 
     private var actionBarFooter: some View {
-        let canContinue = (viewModel.selectedItem?.presentation().isActionable ?? false)
+        let canContinue = (viewModel.selectedItem?.presentation(language: lang).isActionable ?? false)
             && viewModel.busyItemId == nil
 
         return VStack(spacing: 0) {
@@ -574,36 +662,36 @@ public struct PopoverView: View {
                 Spacer(minLength: 4)
 
                 footerChip(
-                    title: "继续",
+                    title: AppCopy.text(.footerContinue, in: lang),
                     shortcut: "↵",
-                    accessibilityLabel: "执行当前选中操作",
+                    accessibilityLabel: AppCopy.text(.footerContinueAX, in: lang),
                     isEnabled: canContinue
                 ) {
                     Task { await viewModel.performSelectedAction() }
                 }
 
                 footerChip(
-                    title: "刷新",
+                    title: AppCopy.text(.footerRefresh, in: lang),
                     shortcut: "⌘R",
-                    accessibilityLabel: "刷新对话列表",
+                    accessibilityLabel: AppCopy.text(.footerRefreshAX, in: lang),
                     isEnabled: !viewModel.isLoading
                 ) {
                     Task { await viewModel.refresh() }
                 }
 
                 footerChip(
-                    title: "设置",
+                    title: AppCopy.text(.footerSettings, in: lang),
                     shortcut: "⌘,",
-                    accessibilityLabel: "打开设置",
+                    accessibilityLabel: AppCopy.text(.footerSettingsAX, in: lang),
                     isEnabled: true
                 ) {
-                    onOpenSettings?()
+                    onOpenSettings?(.general)
                 }
 
                 footerChip(
-                    title: "退出",
+                    title: AppCopy.text(.footerQuit, in: lang),
                     shortcut: "⌘Q",
-                    accessibilityLabel: "退出应用",
+                    accessibilityLabel: AppCopy.text(.footerQuitAX, in: lang),
                     isEnabled: true
                 ) {
                     NSApplication.shared.terminate(nil)
@@ -624,16 +712,16 @@ public struct PopoverView: View {
         switch (agyActive, codexActive) {
         case (true, true):
             dotColor = .green
-            statusText = "双端在线"
+            statusText = AppCopy.text(.daemonBothOnline, in: lang)
         case (true, false):
             dotColor = .orange
-            statusText = "仅 AGY 在线"
+            statusText = AppCopy.text(.daemonAGYOnly, in: lang)
         case (false, true):
             dotColor = .orange
-            statusText = "仅 Codex 在线"
+            statusText = AppCopy.text(.daemonCodexOnly, in: lang)
         case (false, false):
             dotColor = Color.gray.opacity(0.55)
-            statusText = "双端未运行"
+            statusText = AppCopy.text(.daemonBothOffline, in: lang)
         }
 
         return HStack(spacing: 5) {
@@ -704,8 +792,19 @@ public struct PopoverView: View {
         }
     }
 
+    private func triggerUpdateNoticeAction(_ action: PopoverUpdateAction) {
+        switch action {
+        case .openUpdatesSettings:
+            onOpenSettings?(.updates)
+        case .installStagedAndRelaunch:
+            Task { await updateViewModel.installStagedAndRelaunch() }
+        case .relaunchInstalled:
+            _ = updateViewModel.relaunchApp()
+        }
+    }
+
     private func triggerRowAction(_ item: MenubarSessionItem) {
-        guard viewModel.busyItemId == nil, item.presentation().isActionable else { return }
+        guard viewModel.busyItemId == nil, item.presentation(language: lang).isActionable else { return }
         viewModel.selectItem(item.id)
         Task {
             if item.state == .pendingReconcile {
@@ -718,7 +817,7 @@ public struct PopoverView: View {
 
     private func pickCLIExecutable() {
         let panel = NSOpenPanel()
-        panel.title = "选择 codex-agy-sync 命令行工具"
+        panel.title = AppCopy.text(.chooseCLIPanelTitle, in: lang)
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false

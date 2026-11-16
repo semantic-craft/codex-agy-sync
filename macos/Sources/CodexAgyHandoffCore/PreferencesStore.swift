@@ -3,6 +3,36 @@ import Carbon.HIToolbox
 import Foundation
 import ServiceManagement
 
+public enum AutoUpdatePolicy: String, Codable, CaseIterable, Sendable, Identifiable {
+    case off = "off"
+    case checkOnly = "check_only"
+    case autoStage = "auto_stage"
+
+    public var id: String { rawValue }
+
+    public func displayName(in language: ResolvedLanguage) -> String {
+        switch self {
+        case .off:
+            return AppCopy.text(.updatesPolicyOffLabel, in: language)
+        case .checkOnly:
+            return AppCopy.text(.updatesPolicyCheckOnlyLabel, in: language)
+        case .autoStage:
+            return AppCopy.text(.updatesPolicyAutoStageLabel, in: language)
+        }
+    }
+
+    public func helperDescription(in language: ResolvedLanguage) -> String {
+        switch self {
+        case .off:
+            return AppCopy.text(.updatesPolicyOffHelper, in: language)
+        case .checkOnly:
+            return AppCopy.text(.updatesPolicyCheckOnlyHelper, in: language)
+        case .autoStage:
+            return AppCopy.text(.updatesPolicyAutoStageHelper, in: language)
+        }
+    }
+}
+
 public enum HotKeyBehavior: String, Codable, CaseIterable, Sendable, Identifiable {
     case togglePanelOnly = "toggle_panel"
     case instantPrimaryRescue = "instant_rescue"
@@ -10,11 +40,24 @@ public enum HotKeyBehavior: String, Codable, CaseIterable, Sendable, Identifiabl
     public var id: String { rawValue }
 
     public var displayName: String {
+        displayName(in: .zhHans)
+    }
+
+    public func displayName(in language: ResolvedLanguage) -> String {
         switch self {
         case .togglePanelOnly:
-            return "仅展开面板"
+            return AppCopy.text(.hotKeyTogglePanelLabel, in: language)
         case .instantPrimaryRescue:
-            return "展开并立即接力首卡"
+            return AppCopy.text(.hotKeyInstantContinueLabel, in: language)
+        }
+    }
+
+    public func helperDescription(in language: ResolvedLanguage) -> String {
+        switch self {
+        case .togglePanelOnly:
+            return AppCopy.text(.hotKeyTogglePanelHelper, in: language)
+        case .instantPrimaryRescue:
+            return AppCopy.text(.hotKeyInstantContinueHelper, in: language)
         }
     }
 }
@@ -166,6 +209,8 @@ public struct AppPreferences: Codable, Equatable, Sendable {
     public var recentFeedLimit: Int
     public var customCLIPath: String?
     public var localRepoPathForSync: String?
+    public var language: AppLanguage
+    public var autoUpdatePolicy: AutoUpdatePolicy
 
     public init(
         showAttentionDotOnStatusIcon: Bool = true,
@@ -174,7 +219,9 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         activateTargetAppAfterHandoff: Bool = true,
         recentFeedLimit: Int = 6,
         customCLIPath: String? = nil,
-        localRepoPathForSync: String? = nil
+        localRepoPathForSync: String? = nil,
+        language: AppLanguage = .zhHans,
+        autoUpdatePolicy: AutoUpdatePolicy = .checkOnly
     ) {
         self.showAttentionDotOnStatusIcon = showAttentionDotOnStatusIcon
         self.hotKey = hotKey
@@ -183,13 +230,16 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         self.recentFeedLimit = Self.clampFeedLimit(recentFeedLimit)
         self.customCLIPath = Self.normalizedOptionalPath(customCLIPath)
         self.localRepoPathForSync = Self.normalizedOptionalPath(localRepoPathForSync)
+        self.language = language
+        self.autoUpdatePolicy = autoUpdatePolicy
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.showAttentionDotOnStatusIcon = try container.decodeIfPresent(Bool.self, forKey: .showAttentionDotOnStatusIcon) ?? true
         self.hotKey = try container.decodeIfPresent(HotKeyShortcut.self, forKey: .hotKey) ?? .defaultShortcut
-        self.hotKeyBehavior = try container.decodeIfPresent(HotKeyBehavior.self, forKey: .hotKeyBehavior) ?? .instantPrimaryRescue
+        let rawHotKeyBehavior = try container.decodeIfPresent(String.self, forKey: .hotKeyBehavior)
+        self.hotKeyBehavior = rawHotKeyBehavior.flatMap(HotKeyBehavior.init(rawValue:)) ?? .instantPrimaryRescue
         self.activateTargetAppAfterHandoff = try container.decodeIfPresent(Bool.self, forKey: .activateTargetAppAfterHandoff) ?? true
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .recentFeedLimit) ?? 6
         self.recentFeedLimit = Self.clampFeedLimit(rawLimit)
@@ -197,6 +247,10 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         self.customCLIPath = Self.normalizedOptionalPath(rawCLI)
         let rawRepo = try container.decodeIfPresent(String.self, forKey: .localRepoPathForSync)
         self.localRepoPathForSync = Self.normalizedOptionalPath(rawRepo)
+        let rawLanguage = try container.decodeIfPresent(String.self, forKey: .language)
+        self.language = rawLanguage.flatMap(AppLanguage.init(rawValue:)) ?? .zhHans
+        let rawAutoUpdatePolicy = try container.decodeIfPresent(String.self, forKey: .autoUpdatePolicy)
+        self.autoUpdatePolicy = rawAutoUpdatePolicy.flatMap(AutoUpdatePolicy.init(rawValue:)) ?? .checkOnly
     }
 
     private static func clampFeedLimit(_ value: Int) -> Int {
@@ -258,6 +312,7 @@ public final class PreferencesStore: ObservableObject {
     public nonisolated static let disableLoginItemEnvKey = "MENUBAR_DISABLE_LOGIN_ITEM"
 
     @Published public private(set) var preferences: AppPreferences
+    @Published public private(set) var effectiveLanguage: ResolvedLanguage
     @Published public private(set) var launchAtLogin: Bool
     @Published public private(set) var loginItemError: String?
     @Published public private(set) var isRecordingShortcut: Bool = false
@@ -265,6 +320,8 @@ public final class PreferencesStore: ObservableObject {
 
     public let defaults: UserDefaults
     private let loginItemManager: any LoginItemManaging
+    private let preferredLanguagesProvider: @Sendable () -> [String]
+    nonisolated(unsafe) private var localeObserver: NSObjectProtocol?
 
     public nonisolated static func resolveDefaults(
         suiteName: String? = nil,
@@ -292,12 +349,14 @@ public final class PreferencesStore: ObservableObject {
     public init(
         defaults: UserDefaults? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        loginItemManager: (any LoginItemManaging)? = nil
+        loginItemManager: (any LoginItemManaging)? = nil,
+        preferredLanguagesProvider: @escaping @Sendable () -> [String] = { Locale.preferredLanguages }
     ) {
         let resolvedDefaults = defaults ?? Self.resolveDefaults(environment: environment)
         let resolvedLoginManager = loginItemManager ?? Self.defaultLoginItemManager(environment: environment)
         self.defaults = resolvedDefaults
         self.loginItemManager = resolvedLoginManager
+        self.preferredLanguagesProvider = preferredLanguagesProvider
 
         var loaded = Self.loadPreferences(from: resolvedDefaults)
         if loaded.customCLIPath == nil,
@@ -310,9 +369,32 @@ public final class PreferencesStore: ObservableObject {
         }
 
         self.preferences = loaded
+        self.effectiveLanguage = loaded.language.resolve(preferredLanguages: preferredLanguagesProvider())
         self.launchAtLogin = resolvedLoginManager.isEnabled
         self.loginItemError = nil
         persist(loaded)
+
+        self.localeObserver = NotificationCenter.default.addObserver(
+            forName: NSLocale.currentLocaleDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    self?.refreshEffectiveLanguage()
+                }
+            } else {
+                Task { @MainActor [weak self] in
+                    self?.refreshEffectiveLanguage()
+                }
+            }
+        }
+    }
+
+    deinit {
+        if let localeObserver {
+            NotificationCenter.default.removeObserver(localeObserver)
+        }
     }
 
     public func update(_ transform: (inout AppPreferences) -> Void) {
@@ -325,11 +407,29 @@ public final class PreferencesStore: ObservableObject {
             activateTargetAppAfterHandoff: next.activateTargetAppAfterHandoff,
             recentFeedLimit: next.recentFeedLimit,
             customCLIPath: next.customCLIPath,
-            localRepoPathForSync: next.localRepoPathForSync
+            localRepoPathForSync: next.localRepoPathForSync,
+            language: next.language,
+            autoUpdatePolicy: next.autoUpdatePolicy
         )
         guard next != preferences else { return }
         preferences = next
         persist(next)
+        refreshEffectiveLanguage()
+    }
+
+    public func refreshEffectiveLanguage() {
+        let resolved = preferences.language.resolve(preferredLanguages: preferredLanguagesProvider())
+        if effectiveLanguage != resolved {
+            effectiveLanguage = resolved
+        }
+    }
+
+    public func setLanguage(_ language: AppLanguage) {
+        update { $0.language = language }
+    }
+
+    public func setAutoUpdatePolicy(_ policy: AutoUpdatePolicy) {
+        update { $0.autoUpdatePolicy = policy }
     }
 
     public func setShowAttentionDot(_ enabled: Bool) {

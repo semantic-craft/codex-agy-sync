@@ -156,6 +156,7 @@ payload = {
     "CFBundleIconName": "AppIcon",
     "CFBundleIdentifier": bundle_id,
     "CFBundleInfoDictionaryVersion": "6.0",
+    "CFBundleLocalizations": ["zh-Hans", "en"],
     "CFBundleName": app_name,
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": app_version,
