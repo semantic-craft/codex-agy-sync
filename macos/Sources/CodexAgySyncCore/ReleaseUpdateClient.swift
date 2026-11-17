@@ -68,18 +68,26 @@ struct ReleaseUpdateClient: Sendable {
             let wheelDest = try UpdatePathGuard.stagedAssetFileURL(for: wheelAsset.name, in: stagingDir)
             let safeWheelName = wheelDest.lastPathComponent
             await onStep(.downloadingWheel(fileName: safeWheelName))
-            let (wheelData, wheelStatus) = try await httpFetcher.fetchData(
+            let wheelStatus = try await httpFetcher.downloadFile(
                 from: wheelAsset.browserDownloadURL,
                 headers: ["User-Agent": "CodexAgySync/\(appVersion)"],
-                timeoutSeconds: 30.0
+                timeoutSeconds: 30.0,
+                to: wheelDest
             )
             guard (200..<300).contains(wheelStatus) else {
                 throw UpdateServiceError.httpError(statusCode: wheelStatus)
             }
-            try SHA256Verifier.verify(data: wheelData, assetName: safeWheelName, checksums: checksums)
-            try wheelData.write(to: wheelDest, options: .atomic)
+            do {
+                wheelSHA256 = try SHA256Verifier.verify(
+                    fileURL: wheelDest,
+                    assetName: safeWheelName,
+                    checksums: checksums
+                )
+            } catch {
+                try? FileManager.default.removeItem(at: wheelDest)
+                throw error
+            }
             verifiedWheelURL = wheelDest
-            wheelSHA256 = SHA256Verifier.sha256Hex(of: wheelData)
         }
 
         var verifiedZipURL: URL?
@@ -88,16 +96,25 @@ struct ReleaseUpdateClient: Sendable {
             let zipDest = try UpdatePathGuard.stagedAssetFileURL(for: appZipAsset.name, in: stagingDir)
             let safeZipName = zipDest.lastPathComponent
             await onStep(.downloadingAppArchive(fileName: safeZipName))
-            let (zipData, zipStatus) = try await httpFetcher.fetchData(
+            let zipStatus = try await httpFetcher.downloadFile(
                 from: appZipAsset.browserDownloadURL,
                 headers: ["User-Agent": "CodexAgySync/\(appVersion)"],
-                timeoutSeconds: 60.0
+                timeoutSeconds: 60.0,
+                to: zipDest
             )
             guard (200..<300).contains(zipStatus) else {
                 throw UpdateServiceError.httpError(statusCode: zipStatus)
             }
-            try SHA256Verifier.verify(data: zipData, assetName: safeZipName, checksums: checksums)
-            try zipData.write(to: zipDest, options: .atomic)
+            do {
+                _ = try SHA256Verifier.verify(
+                    fileURL: zipDest,
+                    assetName: safeZipName,
+                    checksums: checksums
+                )
+            } catch {
+                try? FileManager.default.removeItem(at: zipDest)
+                throw error
+            }
             verifiedZipURL = zipDest
 
             await onStep(.verifyingAppArchive)

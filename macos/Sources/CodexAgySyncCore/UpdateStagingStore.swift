@@ -137,9 +137,9 @@ struct UpdateStagingStore: Sendable {
         }
         if let wheelName = manifest.wheelFileName {
             guard let wheelURL = try? UpdatePathGuard.stagedAssetFileURL(for: wheelName, in: validatedDir),
-                  let wheelData = try? Data(contentsOf: wheelURL),
                   let expectedSHA = manifest.wheelSHA256?.lowercased(),
-                  SHA256Verifier.sha256Hex(of: wheelData) == expectedSHA
+                  let actualSHA = try? SHA256Verifier.sha256Hex(fileURL: wheelURL),
+                  actualSHA == expectedSHA
             else {
                 return false
             }
@@ -292,9 +292,8 @@ struct UpdateStagingStore: Sendable {
             guard FileManager.default.fileExists(atPath: candidateWheel.path) else {
                 throw UpdateFailureReasonError(.stagedArtifactInvalid("missing wheel \(wheelFileName)"))
             }
-            let wheelData = try Data(contentsOf: candidateWheel)
             guard let expectedSHA = manifest.wheelSHA256?.lowercased(),
-                  SHA256Verifier.sha256Hex(of: wheelData) == expectedSHA
+                  (try? SHA256Verifier.sha256Hex(fileURL: candidateWheel)) == expectedSHA
             else {
                 throw UpdateFailureReasonError(.stagedArtifactInvalid("SHA-256 mismatch for \(wheelFileName)"))
             }

@@ -11,7 +11,8 @@ private struct HostAppSpec: Sendable {
     let fallbackPaths: [String]
 }
 
-public final class WorkspaceAppActivator: AppActivating, @unchecked Sendable {
+@MainActor
+public final class WorkspaceAppActivator: AppActivating {
     private static let hostSpecs: [String: HostAppSpec] = [
         "codex": HostAppSpec(
             bundleIdentifier: "com.openai.codex",
@@ -24,18 +25,10 @@ public final class WorkspaceAppActivator: AppActivating, @unchecked Sendable {
     ]
 
     private let environment: [String: String]
-    private let lock = NSLock()
-    private var recordedHosts: [String] = []
+    public private(set) var recordedActivations: [String] = []
 
     public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.environment = environment
-    }
-
-    public var recordedActivations: [String] {
-        lock.lock()
-        let copy = recordedHosts
-        lock.unlock()
-        return copy
     }
 
     @discardableResult
@@ -46,17 +39,15 @@ public final class WorkspaceAppActivator: AppActivating, @unchecked Sendable {
         }
 
         if environment["MENUBAR_SKIP_APP_ACTIVATION"] == "1" {
-            recordActivation(normalized)
+            recordedActivations.append(normalized)
             return true
         }
 
-        let resolvedURL: URL? = await MainActor.run {
-            let workspace = NSWorkspace.shared
-            return workspace.urlForApplication(withBundleIdentifier: spec.bundleIdentifier)
-                ?? spec.fallbackPaths
-                    .map { URL(fileURLWithPath: $0) }
-                    .first { FileManager.default.fileExists(atPath: $0.path) }
-        }
+        let workspace = NSWorkspace.shared
+        let resolvedURL = workspace.urlForApplication(withBundleIdentifier: spec.bundleIdentifier)
+            ?? spec.fallbackPaths
+                .map { URL(fileURLWithPath: $0) }
+                .first { FileManager.default.fileExists(atPath: $0.path) }
 
         guard let targetURL = resolvedURL else {
             return false
@@ -65,17 +56,11 @@ public final class WorkspaceAppActivator: AppActivating, @unchecked Sendable {
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         do {
-            _ = try await NSWorkspace.shared.openApplication(at: targetURL, configuration: config)
-            recordActivation(normalized)
+            _ = try await workspace.openApplication(at: targetURL, configuration: config)
+            recordedActivations.append(normalized)
             return true
         } catch {
             return false
         }
-    }
-
-    private func recordActivation(_ host: String) {
-        lock.lock()
-        recordedHosts.append(host)
-        lock.unlock()
     }
 }

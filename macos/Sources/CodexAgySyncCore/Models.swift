@@ -7,10 +7,6 @@ public enum MenubarCandidateState: String, Codable, Sendable, Equatable, CaseIte
     case alreadyHanded = "already_handed"
     case activeRunning = "active_running"
 
-    public var statusBadgeText: String {
-        statusBadgeText(in: .zhHans)
-    }
-
     public func statusBadgeText(in language: ResolvedLanguage) -> String {
         switch self {
         case .interruptedStopped:
@@ -307,7 +303,7 @@ public struct MenubarFeedSnapshot: Codable, Sendable, Equatable {
     }
 }
 
-public struct HandoffReceiptPayload: Codable, Sendable, Equatable {
+public struct SyncReceiptPayload: Codable, Sendable, Equatable {
     public let workspace: String
     public let sourceHost: String
     public let sourceId: String

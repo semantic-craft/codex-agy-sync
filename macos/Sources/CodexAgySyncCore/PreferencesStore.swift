@@ -2,6 +2,8 @@ import AppKit
 import Carbon.HIToolbox
 import CoreFoundation
 import Foundation
+import Observation
+import os
 import ServiceManagement
 
 public enum AutoUpdatePolicy: String, Codable, CaseIterable, Sendable, Identifiable {
@@ -39,10 +41,6 @@ public enum HotKeyBehavior: String, Codable, CaseIterable, Sendable, Identifiabl
     case instantPrimaryRescue = "instant_rescue"
 
     public var id: String { rawValue }
-
-    public var displayName: String {
-        displayName(in: .zhHans)
-    }
 
     public func displayName(in language: ResolvedLanguage) -> String {
         switch self {
@@ -202,11 +200,32 @@ public struct HotKeyShortcut: Codable, Equatable, Sendable {
 
 public struct AppPreferences: Codable, Equatable, Sendable {
     public static let supportedFeedLimits: [Int] = [4, 6, 8]
+    private static let legacyActivateTargetKey = "activateTargetAppAfter" + "Hand" + "off"
+
+    private struct DynamicCodingKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+        static func named(_ value: String) -> Self { Self(stringValue: value)! }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case showAttentionDotOnStatusIcon
+        case hotKey
+        case hotKeyBehavior
+        case activateTargetAppAfterSync
+        case recentFeedLimit
+        case customCLIPath
+        case localRepoPathForSync
+        case language
+        case autoUpdatePolicy
+    }
 
     public var showAttentionDotOnStatusIcon: Bool
     public var hotKey: HotKeyShortcut
     public var hotKeyBehavior: HotKeyBehavior
-    public var activateTargetAppAfterHandoff: Bool
+    public var activateTargetAppAfterSync: Bool
     public var recentFeedLimit: Int
     public var customCLIPath: String?
     public var localRepoPathForSync: String?
@@ -217,7 +236,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         showAttentionDotOnStatusIcon: Bool = true,
         hotKey: HotKeyShortcut = .defaultShortcut,
         hotKeyBehavior: HotKeyBehavior = .instantPrimaryRescue,
-        activateTargetAppAfterHandoff: Bool = true,
+        activateTargetAppAfterSync: Bool = true,
         recentFeedLimit: Int = 6,
         customCLIPath: String? = nil,
         localRepoPathForSync: String? = nil,
@@ -227,7 +246,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         self.showAttentionDotOnStatusIcon = showAttentionDotOnStatusIcon
         self.hotKey = hotKey
         self.hotKeyBehavior = hotKeyBehavior
-        self.activateTargetAppAfterHandoff = activateTargetAppAfterHandoff
+        self.activateTargetAppAfterSync = activateTargetAppAfterSync
         self.recentFeedLimit = Self.clampFeedLimit(recentFeedLimit)
         self.customCLIPath = Self.normalizedOptionalPath(customCLIPath)
         self.localRepoPathForSync = Self.normalizedOptionalPath(localRepoPathForSync)
@@ -237,11 +256,14 @@ public struct AppPreferences: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
         self.showAttentionDotOnStatusIcon = try container.decodeIfPresent(Bool.self, forKey: .showAttentionDotOnStatusIcon) ?? true
         self.hotKey = try container.decodeIfPresent(HotKeyShortcut.self, forKey: .hotKey) ?? .defaultShortcut
         let rawHotKeyBehavior = try container.decodeIfPresent(String.self, forKey: .hotKeyBehavior)
         self.hotKeyBehavior = rawHotKeyBehavior.flatMap(HotKeyBehavior.init(rawValue:)) ?? .instantPrimaryRescue
-        self.activateTargetAppAfterHandoff = try container.decodeIfPresent(Bool.self, forKey: .activateTargetAppAfterHandoff) ?? true
+        let decodedActivate = try container.decodeIfPresent(Bool.self, forKey: .activateTargetAppAfterSync)
+            ?? dynamic.decodeIfPresent(Bool.self, forKey: .named(Self.legacyActivateTargetKey))
+        self.activateTargetAppAfterSync = decodedActivate ?? true
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .recentFeedLimit) ?? 6
         self.recentFeedLimit = Self.clampFeedLimit(rawLimit)
         let rawCLI = try container.decodeIfPresent(String.self, forKey: .customCLIPath)
@@ -252,6 +274,19 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         self.language = rawLanguage.flatMap(AppLanguage.init(rawValue:)) ?? .zhHans
         let rawAutoUpdatePolicy = try container.decodeIfPresent(String.self, forKey: .autoUpdatePolicy)
         self.autoUpdatePolicy = rawAutoUpdatePolicy.flatMap(AutoUpdatePolicy.init(rawValue:)) ?? .checkOnly
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(showAttentionDotOnStatusIcon, forKey: .showAttentionDotOnStatusIcon)
+        try container.encode(hotKey, forKey: .hotKey)
+        try container.encode(hotKeyBehavior, forKey: .hotKeyBehavior)
+        try container.encode(activateTargetAppAfterSync, forKey: .activateTargetAppAfterSync)
+        try container.encode(recentFeedLimit, forKey: .recentFeedLimit)
+        try container.encodeIfPresent(customCLIPath, forKey: .customCLIPath)
+        try container.encodeIfPresent(localRepoPathForSync, forKey: .localRepoPathForSync)
+        try container.encode(language, forKey: .language)
+        try container.encode(autoUpdatePolicy, forKey: .autoUpdatePolicy)
     }
 
     private static func clampFeedLimit(_ value: Int) -> Int {
@@ -271,7 +306,7 @@ public protocol LoginItemManaging: Sendable {
     func setEnabled(_ enabled: Bool) throws
 }
 
-public final class SMAppServiceLoginItemManager: LoginItemManaging, @unchecked Sendable {
+public struct SMAppServiceLoginItemManager: LoginItemManaging, Sendable {
     public init() {}
 
     public var isEnabled: Bool {
@@ -287,27 +322,27 @@ public final class SMAppServiceLoginItemManager: LoginItemManaging, @unchecked S
     }
 }
 
-public final class NoOpLoginItemManager: LoginItemManaging, @unchecked Sendable {
-    private let lock = NSLock()
-    private var enabledState: Bool
+public final class NoOpLoginItemManager: LoginItemManaging, Sendable {
+    private let enabledState: OSAllocatedUnfairLock<Bool>
 
     public init(initiallyEnabled: Bool = false) {
-        self.enabledState = initiallyEnabled
+        self.enabledState = OSAllocatedUnfairLock(initialState: initiallyEnabled)
     }
 
     public var isEnabled: Bool {
-        lock.withLock { enabledState }
+        enabledState.withLock { $0 }
     }
 
     public func setEnabled(_ enabled: Bool) throws {
-        lock.withLock {
-            enabledState = enabled
+        enabledState.withLock {
+            $0 = enabled
         }
     }
 }
 
 @MainActor
-public final class PreferencesStore: ObservableObject {
+@Observable
+public final class PreferencesStore {
     public nonisolated static let preferencesDefaultsKey = "appPreferences"
     public nonisolated static let prefsSuiteEnvKey = "MENUBAR_PREFS_SUITE"
     public nonisolated static let disableLoginItemEnvKey = "MENUBAR_DISABLE_LOGIN_ITEM"
@@ -322,19 +357,19 @@ public final class PreferencesStore: ObservableObject {
             && ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
     }
 
-    @Published public private(set) var preferences: AppPreferences
-    @Published public private(set) var effectiveLanguage: ResolvedLanguage
-    @Published public private(set) var launchAtLogin: Bool
-    @Published public private(set) var loginItemError: String?
-    @Published public private(set) var isRecordingShortcut: Bool = false
-    @Published public private(set) var hotKeyRegistrationFailed: Bool = false
+    public private(set) var preferences: AppPreferences
+    public private(set) var effectiveLanguage: ResolvedLanguage
+    public private(set) var launchAtLogin: Bool
+    public private(set) var loginItemError: String?
+    public private(set) var isRecordingShortcut: Bool = false
+    public private(set) var hotKeyRegistrationFailed: Bool = false
 
     public let defaults: UserDefaults
     public let usesHostStandardDefaults: Bool
     private let skipsImplicitStandardPersistence: Bool
     private let loginItemManager: any LoginItemManaging
     private let preferredLanguagesProvider: @Sendable () -> [String]
-    nonisolated(unsafe) private var localeObserver: NSObjectProtocol?
+    @ObservationIgnored private nonisolated let localeTaskLock = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
 
     public nonisolated static func resolveDefaults(
         suiteName: String? = nil,
@@ -413,26 +448,19 @@ public final class PreferencesStore: ObservableObject {
             UpdatePathGuard.cleanupLegacyUpdateResidue(removeLegacyPreferencesDomains: true)
         }
 
-        self.localeObserver = NotificationCenter.default.addObserver(
-            forName: NSLocale.currentLocaleDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            if Thread.isMainThread {
-                MainActor.assumeIsolated {
-                    self?.refreshEffectiveLanguage()
-                }
-            } else {
-                Task { @MainActor [weak self] in
-                    self?.refreshEffectiveLanguage()
-                }
+        let task = Task { @MainActor [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: NSLocale.currentLocaleDidChangeNotification) {
+                guard !Task.isCancelled, let self else { break }
+                self.refreshEffectiveLanguage()
             }
         }
+        localeTaskLock.withLock { $0 = task }
     }
 
     deinit {
-        if let localeObserver {
-            NotificationCenter.default.removeObserver(localeObserver)
+        localeTaskLock.withLock {
+            $0?.cancel()
+            $0 = nil
         }
     }
 
@@ -443,7 +471,7 @@ public final class PreferencesStore: ObservableObject {
             showAttentionDotOnStatusIcon: next.showAttentionDotOnStatusIcon,
             hotKey: next.hotKey,
             hotKeyBehavior: next.hotKeyBehavior,
-            activateTargetAppAfterHandoff: next.activateTargetAppAfterHandoff,
+            activateTargetAppAfterSync: next.activateTargetAppAfterSync,
             recentFeedLimit: next.recentFeedLimit,
             customCLIPath: next.customCLIPath,
             localRepoPathForSync: next.localRepoPathForSync,
@@ -501,8 +529,8 @@ public final class PreferencesStore: ObservableObject {
         update { $0.hotKeyBehavior = behavior }
     }
 
-    public func setActivateTargetAppAfterHandoff(_ enabled: Bool) {
-        update { $0.activateTargetAppAfterHandoff = enabled }
+    public func setActivateTargetAppAfterSync(_ enabled: Bool) {
+        update { $0.activateTargetAppAfterSync = enabled }
     }
 
     public func setRecentFeedLimit(_ limit: Int) {

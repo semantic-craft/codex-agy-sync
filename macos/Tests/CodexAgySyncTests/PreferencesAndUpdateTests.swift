@@ -1,6 +1,5 @@
 import AppKit
 import Carbon.HIToolbox
-import Combine
 import Foundation
 import XCTest
 @testable import CodexAgySyncCore
@@ -110,10 +109,10 @@ private final class StubRelaunchExecutor: RelaunchExecuting, @unchecked Sendable
 private final class SimpleFeedCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
     private let lock = NSLock()
     var snapshot: MenubarFeedSnapshot
-    var receipt: HandoffReceiptPayload
+    var receipt: SyncReceiptPayload
     private(set) var recordedLimits: [Int] = []
 
-    init(snapshot: MenubarFeedSnapshot, receipt: HandoffReceiptPayload) {
+    init(snapshot: MenubarFeedSnapshot, receipt: SyncReceiptPayload) {
         self.snapshot = snapshot
         self.receipt = receipt
     }
@@ -125,7 +124,7 @@ private final class SimpleFeedCLIRunner: CLIRunnerProtocol, @unchecked Sendable 
         }
     }
 
-    func executeHandoff(workspacePath: String, sourceId: String) async throws -> HandoffReceiptPayload {
+    func executeSync(workspacePath: String, sourceId: String) async throws -> SyncReceiptPayload {
         lock.withLock { receipt }
     }
 
@@ -182,12 +181,12 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(store.preferences.hotKey.keyCode, 4)
         XCTAssertEqual(store.preferences.hotKey.carbonModifiers, 6144)
         XCTAssertEqual(store.preferences.hotKeyBehavior, .instantPrimaryRescue)
-        XCTAssertTrue(store.preferences.activateTargetAppAfterHandoff)
+        XCTAssertTrue(store.preferences.activateTargetAppAfterSync)
         XCTAssertEqual(store.preferences.recentFeedLimit, 6)
 
         store.setShowAttentionDot(false)
         store.setHotKeyBehavior(.togglePanelOnly)
-        store.setActivateTargetAppAfterHandoff(false)
+        store.setActivateTargetAppAfterSync(false)
         store.setRecentFeedLimit(8)
         store.setLocalRepoPathForSync("/repos/codex-agy-sync")
 
@@ -205,7 +204,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertFalse(reloaded.preferences.showAttentionDotOnStatusIcon)
         XCTAssertEqual(reloaded.preferences.hotKey, customShortcut)
         XCTAssertEqual(reloaded.preferences.hotKeyBehavior, .togglePanelOnly)
-        XCTAssertFalse(reloaded.preferences.activateTargetAppAfterHandoff)
+        XCTAssertFalse(reloaded.preferences.activateTargetAppAfterSync)
         XCTAssertEqual(reloaded.preferences.recentFeedLimit, 8)
         XCTAssertEqual(reloaded.preferences.localRepoPathForSync, "/repos/codex-agy-sync")
 
@@ -270,14 +269,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
     }
 
     @MainActor
-    func testHandoffViewModelRespectsDynamicFeedLimitActivationPreferenceAndAttentionBadge() async {
+    func testSessionSyncStoreRespectsDynamicFeedLimitActivationPreferenceAndAttentionBadge() async {
         let isolated = makeIsolatedDefaults()
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
         prefs.setRecentFeedLimit(4)
-        prefs.setActivateTargetAppAfterHandoff(false)
+        prefs.setActivateTargetAppAfterSync(false)
 
         let stoppedHero = MenubarSessionItem(
             host: "antigravity",
@@ -301,7 +300,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             hero: stoppedHero,
             recent: [stoppedHero]
         )
-        let receipt = HandoffReceiptPayload(
+        let receipt = SyncReceiptPayload(
             workspace: "/repos/one",
             sourceHost: "antigravity",
             sourceId: "cid-1",
@@ -314,18 +313,18 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let cli = SimpleFeedCLIRunner(snapshot: snapshot, receipt: receipt)
         let activator = RecordingActivator()
         var closeCount = 0
-        let vm = HandoffViewModel(
+        let vm = SessionSyncStore(
             cli: cli,
             activator: activator,
             preferencesStore: prefs,
-            onDidHandoffAndActivate: { closeCount += 1 }
+            onDidSyncAndActivate: { closeCount += 1 }
         )
 
         await vm.refresh()
         XCTAssertEqual(cli.recordedLimits, [4])
         XCTAssertTrue(vm.needsAttentionBadge)
 
-        await vm.handoff(stoppedHero)
+        await vm.sync(stoppedHero)
         XCTAssertTrue(activator.hosts.isEmpty)
         XCTAssertEqual(closeCount, 0)
         if case .success(let text)? = vm.banner {
@@ -335,7 +334,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         }
 
         prefs.setRecentFeedLimit(8)
-        prefs.setActivateTargetAppAfterHandoff(true)
+        prefs.setActivateTargetAppAfterSync(true)
         let readyHero = MenubarSessionItem(
             host: "antigravity",
             targetHost: "codex",
@@ -362,7 +361,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(cli.recordedLimits.last, 8)
         XCTAssertFalse(vm.needsAttentionBadge)
 
-        await vm.handoff(readyHero)
+        await vm.sync(readyHero)
         XCTAssertEqual(activator.hosts, ["codex"])
         XCTAssertEqual(closeCount, 1)
     }
@@ -1315,7 +1314,9 @@ final class PreferencesAndUpdateTests: XCTestCase {
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
         var prefEvents = 0
-        let sub = prefs.$preferences.dropFirst().sink { _ in prefEvents += 1 }
+        let sub = observeContinuously({ prefs.preferences }) { _ in
+            prefEvents += 1
+        }
         defer { sub.cancel() }
 
         let vm = UpdateViewModel(
@@ -1332,11 +1333,13 @@ final class PreferencesAndUpdateTests: XCTestCase {
         )
 
         prefs.setAutoUpdatePolicy(.off)
+        await Task.yield()
         XCTAssertEqual(prefEvents, 1)
         await vm.performOpportunisticCheckIfNeeded(trigger: .appLaunched)
         XCTAssertEqual(fetcher.requestedURLs.count, 0)
 
         prefs.setAutoUpdatePolicy(.checkOnly)
+        await Task.yield()
         XCTAssertEqual(prefEvents, 2)
         await vm.performOpportunisticCheckIfNeeded(trigger: .appLaunched)
         XCTAssertEqual(fetcher.requestedURLs.count, 1)
@@ -1358,12 +1361,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(vm.popoverNotice?.actionTitle, "查看更新")
 
         prefs.setLanguage(.en)
+        await Task.yield()
         XCTAssertEqual(vm.popoverNotice?.actionTitle, "View Update")
         XCTAssertTrue(vm.statusMessage?.contains("New version v0.5.0") == true)
         XCTAssertTrue(vm.lastCheckedDisplayText?.hasPrefix("Last checked:") == true)
         XCTAssertEqual(vm.alignment.badgeTitle(in: .en), "Aligned")
 
         prefs.setLanguage(.zhHans)
+        await Task.yield()
         XCTAssertEqual(vm.popoverNotice?.actionTitle, "查看更新")
         XCTAssertTrue(vm.lastCheckedDisplayText?.hasPrefix("上次检查：") == true)
 
@@ -1620,7 +1625,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let fetchCountAfterStage = fetcher.requestedURLs.count
 
         await vm.installStagedAndRelaunch()
-        XCTAssertEqual(vm.statusMessage, AppCopy.text(.updatesErrHandoffInProgress, in: .zhHans))
+        XCTAssertEqual(vm.statusMessage, AppCopy.text(.updatesErrSyncInProgress, in: .zhHans))
         XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
         XCTAssertTrue(hookState.events.isEmpty)
         XCTAssertEqual(try String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8), "v0.4.1")
@@ -1629,7 +1634,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertNotNil(vm.stagedManifest)
 
         await vm.installStagedAndRelaunch()
-        XCTAssertEqual(vm.statusMessage, AppCopy.text(.updatesErrHandoffInProgress, in: .zhHans))
+        XCTAssertEqual(vm.statusMessage, AppCopy.text(.updatesErrSyncInProgress, in: .zhHans))
 
         hookState.allowMutate = true
         await vm.installStagedAndRelaunch()
@@ -1645,7 +1650,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     }
 
     @MainActor
-    func testAppPreferencesForwardCompatibleDecodingAndLocaleDidChangeNotification() throws {
+    func testAppPreferencesForwardCompatibleDecodingAndLocaleDidChangeNotification() async throws {
         let legacyOrFutureJSON = """
         {
           "showAttentionDotOnStatusIcon": false,
@@ -1669,7 +1674,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(decoded.language, .zhHans)
         XCTAssertEqual(decoded.autoUpdatePolicy, .checkOnly)
         XCTAssertFalse(decoded.showAttentionDotOnStatusIcon)
-        XCTAssertFalse(decoded.activateTargetAppAfterHandoff)
+        XCTAssertFalse(decoded.activateTargetAppAfterSync)
         XCTAssertEqual(decoded.recentFeedLimit, 8)
         XCTAssertEqual(decoded.customCLIPath, "/opt/tools/codex-agy-sync")
         XCTAssertEqual(decoded.localRepoPathForSync, "/repos/codex-agy-sync")
@@ -1695,9 +1700,18 @@ final class PreferencesAndUpdateTests: XCTestCase {
         )
         store.setLanguage(.system)
         XCTAssertEqual(store.effectiveLanguage, .en)
+        for _ in 0..<5 {
+            await Task.yield()
+        }
 
         localeLock.withLock { systemLanguages = ["zh-Hans-CN"] }
         NotificationCenter.default.post(name: NSLocale.currentLocaleDidChangeNotification, object: nil)
+        for _ in 0..<50 {
+            if store.effectiveLanguage == .zhHans {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(store.effectiveLanguage, .zhHans)
     }
 
@@ -2494,7 +2508,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             showAttentionDotOnStatusIcon: false,
             hotKey: .defaultShortcut,
             hotKeyBehavior: .togglePanelOnly,
-            activateTargetAppAfterHandoff: false,
+            activateTargetAppAfterSync: false,
             recentFeedLimit: 10,
             customCLIPath: nil,
             localRepoPathForSync: "/repos/migrated-sync",
@@ -2513,7 +2527,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         )
         XCTAssertFalse(migrated.preferences.showAttentionDotOnStatusIcon)
         XCTAssertEqual(migrated.preferences.hotKeyBehavior, .togglePanelOnly)
-        XCTAssertFalse(migrated.preferences.activateTargetAppAfterHandoff)
+        XCTAssertFalse(migrated.preferences.activateTargetAppAfterSync)
         XCTAssertEqual(migrated.preferences.recentFeedLimit, 10)
         XCTAssertEqual(migrated.preferences.localRepoPathForSync, "/repos/migrated-sync")
         XCTAssertEqual(migrated.preferences.language, .en)
@@ -2780,5 +2794,136 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertNil(unisolated.preferences.customCLIPath)
         XCTAssertNil(UserDefaults.standard.object(forKey: PreferencesStore.preferencesDefaultsKey))
         XCTAssertNil(UserDefaults.standard.object(forKey: SubprocessCLIClient.cliExecutableDefaultsKey))
+    }
+
+    @MainActor
+    func testProbeEnvironmentCoalescesInFlightAndSurfaceOpenRunsSingleProbe() async throws {
+        let isolated = makeIsolatedDefaults()
+        defer { isolated.cleanup() }
+        let defaults = isolated.defaults
+
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-agy-probe-coalesce-\(UUID().uuidString)", isDirectory: true)
+        let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
+
+        final class GatedVersionRunner: SystemCommandRunning, @unchecked Sendable {
+            private let lock = NSLock()
+            private var versionCallCount = 0
+            private var gate: CheckedContinuation<CommandExecutionResult, Never>?
+            private var enteredGate: CheckedContinuation<Void, Never>?
+
+            var calls: Int {
+                lock.withLock { versionCallCount }
+            }
+
+            func waitForGateEntry() async {
+                let alreadyEntered = lock.withLock { gate != nil }
+                if alreadyEntered { return }
+                await withCheckedContinuation { cont in
+                    lock.withLock {
+                        if gate != nil {
+                            cont.resume()
+                        } else {
+                            enteredGate = cont
+                        }
+                    }
+                }
+            }
+
+            func releaseGate(version: String) {
+                let cont = lock.withLock { () -> CheckedContinuation<CommandExecutionResult, Never>? in
+                    let g = gate
+                    gate = nil
+                    return g
+                }
+                cont?.resume(
+                    returning: CommandExecutionResult(
+                        exitCode: 0,
+                        stdout: Data("codex-agy-sync \(version)\n".utf8),
+                        stderr: Data()
+                    )
+                )
+            }
+
+            func run(
+                executableURL: URL,
+                arguments: [String],
+                environment: [String: String],
+                timeoutSeconds: TimeInterval
+            ) async throws -> CommandExecutionResult {
+                if arguments == ["--version"] {
+                    let count = lock.withLock { () -> Int in
+                        versionCallCount += 1
+                        return versionCallCount
+                    }
+                    if count == 1 {
+                        return await withCheckedContinuation { cont in
+                            let entryWaiter = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                                gate = cont
+                                let waiter = enteredGate
+                                enteredGate = nil
+                                return waiter
+                            }
+                            entryWaiter?.resume()
+                        }
+                    }
+                    return CommandExecutionResult(
+                        exitCode: 0,
+                        stdout: Data("codex-agy-sync 0.4.3\n".utf8),
+                        stderr: Data()
+                    )
+                }
+                return CommandExecutionResult(
+                    exitCode: 0,
+                    stdout: Data(#"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null}"#.utf8),
+                    stderr: Data()
+                )
+            }
+        }
+
+        let apiURL = URL(string: "http://127.0.0.1:30109/releases/latest")!
+        let releaseJSON = """
+        {
+          "tag_name": "v0.4.3",
+          "body": "Aligned",
+          "assets": []
+        }
+        """
+        let fetcher = StubHTTPFetcher(routes: [apiURL: (Data(releaseJSON.utf8), 200)])
+        let runner = GatedVersionRunner()
+        let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
+        prefs.setAutoUpdatePolicy(.checkOnly)
+
+        let vm = UpdateViewModel(
+            preferencesStore: prefs,
+            appVersion: "0.4.3",
+            environment: [
+                "CODEX_AGY_SYNC_BIN": cliBin.path,
+                UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
+            ],
+            commandRunner: runner,
+            httpFetcher: fetcher,
+            stagingRootOverride: tempRoot.appendingPathComponent("updates", isDirectory: true)
+        )
+
+        let probeA = Task { await vm.probeEnvironment() }
+        await runner.waitForGateEntry()
+        let probeB = Task { await vm.probeEnvironment() }
+        await Task.yield()
+        XCTAssertEqual(runner.calls, 1)
+        runner.releaseGate(version: "0.4.3")
+        await probeA.value
+        await probeB.value
+        XCTAssertEqual(runner.calls, 1)
+        XCTAssertEqual(vm.alignment, .aligned(version: "0.4.3"))
+
+        await vm.refreshOnSurfaceOpen(trigger: .panelOpened, recoverStagedFromFailure: true)
+        XCTAssertEqual(runner.calls, 2)
+        XCTAssertEqual(fetcher.requestedURLs, [apiURL])
     }
 }

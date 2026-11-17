@@ -1,5 +1,5 @@
-import Combine
 import Foundation
+import Observation
 import SwiftUI
 
 public enum LocalizedFailure: Equatable, Sendable {
@@ -31,36 +31,36 @@ public enum LocalizedFailure: Equatable, Sendable {
     }
 }
 
-public enum HandoffBannerEvent: Equatable, Sendable {
-    case handoffOpened(targetName: String, title: String)
-    case handoffOpenedExisting(targetName: String, title: String)
-    case handoffUnconfirmed
-    case handoffFailed(LocalizedFailure)
+public enum SyncBannerEvent: Equatable, Sendable {
+    case syncOpened(targetName: String, title: String)
+    case syncOpenedExisting(targetName: String, title: String)
+    case syncUnconfirmed
+    case syncFailed(LocalizedFailure)
     case reconcileCompleted(unresolvedCount: Int)
     case reconcileFailed(LocalizedFailure)
     case feedFailed(LocalizedFailure)
 
     public func statusBanner(in language: ResolvedLanguage) -> StatusBanner {
         switch self {
-        case .handoffOpened(let targetName, let title):
+        case .syncOpened(let targetName, let title):
             return StatusBanner(
                 kind: .success,
-                text: AppCopy.handoffOpenedBanner(targetName: targetName, title: title, in: language)
+                text: AppCopy.syncOpenedBanner(targetName: targetName, title: title, in: language)
             )
-        case .handoffOpenedExisting(let targetName, let title):
+        case .syncOpenedExisting(let targetName, let title):
             return StatusBanner(
                 kind: .info,
-                text: AppCopy.handoffOpenedExistingBanner(targetName: targetName, title: title, in: language)
+                text: AppCopy.syncOpenedExistingBanner(targetName: targetName, title: title, in: language)
             )
-        case .handoffUnconfirmed:
+        case .syncUnconfirmed:
             return StatusBanner(
                 kind: .error,
-                text: AppCopy.text(.handoffUnconfirmedBanner, in: language)
+                text: AppCopy.text(.syncUnconfirmedBanner, in: language)
             )
-        case .handoffFailed(let failure):
+        case .syncFailed(let failure):
             return StatusBanner(
                 kind: .error,
-                text: AppCopy.handoffFailedBanner(failure.text(in: language), in: language)
+                text: AppCopy.syncFailedBanner(failure.text(in: language), in: language)
             )
         case .reconcileCompleted(let unresolvedCount):
             return StatusBanner(
@@ -132,24 +132,26 @@ public enum StatusBanner: Equatable, Sendable {
 }
 
 @MainActor
-public final class HandoffViewModel: ObservableObject {
-    @Published public private(set) var snapshot: MenubarFeedSnapshot?
-    @Published public private(set) var isLoading: Bool = false
-    @Published public private(set) var busyItemId: String?
-    @Published public private(set) var bannerEvent: HandoffBannerEvent?
-    @Published public private(set) var cliMissing: Bool = false
-    @Published public var searchQuery: String = "" {
+@Observable
+public final class SessionSyncStore {
+    public private(set) var snapshot: MenubarFeedSnapshot?
+    public private(set) var isLoading: Bool = false
+    public private(set) var busyItemId: String?
+    public private(set) var bannerEvent: SyncBannerEvent?
+    public private(set) var cliMissing: Bool = false
+    public var searchQuery: String = "" {
         didSet {
             if searchQuery != oldValue {
                 reconcileSelection()
             }
         }
     }
-    @Published public private(set) var selectedItemId: String?
+    public private(set) var selectedItemId: String?
+    public private(set) var feedReferenceEpoch: Double
 
     public let preferencesStore: PreferencesStore
-    public var onDidHandoffAndActivate: (() -> Void)?
-    public var canMutateEnvironment: (@MainActor () -> Bool)?
+    @ObservationIgnored public var onDidSyncAndActivate: (() -> Void)?
+    @ObservationIgnored public var canMutateEnvironment: (@MainActor () -> Bool)?
 
     public var banner: StatusBanner? {
         bannerEvent?.statusBanner(in: preferencesStore.effectiveLanguage)
@@ -158,8 +160,8 @@ public final class HandoffViewModel: ObservableObject {
     private let cli: any CLIRunnerProtocol
     private let activator: any AppActivating
     private let explicitFeedLimit: Int?
-    private var activeRefreshTask: Task<Bool, Never>?
-    private var cancellables = Set<AnyCancellable>()
+    private let nowProvider: @Sendable () -> Date
+    @ObservationIgnored private var activeRefreshTask: Task<Bool, Never>?
 
     public var needsAttentionBadge: Bool {
         guard let state = snapshot?.hero?.state else { return false }
@@ -223,8 +225,9 @@ public final class HandoffViewModel: ObservableObject {
         preferencesStore: PreferencesStore? = nil,
         feedLimit: Int? = nil,
         defaults: UserDefaults? = nil,
+        nowProvider: @escaping @Sendable () -> Date = Date.init,
         canMutateEnvironment: (@MainActor () -> Bool)? = nil,
-        onDidHandoffAndActivate: (() -> Void)? = nil
+        onDidSyncAndActivate: (() -> Void)? = nil
     ) {
         self.cli = cli
         self.activator = activator
@@ -241,15 +244,14 @@ public final class HandoffViewModel: ObservableObject {
         }
         self.preferencesStore = store
         self.explicitFeedLimit = feedLimit
+        self.nowProvider = nowProvider
+        self.feedReferenceEpoch = nowProvider().timeIntervalSince1970
         self.canMutateEnvironment = canMutateEnvironment
-        self.onDidHandoffAndActivate = onDidHandoffAndActivate
+        self.onDidSyncAndActivate = onDidSyncAndActivate
+    }
 
-        store.$effectiveLanguage
-            .dropFirst()
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
+    public func updateFeedReferenceTimestamp() {
+        feedReferenceEpoch = nowProvider().timeIntervalSince1970
     }
 
     public func dismissBanner() {
@@ -333,7 +335,7 @@ public final class HandoffViewModel: ObservableObject {
     private func executeItemAction(_ item: MenubarSessionItem) async {
         switch item.state {
         case .interruptedStopped, .completedReady:
-            await handoff(item)
+            await sync(item)
         case .pendingReconcile:
             await reconcile(workspacePath: item.workspacePath, itemId: item.id)
         case .alreadyHanded, .activeRunning:
@@ -341,10 +343,10 @@ public final class HandoffViewModel: ObservableObject {
         }
     }
 
-    public func handoff(_ item: MenubarSessionItem) async {
+    public func sync(_ item: MenubarSessionItem) async {
         guard busyItemId == nil else { return }
         guard canMutateEnvironment?() ?? true else {
-            bannerEvent = .handoffFailed(LocalizedFailure(error: UpdateServiceError.updateInstallationInProgress))
+            bannerEvent = .syncFailed(LocalizedFailure(error: UpdateServiceError.updateInstallationInProgress))
             return
         }
         busyItemId = item.id
@@ -352,7 +354,7 @@ public final class HandoffViewModel: ObservableObject {
         defer { busyItemId = nil }
 
         do {
-            let receipt = try await cli.executeHandoff(
+            let receipt = try await cli.executeSync(
                 workspacePath: item.workspacePath,
                 sourceId: item.sessionId
             )
@@ -361,24 +363,24 @@ public final class HandoffViewModel: ObservableObject {
                 for: receipt.targetHost.isEmpty ? item.targetHost : receipt.targetHost
             )
             if receipt.status == "ready" {
-                bannerEvent = .handoffOpened(targetName: targetName, title: item.title)
-                if preferencesStore.preferences.activateTargetAppAfterHandoff {
+                bannerEvent = .syncOpened(targetName: targetName, title: item.title)
+                if preferencesStore.preferences.activateTargetAppAfterSync {
                     _ = await activator.activateTarget(host: item.targetHost)
-                    onDidHandoffAndActivate?()
+                    onDidSyncAndActivate?()
                 }
             } else if receipt.status == "no_op" {
-                bannerEvent = .handoffOpenedExisting(targetName: targetName, title: item.title)
-                if preferencesStore.preferences.activateTargetAppAfterHandoff {
+                bannerEvent = .syncOpenedExisting(targetName: targetName, title: item.title)
+                if preferencesStore.preferences.activateTargetAppAfterSync {
                     _ = await activator.activateTarget(host: item.targetHost)
-                    onDidHandoffAndActivate?()
+                    onDidSyncAndActivate?()
                 }
             } else {
-                bannerEvent = .handoffUnconfirmed
+                bannerEvent = .syncUnconfirmed
             }
             await refreshFeed(preserveBanner: true)
         } catch {
             updateMissingFlag(for: error)
-            bannerEvent = .handoffFailed(LocalizedFailure(error: error))
+            bannerEvent = .syncFailed(LocalizedFailure(error: error))
         }
     }
 
@@ -440,6 +442,7 @@ public final class HandoffViewModel: ObservableObject {
             do {
                 let nextSnapshot = try await cli.fetchFeed(limit: effectiveFeedLimit)
                 snapshot = nextSnapshot
+                feedReferenceEpoch = nowProvider().timeIntervalSince1970
                 reconcileSelection()
                 cliMissing = false
                 return true

@@ -7,10 +7,6 @@ public enum CLIResolutionSource: String, Codable, Equatable, Sendable {
     case autoDiscovered = "auto_discovered"
     case missing = "missing"
 
-    public var displayName: String {
-        displayName(in: .zhHans)
-    }
-
     public func displayName(in language: ResolvedLanguage) -> String {
         switch self {
         case .envOverride:
@@ -27,7 +23,7 @@ public enum CLIResolutionSource: String, Codable, Equatable, Sendable {
 
 public protocol CLIRunnerProtocol: Sendable {
     func fetchFeed(limit: Int) async throws -> MenubarFeedSnapshot
-    func executeHandoff(workspacePath: String, sourceId: String) async throws -> HandoffReceiptPayload
+    func executeSync(workspacePath: String, sourceId: String) async throws -> SyncReceiptPayload
     func reconcilePending(workspacePath: String?) async throws -> ReconcileSummaryPayload
 }
 
@@ -53,7 +49,7 @@ public enum CLIClientError: LocalizedError, Sendable, Equatable {
     }
 
     public var errorDescription: String? {
-        localizedMessage(in: .zhHans)
+        localizedMessage(in: AppLanguage.system.resolve())
     }
 
     public func localizedMessage(in language: ResolvedLanguage) -> String {
@@ -74,25 +70,34 @@ public enum CLIClientError: LocalizedError, Sendable, Equatable {
     }
 }
 
-private final class LockedBox<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: Value
+private actor CLIEnvironmentScanner {
+    static let shared = CLIEnvironmentScanner()
 
-    init(_ initial: Value) {
-        self.storage = initial
-    }
-
-    func set(_ value: Value) {
-        lock.lock()
-        storage = value
-        lock.unlock()
-    }
-
-    func get() -> Value {
-        lock.lock()
-        let copy = storage
-        lock.unlock()
-        return copy
+    func resolveExecutionContext(
+        executableOverride: URL?,
+        environment: [String: String],
+        customCLIPath: String?
+    ) throws -> (executableURL: URL, childEnv: [String: String]) {
+        let pyBins = SubprocessCLIClient.userPythonBinDirectories()
+        let executableURL: URL
+        if let executableOverride {
+            guard FileManager.default.isExecutableFile(atPath: executableOverride.path) else {
+                throw CLIClientError.cliMissing(searchedLocations: [executableOverride.path])
+            }
+            executableURL = executableOverride
+        } else {
+            let resolved = SubprocessCLIClient.resolveExecutableURL(
+                environment: environment,
+                customCLIPath: customCLIPath,
+                pythonBinDirectories: pyBins
+            )
+            guard let url = resolved.url else {
+                throw CLIClientError.cliMissing(searchedLocations: resolved.searched)
+            }
+            executableURL = url
+        }
+        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment, pythonBinDirectories: pyBins)
+        return (executableURL, childEnv)
     }
 }
 
@@ -115,6 +120,7 @@ private final class AsyncProcessCoordinator: @unchecked Sendable {
     private var terminated = false
     private var exitCode: Int32 = 0
     private var resumed = false
+    private var cancelled = false
 
     init(
         executableURL: URL,
@@ -140,6 +146,13 @@ private final class AsyncProcessCoordinator: @unchecked Sendable {
         continuation: CheckedContinuation<(exitCode: Int32, stdout: Data, stderr: Data), Error>
     ) {
         queue.async {
+            if self.cancelled {
+                guard !self.resumed else { return }
+                self.resumed = true
+                self.cleanup()
+                continuation.resume(throwing: CancellationError())
+                return
+            }
             self.continuation = continuation
             let outHandle = self.stdoutPipe.fileHandleForReading
             let errHandle = self.stderrPipe.fileHandleForReading
@@ -248,25 +261,47 @@ private final class AsyncProcessCoordinator: @unchecked Sendable {
         cont?.resume(throwing: CLIClientError.launchFailed(error.localizedDescription))
     }
 
+    func cancel() {
+        queue.async {
+            self.handleCancel()
+        }
+    }
+
+    private func handleCancel() {
+        cancelled = true
+        guard let cont = continuation, !resumed else { return }
+        resumed = true
+        continuation = nil
+        cleanup()
+        terminateProcessWithEscalation()
+        cont.resume(throwing: CancellationError())
+    }
+
     private func handleTimeout() {
         guard !resumed else { return }
         resumed = true
         cleanup()
-        let proc = process
-        let pid = proc.processIdentifier
-        proc.terminate()
-        queue.asyncAfter(deadline: .now() + 2.0) {
-            if pid > 0 && proc.isRunning {
-                kill(pid, SIGKILL)
-            }
-        }
+        terminateProcessWithEscalation()
         let cont = continuation
         continuation = nil
         cont?.resume(throwing: CLIClientError.timedOut(command: arguments, seconds: timeoutSeconds))
     }
+
+    private func terminateProcessWithEscalation() {
+        let proc = process
+        let pid = proc.processIdentifier
+        if pid > 0 && proc.isRunning {
+            proc.terminate()
+            queue.asyncAfter(deadline: .now() + 2.0) {
+                if pid > 0 && proc.isRunning {
+                    kill(pid, SIGKILL)
+                }
+            }
+        }
+    }
 }
 
-public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
+public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
     public static let cliExecutableDefaultsKey = "cliExecutablePath"
 
     private let defaultsSuiteName: String?
@@ -323,6 +358,22 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         homeDirectory: URL? = nil,
         pythonBinDirectories: [String]? = nil
     ) -> [(path: String, source: CLIResolutionSource)] {
+        candidateExecutableEntries(
+            environment: environment,
+            customCLIPath: defaults.string(forKey: cliExecutableDefaultsKey),
+            fileManager: fileManager,
+            homeDirectory: homeDirectory,
+            pythonBinDirectories: pythonBinDirectories
+        )
+    }
+
+    public static func candidateExecutableEntries(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        customCLIPath: String?,
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil,
+        pythonBinDirectories: [String]? = nil
+    ) -> [(path: String, source: CLIResolutionSource)] {
         var entries: [(path: String, source: CLIResolutionSource)] = []
         var seen = Set<String>()
         let home = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
@@ -344,7 +395,7 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
             return [(expanded, .envOverride)]
         }
 
-        appendCandidate(defaults.string(forKey: cliExecutableDefaultsKey), source: .customPath)
+        appendCandidate(customCLIPath, source: .customPath)
 
         if let pathEnv = environment["PATH"], !pathEnv.isEmpty {
             for dir in pathEnv.split(separator: ":") {
@@ -395,9 +446,25 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         homeDirectory: URL? = nil,
         pythonBinDirectories: [String]? = nil
     ) -> (url: URL?, source: CLIResolutionSource, searched: [String]) {
+        resolveExecutableWithSource(
+            environment: environment,
+            customCLIPath: defaults.string(forKey: cliExecutableDefaultsKey),
+            fileManager: fileManager,
+            homeDirectory: homeDirectory,
+            pythonBinDirectories: pythonBinDirectories
+        )
+    }
+
+    public static func resolveExecutableWithSource(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        customCLIPath: String?,
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil,
+        pythonBinDirectories: [String]? = nil
+    ) -> (url: URL?, source: CLIResolutionSource, searched: [String]) {
         let entries = candidateExecutableEntries(
             environment: environment,
-            defaults: defaults,
+            customCLIPath: customCLIPath,
             fileManager: fileManager,
             homeDirectory: homeDirectory,
             pythonBinDirectories: pythonBinDirectories
@@ -419,6 +486,23 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         let resolved = resolveExecutableWithSource(
             environment: environment,
             defaults: defaults,
+            fileManager: fileManager,
+            homeDirectory: homeDirectory,
+            pythonBinDirectories: pythonBinDirectories
+        )
+        return (resolved.url, resolved.searched)
+    }
+
+    public static func resolveExecutableURL(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        customCLIPath: String?,
+        fileManager: FileManager = .default,
+        homeDirectory: URL? = nil,
+        pythonBinDirectories: [String]? = nil
+    ) -> (url: URL?, searched: [String]) {
+        let resolved = resolveExecutableWithSource(
+            environment: environment,
+            customCLIPath: customCLIPath,
             fileManager: fileManager,
             homeDirectory: homeDirectory,
             pythonBinDirectories: pythonBinDirectories
@@ -452,12 +536,12 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         )
     }
 
-    public func executeHandoff(
+    public func executeSync(
         workspacePath: String,
         sourceId: String
-    ) async throws -> HandoffReceiptPayload {
+    ) async throws -> SyncReceiptPayload {
         try await runAndDecode(
-            HandoffReceiptPayload.self,
+            SyncReceiptPayload.self,
             arguments: [
                 "sync",
                 "--workspace",
@@ -487,32 +571,16 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         _ type: T.Type,
         arguments: [String]
     ) async throws -> T {
-        let pyBins: [String]
-        let executableURL: URL
-        if let executableOverride {
-            guard FileManager.default.isExecutableFile(atPath: executableOverride.path) else {
-                throw CLIClientError.cliMissing(searchedLocations: [executableOverride.path])
-            }
-            executableURL = executableOverride
-            pyBins = Self.userPythonBinDirectories()
-        } else {
-            pyBins = Self.userPythonBinDirectories()
-            let resolved = Self.resolveExecutableURL(
-                environment: environment,
-                defaults: currentDefaults(),
-                pythonBinDirectories: pyBins
-            )
-            guard let url = resolved.url else {
-                throw CLIClientError.cliMissing(searchedLocations: resolved.searched)
-            }
-            executableURL = url
-        }
-
-        let childEnv = Self.mergedEnvironment(from: environment, pythonBinDirectories: pyBins)
+        let customCLIPath = currentDefaults().string(forKey: Self.cliExecutableDefaultsKey)
+        let context = try await CLIEnvironmentScanner.shared.resolveExecutionContext(
+            executableOverride: executableOverride,
+            environment: environment,
+            customCLIPath: customCLIPath
+        )
         let output = try await Self.runProcessAsync(
-            executableURL: executableURL,
+            executableURL: context.executableURL,
             arguments: arguments,
-            environment: childEnv,
+            environment: context.childEnv,
             timeoutSeconds: timeoutSeconds
         )
         if output.exitCode != 0 {
@@ -585,71 +653,13 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
             timeoutSeconds: timeoutSeconds,
             drainGraceSeconds: drainGraceSeconds
         )
-        return try await withCheckedThrowingContinuation { continuation in
-            coordinator.start(continuation: continuation)
-        }
-    }
-
-    public static func runProcessSync(
-        executableURL: URL,
-        arguments: [String],
-        environment: [String: String],
-        timeoutSeconds: TimeInterval
-    ) throws -> (exitCode: Int32, stdout: Data, stderr: Data) {
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        configureProcess(
-            process,
-            executableURL: executableURL,
-            arguments: arguments,
-            environment: environment,
-            standardOutput: stdoutPipe,
-            standardError: stderrPipe
-        )
-
-        let finished = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in
-            finished.signal()
-        }
-
-        let stdoutBox = LockedBox(Data())
-        let stderrBox = LockedBox(Data())
-        let ioGroup = DispatchGroup()
-
-        do {
-            try process.run()
-        } catch {
-            throw CLIClientError.launchFailed(error.localizedDescription)
-        }
-
-        // Drain stdout and stderr concurrently so large responses cannot fill pipe buffers and deadlock.
-        ioGroup.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            stdoutBox.set(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-            ioGroup.leave()
-        }
-        ioGroup.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            stderrBox.set(stderrPipe.fileHandleForReading.readDataToEndOfFile())
-            ioGroup.leave()
-        }
-
-        if finished.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            process.terminate()
-            if finished.wait(timeout: .now() + 2.0) == .timedOut || process.isRunning {
-                let pid = process.processIdentifier
-                if pid > 0 && process.isRunning {
-                    kill(pid, SIGKILL)
-                }
-                _ = finished.wait(timeout: .now() + 1.0)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                coordinator.start(continuation: continuation)
             }
-            _ = ioGroup.wait(timeout: .now() + 1.0)
-            throw CLIClientError.timedOut(command: arguments, seconds: timeoutSeconds)
+        } onCancel: {
+            coordinator.cancel()
         }
-
-        ioGroup.wait()
-        return (process.terminationStatus, stdoutBox.get(), stderrBox.get())
     }
 
     static func decodeCLIError(from data: Data) -> CLIErrorPayload? {

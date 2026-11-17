@@ -1,9 +1,10 @@
 import AppKit
-import Combine
 import Foundation
+import Observation
 
 @MainActor
-public final class UpdateViewModel: ObservableObject {
+@Observable
+public final class UpdateViewModel {
     public nonisolated static let defaultReleaseAPIURL = "https://api.github.com/repos/semantic-craft/codex-agy-sync/releases/latest"
     public nonisolated static let releaseAPIEnvKey = "MENUBAR_RELEASE_API_URL"
     public nonisolated static let skipSelfReplaceEnvKey = "MENUBAR_SKIP_SELF_REPLACE"
@@ -13,25 +14,29 @@ public final class UpdateViewModel: ObservableObject {
 
     private nonisolated static let legacyBundleSuffix = ["codex", "agy", "hand" + "off"].joined(separator: "-")
 
-    @Published public private(set) var alignment: VersionAlignmentState
-    @Published public private(set) var availability: UpdateAvailability = .idle
-    @Published public private(set) var resolvedCLIPath: String?
-    @Published public private(set) var cliSource: CLIResolutionSource = .missing
-    @Published public private(set) var detectedRepoPath: String?
-    @Published public private(set) var detectedRepoVersion: String?
-    @Published public private(set) var latestRelease: GitHubReleaseInfo?
-    @Published public private(set) var statusMessage: String?
-    @Published public private(set) var popoverNotice: PopoverUpdateNotice?
-    @Published public private(set) var lastCheckedEpoch: TimeInterval?
-    @Published public private(set) var lastCheckedDisplayText: String?
-    @Published public private(set) var lastBackgroundCheckError: String?
-    @Published public private(set) var stagedManifest: StagedUpdateManifest?
-    @Published public private(set) var canRelaunchApp: Bool = false
-    @Published public private(set) var pendingRelaunchVersion: String?
+    private struct ProbeSignature: Equatable {
+        let customCLIPath: String?
+        let localRepoPath: String?
+        let recoverStagedFromFailure: Bool
+    }
+
+    private var rawAlignment: VersionAlignmentState
+    private var semanticState: SemanticUpdateState = .idle
+    private var lastBackgroundErrorReason: UpdateFailureReason?
+
+    public private(set) var resolvedCLIPath: String?
+    public private(set) var cliSource: CLIResolutionSource = .missing
+    public private(set) var detectedRepoPath: String?
+    public private(set) var detectedRepoVersion: String?
+    private var validatedCustomRepo: ValidatedRepoResult?
+    public private(set) var latestRelease: GitHubReleaseInfo?
+    public private(set) var lastCheckedEpoch: TimeInterval?
+    public private(set) var canRelaunchApp: Bool = false
+    public private(set) var pendingRelaunchVersion: String?
+    public private(set) var currentAppBundleURL: URL?
 
     public let appVersion: String
     public let currentBundleIdentifier: String
-    public private(set) var currentAppBundleURL: URL?
     public let preferencesStore: PreferencesStore
 
     private let environment: [String: String]
@@ -40,18 +45,74 @@ public final class UpdateViewModel: ObservableObject {
     private let releaseClient: ReleaseUpdateClient
     private let relaunchExecutor: any RelaunchExecuting
     private let nowProvider: @Sendable () -> Date
-    private let canMutateEnvironment: (@MainActor () -> Bool)?
-    public var onPrepareForRelaunch: (@MainActor () -> Void)?
-    public var onRelaunchFailed: (@MainActor () -> Void)?
+    @ObservationIgnored private let canMutateEnvironment: (@MainActor () -> Bool)?
+    @ObservationIgnored public var onPrepareForRelaunch: (@MainActor () -> Void)?
+    @ObservationIgnored public var onRelaunchFailed: (@MainActor () -> Void)?
 
-    private var semanticState: SemanticUpdateState = .idle
-    private var lastBackgroundErrorReason: UpdateFailureReason?
-    private var hasCompletedInitialProbe = false
-    private var isOpportunisticCheckInFlight = false
-    private var isManualActionInFlight = false
-    private var probeGeneration: UInt64 = 0
-    private var opportunisticGeneration: UInt64 = 0
-    private var cancellables = Set<AnyCancellable>()
+    @ObservationIgnored private var hasCompletedInitialProbe = false
+    @ObservationIgnored private var activeProbeTask: Task<Void, Never>?
+    @ObservationIgnored private var activeProbeSignature: ProbeSignature?
+    @ObservationIgnored private var opportunisticTask: Task<Void, Never>?
+    @ObservationIgnored private var surfaceRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var isManualActionInFlight = false
+    @ObservationIgnored private var probeGeneration: UInt64 = 0
+    @ObservationIgnored private var opportunisticGeneration: UInt64 = 0
+
+    public var alignment: VersionAlignmentState {
+        if case .cliUnavailable(let appVer, _) = rawAlignment, cliSource == .missing {
+            return .cliUnavailable(
+                appVersion: appVer,
+                reason: AppCopy.text(.cliMissingError, in: preferencesStore.effectiveLanguage)
+            )
+        }
+        return rawAlignment
+    }
+
+    public var availability: UpdateAvailability {
+        UpdateStateProjector.projectAvailabilityAndStatus(
+            semanticState: semanticState,
+            in: preferencesStore.effectiveLanguage
+        ).availability
+    }
+
+    public var statusMessage: String? {
+        UpdateStateProjector.projectAvailabilityAndStatus(
+            semanticState: semanticState,
+            in: preferencesStore.effectiveLanguage
+        ).statusMessage
+    }
+
+    public var stagedManifest: StagedUpdateManifest? {
+        UpdateStateProjector.projectAvailabilityAndStatus(
+            semanticState: semanticState,
+            in: preferencesStore.effectiveLanguage
+        ).stagedManifest
+    }
+
+    public var lastCheckedDisplayText: String? {
+        UpdateStateProjector.formatLastChecked(
+            epoch: lastCheckedEpoch,
+            now: nowProvider(),
+            in: preferencesStore.effectiveLanguage
+        )
+    }
+
+    public var lastBackgroundCheckError: String? {
+        UpdateStateProjector.formatBackgroundError(
+            reason: lastBackgroundErrorReason,
+            in: preferencesStore.effectiveLanguage
+        )
+    }
+
+    public var popoverNotice: PopoverUpdateNotice? {
+        UpdateStateProjector.buildPopoverNotice(
+            semanticState: semanticState,
+            canRelaunchApp: canRelaunchApp,
+            pendingRelaunchVersion: pendingRelaunchVersion,
+            effectiveAppVersion: effectiveAppVersion,
+            in: preferencesStore.effectiveLanguage
+        )
+    }
 
     public var isInstallingUpdate: Bool {
         if case .updating(let step) = semanticState {
@@ -68,17 +129,24 @@ public final class UpdateViewModel: ObservableObject {
     }
 
     public var effectiveRepoPath: String? {
-        if let custom = preferencesStore.preferences.localRepoPathForSync,
-           Self.isValidSourceRepo(URL(fileURLWithPath: custom))
-        {
-            return custom
+        if let custom = preferencesStore.preferences.localRepoPathForSync {
+            if validatedCustomRepo?.rawInput == custom, let validPath = validatedCustomRepo?.validatedPath {
+                return validPath
+            }
+            return detectedRepoPath
         }
         return detectedRepoPath
     }
 
     public var effectiveRepoVersion: String? {
-        if let repoPath = effectiveRepoPath {
-            return Self.parsePyprojectVersion(in: URL(fileURLWithPath: repoPath)) ?? detectedRepoVersion
+        if let custom = preferencesStore.preferences.localRepoPathForSync,
+           validatedCustomRepo?.rawInput == custom,
+           validatedCustomRepo?.validatedPath != nil
+        {
+            return validatedCustomRepo?.version ?? detectedRepoVersion
+        }
+        if detectedRepoPath != nil {
+            return detectedRepoVersion
         }
         return nil
     }
@@ -127,50 +195,121 @@ public final class UpdateViewModel: ObservableObject {
         self.canMutateEnvironment = canMutateEnvironment
         self.onPrepareForRelaunch = onPrepareForRelaunch
         self.onRelaunchFailed = onRelaunchFailed
-        self.alignment = .cliUnavailable(
+        self.rawAlignment = .cliUnavailable(
             appVersion: resolvedAppVer,
             reason: AppCopy.text(.updatesNotProbed, in: preferencesStore.effectiveLanguage)
         )
 
         let checkpoint = Self.loadCheckpoint(from: preferencesStore.defaults)
         self.lastCheckedEpoch = checkpoint.lastSuccessfulCheckEpoch
-
-        preferencesStore.$effectiveLanguage
-            .dropFirst()
-            .sink { [weak self] nextLanguage in
-                self?.projectPublishedState(in: nextLanguage)
-            }
-            .store(in: &cancellables)
-
-        projectPublishedState()
     }
 
     public func probeIfNeeded() async {
+        if let existingTask = activeProbeTask {
+            await existingTask.value
+            return
+        }
         guard !hasCompletedInitialProbe else { return }
-        hasCompletedInitialProbe = true
         await probeEnvironment()
+    }
+
+    public func refreshOnSurfaceOpen(
+        trigger: UpdateTrigger,
+        recoverStagedFromFailure: Bool = true
+    ) async {
+        surfaceRefreshTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.probeEnvironment(recoverStagedFromFailure: recoverStagedFromFailure)
+            guard !Task.isCancelled else { return }
+            if self.preferencesStore.preferences.autoUpdatePolicy != .off {
+                await self.performOpportunisticCheckIfNeeded(
+                    trigger: trigger,
+                    skipInitialProbe: true
+                )
+            }
+        }
+        surfaceRefreshTask = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if surfaceRefreshTask == task {
+            surfaceRefreshTask = nil
+        }
     }
 
     public func probeEnvironment(recoverStagedFromFailure: Bool = false) async {
         hasCompletedInitialProbe = true
+        let sig = currentProbeSignature(recoverStagedFromFailure: recoverStagedFromFailure)
+        if let existingTask = activeProbeTask, activeProbeSignature == sig {
+            await withTaskCancellationHandler {
+                await existingTask.value
+            } onCancel: {
+                existingTask.cancel()
+            }
+            return
+        }
+
+        activeProbeTask?.cancel()
         probeGeneration &+= 1
         let myProbeGen = probeGeneration
-        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
-        let resolved = SubprocessCLIClient.resolveExecutableWithSource(
-            environment: environment,
-            defaults: preferencesStore.defaults
-        )
-        self.cliSource = resolved.source
-        self.resolvedCLIPath = resolved.url?.path
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.executeProbe(
+                signature: sig,
+                recoverStagedFromFailure: recoverStagedFromFailure,
+                generation: myProbeGen
+            )
+        }
+        activeProbeTask = task
+        activeProbeSignature = sig
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if probeGeneration == myProbeGen {
+            activeProbeTask = nil
+            activeProbeSignature = nil
+        }
+    }
 
-        guard let cliURL = resolved.url else {
-            self.alignment = .cliUnavailable(
+    private func currentProbeSignature(recoverStagedFromFailure: Bool) -> ProbeSignature {
+        let customCLIPath = preferencesStore.preferences.customCLIPath
+            ?? preferencesStore.defaults.string(forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
+        return ProbeSignature(
+            customCLIPath: customCLIPath,
+            localRepoPath: preferencesStore.preferences.localRepoPathForSync,
+            recoverStagedFromFailure: recoverStagedFromFailure
+        )
+    }
+
+    private func executeProbe(
+        signature: ProbeSignature,
+        recoverStagedFromFailure: Bool,
+        generation myProbeGen: UInt64
+    ) async {
+        let probed = await UpdateEnvironmentProber.shared.probeCLIAndRepo(
+            environment: environment,
+            customCLIPath: signature.customCLIPath,
+            localRepoPathForSync: signature.localRepoPath
+        )
+        guard !Task.isCancelled, myProbeGen == probeGeneration else { return }
+
+        self.cliSource = probed.cliSource
+        self.resolvedCLIPath = probed.cliURL?.path
+        self.validatedCustomRepo = probed.validatedCustomRepo
+        self.detectedRepoPath = probed.discoveredRepo?.path
+        self.detectedRepoVersion = probed.discoveredRepo?.version
+
+        guard let cliURL = probed.cliURL else {
+            self.rawAlignment = .cliUnavailable(
                 appVersion: effectiveAppVersion,
                 reason: AppCopy.text(.cliMissingError, in: preferencesStore.effectiveLanguage)
             )
-            updateRepoDiscovery(fromCLI: nil)
             reconcilePersistedStagedRelease(recoverFromFailure: recoverStagedFromFailure)
-            projectPublishedState()
             return
         }
 
@@ -179,10 +318,10 @@ public final class UpdateViewModel: ObservableObject {
             let result = try await commandRunner.run(
                 executableURL: cliURL,
                 arguments: ["--version"],
-                environment: childEnv,
+                environment: probed.childEnv,
                 timeoutSeconds: 8.0
             )
-            guard myProbeGen == probeGeneration else { return }
+            guard !Task.isCancelled, myProbeGen == probeGeneration else { return }
             let combined = (result.stdoutString + "\n" + result.stderrString)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if result.exitCode == 0, let parsed = SemanticVersion.parse(combined) {
@@ -198,59 +337,68 @@ public final class UpdateViewModel: ObservableObject {
                 nextAlignment = .cliUnavailable(appVersion: effectiveAppVersion, reason: reason)
             }
         } catch {
-            guard myProbeGen == probeGeneration else { return }
+            guard !Task.isCancelled, myProbeGen == probeGeneration else { return }
             nextAlignment = .cliUnavailable(appVersion: effectiveAppVersion, reason: error.localizedDescription)
         }
-        self.alignment = nextAlignment
+        self.rawAlignment = nextAlignment
 
         await discoverEditableRepoIfNeeded(
             fromCLI: cliURL,
-            childEnv: childEnv,
+            childEnv: probed.childEnv,
             probeGenerationSnapshot: myProbeGen
         )
-        guard myProbeGen == probeGeneration else { return }
+        guard !Task.isCancelled, myProbeGen == probeGeneration else { return }
         reconcilePersistedStagedRelease(recoverFromFailure: recoverStagedFromFailure)
-        projectPublishedState()
     }
 
     public func checkForUpdates() async {
         guard !availability.isBusy, !isManualActionInFlight else { return }
         isManualActionInFlight = true
         defer { isManualActionInFlight = false }
-        opportunisticGeneration &+= 1
-        isOpportunisticCheckInFlight = false
+        cancelOpportunisticCheck()
         await performReleaseCheck(trigger: .manual)
     }
 
-    public func performOpportunisticCheckIfNeeded(trigger: UpdateTrigger) async {
-        await performReleaseCheck(trigger: trigger)
+    public func performOpportunisticCheckIfNeeded(
+        trigger: UpdateTrigger,
+        skipInitialProbe: Bool = false
+    ) async {
+        await performReleaseCheck(trigger: trigger, skipInitialProbe: skipInitialProbe)
     }
 
     public func handlePolicyChanged(to policy: AutoUpdatePolicy) async {
         guard policy != .off else { return }
-        guard !availability.isBusy, !isManualActionInFlight, !isOpportunisticCheckInFlight else { return }
+        await refreshCustomRepoValidationIfStale()
+        guard !availability.isBusy, !isManualActionInFlight, opportunisticTask == nil else { return }
         if policy == .autoStage,
            !canRelaunchApp,
            pendingRelaunchVersion == nil,
            effectiveRepoPath == nil,
            case .releaseAvailable(let release, let reason) = semanticState
         {
-            isOpportunisticCheckInFlight = true
+            opportunisticGeneration &+= 1
             let myOppGen = opportunisticGeneration
-            defer {
-                if myOppGen == opportunisticGeneration {
-                    isOpportunisticCheckInFlight = false
-                }
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                var checkpoint = Self.loadCheckpoint(from: self.preferencesStore.defaults)
+                checkpoint.lastAttemptEpoch = self.nowProvider().timeIntervalSince1970
+                Self.saveCheckpoint(checkpoint, to: self.preferencesStore.defaults)
+                await self.stageReleaseIfEligible(
+                    release,
+                    reason: reason,
+                    isOpportunistic: true,
+                    opportunisticGenerationSnapshot: myOppGen
+                )
             }
-            var checkpoint = Self.loadCheckpoint(from: preferencesStore.defaults)
-            checkpoint.lastAttemptEpoch = nowProvider().timeIntervalSince1970
-            Self.saveCheckpoint(checkpoint, to: preferencesStore.defaults)
-            await stageReleaseIfEligible(
-                release,
-                reason: reason,
-                isOpportunistic: true,
-                opportunisticGenerationSnapshot: myOppGen
-            )
+            opportunisticTask = task
+            await withTaskCancellationHandler {
+                await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            if myOppGen == opportunisticGeneration {
+                opportunisticTask = nil
+            }
             return
         }
         await performOpportunisticCheckIfNeeded(trigger: .policyChanged)
@@ -260,8 +408,7 @@ public final class UpdateViewModel: ObservableObject {
         guard !availability.isBusy, !isManualActionInFlight else { return }
         isManualActionInFlight = true
         defer { isManualActionInFlight = false }
-        opportunisticGeneration &+= 1
-        isOpportunisticCheckInFlight = false
+        cancelOpportunisticCheck()
         await performManualSyncUpdateNow()
     }
 
@@ -269,13 +416,13 @@ public final class UpdateViewModel: ObservableObject {
         guard !availability.isBusy, !isManualActionInFlight else { return }
         isManualActionInFlight = true
         defer { isManualActionInFlight = false }
-        opportunisticGeneration &+= 1
-        isOpportunisticCheckInFlight = false
+        cancelOpportunisticCheck()
 
         guard canMutateEnvironment?() ?? true else {
-            setSemanticState(.failed(.handoffInProgress))
+            semanticState = .failed(.syncInProgress)
             return
         }
+        await refreshCustomRepoValidationIfStale()
         if case .stagedReady = semanticState {
         } else {
             reconcilePersistedStagedRelease(recoverFromFailure: true)
@@ -291,16 +438,16 @@ public final class UpdateViewModel: ObservableObject {
         guard !availability.isBusy, !isManualActionInFlight else { return }
         isManualActionInFlight = true
         defer { isManualActionInFlight = false }
-        opportunisticGeneration &+= 1
-        isOpportunisticCheckInFlight = false
+        cancelOpportunisticCheck()
 
         guard canMutateEnvironment?() ?? true else {
-            setSemanticState(.failed(.handoffInProgress))
+            semanticState = .failed(.syncInProgress)
             return
         }
+        await refreshCustomRepoValidationIfStale()
         let candidate = effectiveRepoPath ?? preferencesStore.preferences.localRepoPathForSync
         guard let repoPath = candidate else {
-            setSemanticState(.failed(.service(.invalidLocalRepo("unconfigured"))))
+            semanticState = .failed(.service(.invalidLocalRepo("unconfigured")))
             return
         }
         await performLocalRepoSync(repoPath: repoPath)
@@ -308,6 +455,7 @@ public final class UpdateViewModel: ObservableObject {
 
     public func clearLocalRepoPath() async {
         preferencesStore.setLocalRepoPathForSync(nil)
+        validatedCustomRepo = nil
         detectedRepoPath = nil
         detectedRepoVersion = nil
         await probeEnvironment()
@@ -326,7 +474,7 @@ public final class UpdateViewModel: ObservableObject {
         guard let bundleURL = currentAppBundleURL,
               FileManager.default.fileExists(atPath: bundleURL.path)
         else {
-            setSemanticState(.failed(.bundlePathNotFound))
+            semanticState = .failed(.bundlePathNotFound)
             return false
         }
         onPrepareForRelaunch?()
@@ -335,17 +483,36 @@ public final class UpdateViewModel: ObservableObject {
             return true
         } catch {
             onRelaunchFailed?()
-            setSemanticState(.failed(.relaunchFailed(error.localizedDescription)))
+            semanticState = .failed(.relaunchFailed(error.localizedDescription))
             return false
         }
     }
 
-    private func performReleaseCheck(trigger: UpdateTrigger) async {
+    private func cancelOpportunisticCheck() {
+        opportunisticGeneration &+= 1
+        opportunisticTask?.cancel()
+        opportunisticTask = nil
+    }
+
+    private func refreshCustomRepoValidationIfStale() async {
+        guard let rawRepo = preferencesStore.preferences.localRepoPathForSync else {
+            validatedCustomRepo = nil
+            return
+        }
+        if validatedCustomRepo?.rawInput == rawRepo {
+            return
+        }
+        validatedCustomRepo = await UpdateEnvironmentProber.shared.validateCustomRepo(rawRepo)
+    }
+
+    private func performReleaseCheck(
+        trigger: UpdateTrigger,
+        skipInitialProbe: Bool = false
+    ) async {
         let isOpportunistic = trigger.isOpportunistic
-        var capturedOppGen: UInt64?
 
         if isOpportunistic {
-            guard !availability.isBusy, !isManualActionInFlight, !isOpportunisticCheckInFlight else { return }
+            guard !availability.isBusy, !isManualActionInFlight, opportunisticTask == nil else { return }
             let policy = preferencesStore.preferences.autoUpdatePolicy
             guard policy != .off, !canRelaunchApp, pendingRelaunchVersion == nil else { return }
 
@@ -353,19 +520,49 @@ public final class UpdateViewModel: ObservableObject {
             let checkpoint = Self.loadCheckpoint(from: preferencesStore.defaults)
             guard Self.hasCompletedCooldown(now: now, checkpoint: checkpoint) else { return }
 
-            isOpportunisticCheckInFlight = true
-            capturedOppGen = opportunisticGeneration
-        }
-
-        defer {
-            if let myOppGen = capturedOppGen, myOppGen == opportunisticGeneration {
-                isOpportunisticCheckInFlight = false
+            opportunisticGeneration &+= 1
+            let myOppGen = opportunisticGeneration
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.executeReleaseCheckBody(
+                    isOpportunistic: true,
+                    skipInitialProbe: skipInitialProbe,
+                    opportunisticGenerationSnapshot: myOppGen
+                )
             }
+            opportunisticTask = task
+            await withTaskCancellationHandler {
+                await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            if myOppGen == opportunisticGeneration {
+                opportunisticTask = nil
+            }
+            return
         }
 
-        await probeEnvironment()
+        await executeReleaseCheckBody(
+            isOpportunistic: false,
+            skipInitialProbe: skipInitialProbe,
+            opportunisticGenerationSnapshot: nil
+        )
+    }
+
+    private func executeReleaseCheckBody(
+        isOpportunistic: Bool,
+        skipInitialProbe: Bool,
+        opportunisticGenerationSnapshot capturedOppGen: UInt64?
+    ) async {
+        if !skipInitialProbe {
+            await probeEnvironment()
+        } else {
+            await refreshCustomRepoValidationIfStale()
+        }
+
         if let myOppGen = capturedOppGen {
-            guard myOppGen == opportunisticGeneration,
+            guard !Task.isCancelled,
+                  myOppGen == opportunisticGeneration,
                   !availability.isBusy,
                   !isManualActionInFlight,
                   preferencesStore.preferences.autoUpdatePolicy != .off,
@@ -379,12 +576,16 @@ public final class UpdateViewModel: ObservableObject {
         let priorState = semanticState
         if isOpportunistic, case .stagedReady = priorState {
         } else {
-            setSemanticState(.checking)
+            semanticState = .checking
         }
 
         let rawURL = environment[Self.releaseAPIEnvKey] ?? Self.defaultReleaseAPIURL
         guard let url = URL(string: rawURL) else {
-            handleCheckError(UpdateServiceError.invalidReleaseURL(rawURL), isOpportunistic: isOpportunistic, priorState: priorState)
+            handleCheckError(
+                UpdateServiceError.invalidReleaseURL(rawURL),
+                isOpportunistic: isOpportunistic,
+                priorState: priorState
+            )
             return
         }
 
@@ -395,7 +596,7 @@ public final class UpdateViewModel: ObservableObject {
         do {
             let release = try await releaseClient.fetchLatestRelease(from: url, appVersion: appVersion)
             if let myOppGen = capturedOppGen {
-                guard myOppGen == opportunisticGeneration else { return }
+                guard !Task.isCancelled, myOppGen == opportunisticGeneration else { return }
             }
             self.latestRelease = release
 
@@ -414,7 +615,7 @@ public final class UpdateViewModel: ObservableObject {
             )
         } catch {
             if let myOppGen = capturedOppGen {
-                guard myOppGen == opportunisticGeneration else { return }
+                guard !Task.isCancelled, myOppGen == opportunisticGeneration else { return }
             }
             handleCheckError(error, isOpportunistic: isOpportunistic, priorState: priorState)
         }
@@ -430,7 +631,7 @@ public final class UpdateViewModel: ObservableObject {
         let remoteSemver = SemanticVersion.parse(release.version)
         let appSemver = SemanticVersion.parse(currentAppVer)
         let cliSemver: SemanticVersion? = {
-            switch alignment {
+            switch rawAlignment {
             case .aligned(let ver):
                 return SemanticVersion.parse(ver)
             case .mismatched(_, let cliVer):
@@ -458,10 +659,10 @@ public final class UpdateViewModel: ObservableObject {
             return
         }
 
-        switch alignment {
+        switch rawAlignment {
         case .cliUnavailable:
             if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
-                setSemanticState(.localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .cliMissing))
+                semanticState = .localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .cliMissing)
             } else if release.wheelAsset != nil {
                 await handleReleaseAvailable(
                     release,
@@ -474,12 +675,12 @@ public final class UpdateViewModel: ObservableObject {
                 lastBackgroundErrorReason = .cliUnavailableMissingAsset(tag: release.tagName)
                 restoreQuietStateAfterOpportunistic(priorState)
             } else {
-                setSemanticState(.failed(.cliUnavailableMissingAsset(tag: release.tagName)))
+                semanticState = .failed(.cliUnavailableMissingAsset(tag: release.tagName))
             }
 
         case .mismatched:
             if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
-                setSemanticState(.localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .versionMismatch))
+                semanticState = .localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .versionMismatch)
             } else if release.wheelAsset != nil || release.appZipAsset != nil {
                 await handleReleaseAvailable(
                     release,
@@ -492,12 +693,12 @@ public final class UpdateViewModel: ObservableObject {
                 lastBackgroundErrorReason = .mismatchMissingAsset(tag: release.tagName)
                 restoreQuietStateAfterOpportunistic(priorState)
             } else {
-                setSemanticState(.failed(.mismatchMissingAsset(tag: release.tagName)))
+                semanticState = .failed(.mismatchMissingAsset(tag: release.tagName))
             }
 
         case .aligned:
             stagingStore.clearPersistedStagedDirectory()
-            setSemanticState(.upToDate(currentVersion: currentAppVer, message: .alignedWithRemote(tag: release.tagName)))
+            semanticState = .upToDate(currentVersion: currentAppVer, message: .alignedWithRemote(tag: release.tagName))
         }
     }
 
@@ -513,11 +714,11 @@ public final class UpdateViewModel: ObservableObject {
            manifest.version == normalizedVer,
            stagingStore.verifyStagedFilesPresent(manifest: manifest, in: stagingDir)
         {
-            setSemanticState(.stagedReady(manifest: manifest, stagingDir: stagingDir))
+            semanticState = .stagedReady(manifest: manifest, stagingDir: stagingDir)
             return
         }
 
-        setSemanticState(.releaseAvailable(release: release, reason: reason))
+        semanticState = .releaseAvailable(release: release, reason: reason)
 
         if isOpportunistic,
            preferencesStore.preferences.autoUpdatePolicy == .autoStage,
@@ -545,32 +746,31 @@ public final class UpdateViewModel: ObservableObject {
         }
 
         if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
-            setSemanticState(
-                .localSyncReady(
-                    repoPath: repoPath,
-                    repoVersion: repoVer,
-                    reason: .remoteCheckUnavailable(failure)
-                )
+            semanticState = .localSyncReady(
+                repoPath: repoPath,
+                repoVersion: repoVer,
+                reason: .remoteCheckUnavailable(failure)
             )
         } else {
-            setSemanticState(.failed(failure))
+            semanticState = .failed(failure)
         }
     }
 
     private func restoreQuietStateAfterOpportunistic(_ priorState: SemanticUpdateState) {
         switch priorState {
         case .stagedReady, .releaseAvailable, .upToDate, .localSyncReady:
-            setSemanticState(priorState)
+            semanticState = priorState
         case .idle, .checking, .updating, .failed:
-            setSemanticState(.idle)
+            semanticState = .idle
         }
     }
 
     private func performManualSyncUpdateNow() async {
         guard canMutateEnvironment?() ?? true else {
-            setSemanticState(.failed(.handoffInProgress))
+            semanticState = .failed(.syncInProgress)
             return
         }
+        await refreshCustomRepoValidationIfStale()
 
         if case .stagedReady(let manifest, let stagedDir) = semanticState {
             await performInstallStaged(manifest: manifest, stagedDir: stagedDir)
@@ -616,13 +816,13 @@ public final class UpdateViewModel: ObservableObject {
             return
         }
 
-        setSemanticState(.failed(.service(.missingUpdateAssets)))
+        semanticState = .failed(.service(.missingUpdateAssets))
     }
 
     private func performInstallStaged(manifest: StagedUpdateManifest, stagedDir: URL) async {
-        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
+        let childEnv = await UpdateEnvironmentProber.shared.mergedEnvironment(from: environment)
         let lang = preferencesStore.effectiveLanguage
-        setSemanticState(.updating(step: .applyingStagedUpdate(tagName: manifest.tagName)))
+        semanticState = .updating(step: .applyingStagedUpdate(tagName: manifest.tagName))
 
         do {
             let validated = try await stagingStore.prepareValidatedStagedAssets(
@@ -635,14 +835,14 @@ public final class UpdateViewModel: ObservableObject {
             )
 
             if let wheelURL = validated.verifiedWheelURL {
-                let cliURL = resolvedCLIExecutableURL()
+                let cliURL = await resolveCLIExecutableURLOffMain()
                 let pyEnv = try await LocalRepoEnvironment.resolvePythonEnvironment(
                     for: cliURL,
                     childEnv: childEnv,
                     commandRunner: commandRunner
                 )
                 guard canMutateEnvironment?() ?? true else {
-                    throw UpdateFailureReasonError(.handoffInProgress)
+                    throw UpdateFailureReasonError(.syncInProgress)
                 }
                 try await releaseClient.installWheel(at: wheelURL, pythonEnv: pyEnv, childEnv: childEnv)
             }
@@ -659,7 +859,7 @@ public final class UpdateViewModel: ObservableObject {
             let upToDateKind: UpToDateMessage = validated.stagedAppURL != nil
                 ? .releaseSyncedWithApp(tag: manifest.tagName)
                 : .releaseSyncedCLIOnly(tag: manifest.tagName)
-            setSemanticState(.upToDate(currentVersion: manifest.version, message: upToDateKind))
+            semanticState = .upToDate(currentVersion: manifest.version, message: upToDateKind)
 
             if validated.stagedAppURL != nil, !skipsSelfReplace {
                 _ = relaunchApp()
@@ -669,10 +869,10 @@ public final class UpdateViewModel: ObservableObject {
                 stagingStore.clearPersistedStagedDirectory()
             }
             await probeEnvironment()
-            setSemanticState(.failed(wrapped.reason))
+            semanticState = .failed(wrapped.reason)
         } catch {
             await probeEnvironment()
-            setSemanticState(.failed(.from(error)))
+            semanticState = .failed(.from(error))
         }
     }
 
@@ -689,7 +889,7 @@ public final class UpdateViewModel: ObservableObject {
             return
         }
 
-        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
+        let childEnv = await UpdateEnvironmentProber.shared.mergedEnvironment(from: environment)
         let normalizedVer = SemanticVersion.parse(release.version)?.description ?? release.version
         let lang = preferencesStore.effectiveLanguage
 
@@ -704,7 +904,7 @@ public final class UpdateViewModel: ObservableObject {
             let tmpDir = try stagingStore.makeStagingSessionDirectory()
             defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-            setSemanticState(.updating(step: .stagingRelease(tagName: release.tagName)))
+            semanticState = .updating(step: .stagingRelease(tagName: release.tagName))
             let prepared = try await releaseClient.downloadAndVerifyReleaseAssets(
                 release,
                 checksumsAsset: checksumsAsset,
@@ -740,7 +940,7 @@ public final class UpdateViewModel: ObservableObject {
                 stagedAtEpoch: nowProvider().timeIntervalSince1970
             )
             let versionDir = try stagingStore.persistStagedDirectory(from: tmpDir, manifest: manifest)
-            setSemanticState(.stagedReady(manifest: manifest, stagingDir: versionDir))
+            semanticState = .stagedReady(manifest: manifest, stagingDir: versionDir)
         } catch {
             if let myOppGen = opportunisticGenerationSnapshot, myOppGen != opportunisticGeneration {
                 return
@@ -756,9 +956,9 @@ public final class UpdateViewModel: ObservableObject {
                 checkpoint.lastAttemptEpoch = nowProvider().timeIntervalSince1970
                 Self.saveCheckpoint(checkpoint, to: preferencesStore.defaults)
                 lastCheckedEpoch = nil
-                setSemanticState(.releaseAvailable(release: release, reason: reason))
+                semanticState = .releaseAvailable(release: release, reason: reason)
             } else {
-                setSemanticState(.failed(.from(error)))
+                semanticState = .failed(.from(error))
             }
         }
     }
@@ -770,30 +970,30 @@ public final class UpdateViewModel: ObservableObject {
         if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
             switch reason {
             case .cliMissing:
-                setSemanticState(.localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .cliMissing))
+                semanticState = .localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .cliMissing)
                 return
             case .versionMismatch:
-                setSemanticState(.localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .versionMismatch))
+                semanticState = .localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .versionMismatch)
                 return
             case .newerVersion:
                 break
             }
         }
-        setSemanticState(.releaseAvailable(release: release, reason: reason))
+        semanticState = .releaseAvailable(release: release, reason: reason)
     }
 
     private func performLocalRepoSync(repoPath: String) async {
         guard canMutateEnvironment?() ?? true else {
-            setSemanticState(.failed(.handoffInProgress))
+            semanticState = .failed(.syncInProgress)
             return
         }
         let rawRepoURL = URL(fileURLWithPath: (repoPath as NSString).expandingTildeInPath, isDirectory: true)
-        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
+        let childEnv = await UpdateEnvironmentProber.shared.mergedEnvironment(from: environment)
         let lang = preferencesStore.effectiveLanguage
 
         do {
-            let repoURL = try UpdatePathGuard.validateNonTemporaryURL(rawRepoURL)
-            guard Self.isValidSourceRepo(repoURL) else {
+            let repoCheck = await UpdateEnvironmentProber.shared.validateRepoURL(rawRepoURL)
+            guard let repoURL = repoCheck.validatedURL else {
                 throw UpdateServiceError.invalidLocalRepo(repoPath)
             }
             try UpdateStagingStore.validateReplacementTargetIfNeeded(
@@ -805,8 +1005,8 @@ public final class UpdateViewModel: ObservableObject {
             let stagingDir = try stagingStore.makeStagingSessionDirectory()
             defer { try? FileManager.default.removeItem(at: stagingDir) }
 
-            setSemanticState(.updating(step: .buildingLocalApp))
-            let cliURL = resolvedCLIExecutableURL()
+            semanticState = .updating(step: .buildingLocalApp)
+            let cliURL = await resolveCLIExecutableURLOffMain()
             let pyEnv = try await LocalRepoEnvironment.resolvePythonEnvironment(
                 for: cliURL,
                 childEnv: childEnv,
@@ -824,45 +1024,45 @@ public final class UpdateViewModel: ObservableObject {
                 language: lang
             )
 
-            setSemanticState(.updating(step: .upgradingLocalCLI))
+            semanticState = .updating(step: .upgradingLocalCLI)
             guard canMutateEnvironment?() ?? true else {
-                throw UpdateFailureReasonError(.handoffInProgress)
+                throw UpdateFailureReasonError(.syncInProgress)
             }
             try await releaseClient.installLocalCLI(repoURL: repoURL, pythonEnv: pyEnv, childEnv: childEnv)
 
             try replaceRunningBundleIfPermitted(with: builtAppURL)
 
-            let rawTargetVer = Self.parsePyprojectVersion(in: repoURL) ?? appVersion
+            let rawTargetVer = repoCheck.version ?? appVersion
             let targetVer = SemanticVersion.parse(rawTargetVer)?.description ?? rawTargetVer
             pendingRelaunchVersion = targetVer
             canRelaunchApp = true
             stagingStore.clearPersistedStagedDirectory()
             await probeEnvironment()
-            setSemanticState(.upToDate(currentVersion: targetVer, message: .localRepoSynced(version: targetVer)))
+            semanticState = .upToDate(currentVersion: targetVer, message: .localRepoSynced(version: targetVer))
         } catch let wrapped as UpdateFailureReasonError {
             await probeEnvironment()
-            setSemanticState(.failed(wrapped.reason))
+            semanticState = .failed(wrapped.reason)
         } catch {
             await probeEnvironment()
-            setSemanticState(.failed(.from(error)))
+            semanticState = .failed(.from(error))
         }
     }
 
     private func performReleaseSync(_ release: GitHubReleaseInfo) async {
         guard canMutateEnvironment?() ?? true else {
-            setSemanticState(.failed(.handoffInProgress))
+            semanticState = .failed(.syncInProgress)
             return
         }
         guard let checksumsAsset = release.checksumsAsset else {
-            setSemanticState(.failed(.service(.missingChecksumsAsset)))
+            semanticState = .failed(.service(.missingChecksumsAsset))
             return
         }
         guard release.wheelAsset != nil || release.appZipAsset != nil else {
-            setSemanticState(.failed(.service(.missingUpdateAssets)))
+            semanticState = .failed(.service(.missingUpdateAssets))
             return
         }
 
-        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
+        let childEnv = await UpdateEnvironmentProber.shared.mergedEnvironment(from: environment)
         let lang = preferencesStore.effectiveLanguage
 
         do {
@@ -876,10 +1076,10 @@ public final class UpdateViewModel: ObservableObject {
             let stagingDir = try stagingStore.makeStagingSessionDirectory()
             defer { try? FileManager.default.removeItem(at: stagingDir) }
 
-            setSemanticState(.updating(step: .downloadingChecksums))
+            semanticState = .updating(step: .downloadingChecksums)
             let resolvedPyEnv: PythonRuntimeEnvironment?
             if release.wheelAsset != nil {
-                let cliURL = resolvedCLIExecutableURL()
+                let cliURL = await resolveCLIExecutableURLOffMain()
                 resolvedPyEnv = try await LocalRepoEnvironment.resolvePythonEnvironment(
                     for: cliURL,
                     childEnv: childEnv,
@@ -897,14 +1097,14 @@ public final class UpdateViewModel: ObservableObject {
                 childEnv: childEnv,
                 language: lang,
                 onStep: { [weak self] step in
-                    self?.setSemanticState(.updating(step: step))
+                    self?.semanticState = .updating(step: step)
                 }
             )
 
             if let wheelPath = prepared.wheelURL, let pyEnv = resolvedPyEnv {
-                setSemanticState(.updating(step: .installingCLI))
+                semanticState = .updating(step: .installingCLI)
                 guard canMutateEnvironment?() ?? true else {
-                    throw UpdateFailureReasonError(.handoffInProgress)
+                    throw UpdateFailureReasonError(.syncInProgress)
                 }
                 try await releaseClient.installWheel(at: wheelPath, pythonEnv: pyEnv, childEnv: childEnv)
             }
@@ -921,19 +1121,19 @@ public final class UpdateViewModel: ObservableObject {
             let upToDateKind: UpToDateMessage = prepared.extractedAppURL != nil
                 ? .releaseSyncedWithApp(tag: release.tagName)
                 : .releaseSyncedCLIOnly(tag: release.tagName)
-            setSemanticState(.upToDate(currentVersion: normalizedReleaseVer, message: upToDateKind))
+            semanticState = .upToDate(currentVersion: normalizedReleaseVer, message: upToDateKind)
         } catch let wrapped as UpdateFailureReasonError {
             await probeEnvironment()
-            setSemanticState(.failed(wrapped.reason))
+            semanticState = .failed(wrapped.reason)
         } catch {
             await probeEnvironment()
-            setSemanticState(.failed(.from(error)))
+            semanticState = .failed(.from(error))
         }
     }
 
     private func replaceRunningBundleIfPermitted(with stagedAppURL: URL) throws {
         guard canMutateEnvironment?() ?? true else {
-            throw UpdateFailureReasonError(.handoffInProgress)
+            throw UpdateFailureReasonError(.syncInProgress)
         }
         currentAppBundleURL = try UpdateStagingStore.replaceRunningBundleIfPermitted(
             with: stagedAppURL,
@@ -963,14 +1163,14 @@ public final class UpdateViewModel: ObservableObject {
 
         if let best = stagingStore.bestPersistedStagedCandidate(
             effectiveAppVersion: effectiveAppVersion,
-            alignment: alignment
+            alignment: rawAlignment
         ) {
             switch semanticState {
             case .releaseAvailable(let knownRelease, _):
                 if Self.isVersion(best.manifest.version, atLeast: knownRelease.version) {
                     semanticState = .stagedReady(manifest: best.manifest, stagingDir: best.dir)
                 }
-            case .idle, .stagedReady, .upToDate, .failed(.handoffInProgress):
+            case .idle, .stagedReady, .upToDate, .failed(.syncInProgress):
                 semanticState = .stagedReady(manifest: best.manifest, stagingDir: best.dir)
             case .failed(let reason) where recoverFromFailure:
                 if case .stagedArtifactInvalid = reason {
@@ -987,59 +1187,17 @@ public final class UpdateViewModel: ObservableObject {
         }
     }
 
-    private func setSemanticState(_ next: SemanticUpdateState) {
-        semanticState = next
-        projectPublishedState()
-    }
-
-    private func projectPublishedState(in languageOverride: ResolvedLanguage? = nil) {
-        let lang = languageOverride ?? preferencesStore.effectiveLanguage
-        if case .cliUnavailable(let appVer, _) = alignment, cliSource == .missing {
-            alignment = .cliUnavailable(
-                appVersion: appVer,
-                reason: AppCopy.text(.cliMissingError, in: lang)
-            )
-        }
-
-        let projected = UpdateStateProjector.project(
-            semanticState: semanticState,
-            lastCheckedEpoch: lastCheckedEpoch,
-            lastBackgroundErrorReason: lastBackgroundErrorReason,
-            canRelaunchApp: canRelaunchApp,
-            pendingRelaunchVersion: pendingRelaunchVersion,
-            effectiveAppVersion: effectiveAppVersion,
-            now: nowProvider(),
-            in: lang
-        )
-        lastCheckedDisplayText = projected.lastCheckedDisplayText
-        lastBackgroundCheckError = projected.lastBackgroundCheckError
-        availability = projected.availability
-        statusMessage = projected.statusMessage
-        stagedManifest = projected.stagedManifest
-        popoverNotice = projected.popoverNotice
-    }
-
-    private func resolvedCLIExecutableURL() -> URL? {
+    private func resolveCLIExecutableURLOffMain() async -> URL? {
         if let resolvedCLIPath {
             return URL(fileURLWithPath: resolvedCLIPath)
         }
-        return SubprocessCLIClient.resolveExecutableWithSource(
+        let customCLIPath = preferencesStore.preferences.customCLIPath
+            ?? preferencesStore.defaults.string(forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
+        return await UpdateEnvironmentProber.shared.probeCLIAndRepo(
             environment: environment,
-            defaults: preferencesStore.defaults
-        ).url
-    }
-
-    private func updateRepoDiscovery(fromCLI cliURL: URL?) {
-        if let found = LocalRepoEnvironment.discoverCandidateRepo(
-            customRepoPath: preferencesStore.preferences.localRepoPathForSync,
-            cliURL: cliURL
-        ) {
-            detectedRepoPath = found.path
-            detectedRepoVersion = found.version
-            return
-        }
-        detectedRepoPath = nil
-        detectedRepoVersion = nil
+            customCLIPath: customCLIPath,
+            localRepoPathForSync: nil
+        ).cliURL
     }
 
     private func discoverEditableRepoIfNeeded(
@@ -1047,7 +1205,6 @@ public final class UpdateViewModel: ObservableObject {
         childEnv: [String: String],
         probeGenerationSnapshot: UInt64
     ) async {
-        updateRepoDiscovery(fromCLI: cliURL)
         guard detectedRepoPath == nil else { return }
 
         if let pyInfo = try? await LocalRepoEnvironment.resolvePythonEnvironment(
@@ -1055,15 +1212,15 @@ public final class UpdateViewModel: ObservableObject {
             childEnv: childEnv,
             commandRunner: commandRunner
         ),
+           !Task.isCancelled,
            probeGenerationSnapshot == probeGeneration,
            let repoPath = pyInfo.repoPath
         {
             let repoURL = URL(fileURLWithPath: repoPath, isDirectory: true)
-            if let validated = try? UpdatePathGuard.validateNonTemporaryURL(repoURL),
-               Self.isValidSourceRepo(validated)
-            {
+            let check = await UpdateEnvironmentProber.shared.validateRepoURL(repoURL)
+            if let validated = check.validatedURL, probeGenerationSnapshot == probeGeneration {
                 detectedRepoPath = validated.path
-                detectedRepoVersion = Self.parsePyprojectVersion(in: validated)
+                detectedRepoVersion = check.version
             }
         }
     }
@@ -1073,58 +1230,5 @@ public final class UpdateViewModel: ObservableObject {
             return lSem >= rSem
         }
         return lhs == rhs
-    }
-
-    public static func resolveSyncStateDirectoryURL(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        fileManager: FileManager = .default
-    ) -> URL {
-        LocalRepoEnvironment.resolveSyncStateDirectoryURL(environment: environment, fileManager: fileManager)
-    }
-
-    public static func isValidSourceRepo(_ repoURL: URL, fileManager: FileManager = .default) -> Bool {
-        LocalRepoEnvironment.isValidSourceRepo(repoURL, fileManager: fileManager)
-    }
-
-    public static func parsePyprojectVersion(in repoURL: URL) -> String? {
-        LocalRepoEnvironment.parsePyprojectVersion(in: repoURL)
-    }
-
-    public static func loadCheckpoint(from defaults: UserDefaults) -> UpdateCheckCheckpoint {
-        UpdateStagingStore.loadCheckpoint(from: defaults)
-    }
-
-    public static func saveCheckpoint(_ checkpoint: UpdateCheckCheckpoint, to defaults: UserDefaults) {
-        UpdateStagingStore.saveCheckpoint(checkpoint, to: defaults)
-    }
-
-    public static func hasCompletedCooldown(
-        now: TimeInterval,
-        checkpoint: UpdateCheckCheckpoint
-    ) -> Bool {
-        UpdateStagingStore.hasCompletedCooldown(now: now, checkpoint: checkpoint)
-    }
-
-    nonisolated static func isRealAppBundleDirectory(
-        _ candidate: URL,
-        inside parentDir: URL? = nil,
-        fileManager: FileManager = .default
-    ) -> Bool {
-        UpdateStagingStore.isRealAppBundleDirectory(candidate, inside: parentDir, fileManager: fileManager)
-    }
-
-    nonisolated static func resolveExtractedAppBundle(
-        in extractDir: URL,
-        fileManager: FileManager = .default
-    ) -> URL {
-        UpdateStagingStore.resolveExtractedAppBundle(in: extractDir, fileManager: fileManager)
-    }
-
-    public static func findPythonExecutable(
-        for cliURL: URL?,
-        childEnv: [String: String],
-        fileManager: FileManager = .default
-    ) -> URL? {
-        LocalRepoEnvironment.findPythonExecutable(for: cliURL, childEnv: childEnv, fileManager: fileManager)
     }
 }

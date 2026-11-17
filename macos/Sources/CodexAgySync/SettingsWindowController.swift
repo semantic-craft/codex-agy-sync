@@ -1,6 +1,5 @@
 import AppKit
 import CodexAgySyncCore
-import Combine
 import SwiftUI
 
 @MainActor
@@ -11,7 +10,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let updateViewModel: UpdateViewModel
     private let navigation: SettingsNavigationModel
     private var hasCenteredOnce = false
-    private var cancellables = Set<AnyCancellable>()
+    private var languageObserverToken: ObservationToken?
 
     init(
         preferencesStore: PreferencesStore,
@@ -48,12 +47,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         super.init()
         self.window.delegate = self
 
-        preferencesStore.$effectiveLanguage
-            .dropFirst()
-            .sink { [weak self] lang in
-                self?.window.title = AppCopy.text(.settingsWindowTitle, in: lang)
-            }
-            .store(in: &cancellables)
+        self.languageObserverToken = observeContinuously {
+            preferencesStore.effectiveLanguage
+        } onChange: { [weak self] lang in
+            self?.window.title = AppCopy.text(.settingsWindowTitle, in: lang)
+        }
     }
 
     func show(initialTab: SettingsTab = .general) {
@@ -64,8 +62,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
         preferencesStore.refreshLaunchAtLoginStatus()
         Task { @MainActor [weak updateViewModel = self.updateViewModel] in
-            await updateViewModel?.probeEnvironment(recoverStagedFromFailure: true)
-            await updateViewModel?.performOpportunisticCheckIfNeeded(trigger: .settingsOpened)
+            await updateViewModel?.refreshOnSurfaceOpen(
+                trigger: .settingsOpened,
+                recoverStagedFromFailure: true
+            )
         }
         if !hasCenteredOnce {
             window.center()
@@ -77,7 +77,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         if !wasVisible {
             window.makeFirstResponder(nil)
-            DispatchQueue.main.async { [weak window = self.window] in
+            Task { @MainActor [weak window = self.window] in
                 NSApp.activate()
                 window?.makeKeyAndOrderFront(nil)
                 window?.makeFirstResponder(nil)
@@ -87,7 +87,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         preferencesStore.setShortcutRecording(false)
-        DispatchQueue.main.async {
+        Task { @MainActor in
             _ = NSApp.setActivationPolicy(.accessory)
         }
     }

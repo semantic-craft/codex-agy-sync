@@ -20,7 +20,7 @@ private func assertNoForbiddenJargon(_ text: String, file: StaticString = #fileP
 private final class MockCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
     private let lock = NSLock()
     private var feedResult: Result<MenubarFeedSnapshot, Error>
-    private var handoffResult: Result<HandoffReceiptPayload, Error>
+    private var handoffResult: Result<SyncReceiptPayload, Error>
     private var reconcileResult: Result<ReconcileSummaryPayload, Error>
 
     private(set) var fetchLimits: [Int] = []
@@ -29,7 +29,7 @@ private final class MockCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
 
     init(
         feedResult: Result<MenubarFeedSnapshot, Error>,
-        handoffResult: Result<HandoffReceiptPayload, Error>,
+        handoffResult: Result<SyncReceiptPayload, Error>,
         reconcileResult: Result<ReconcileSummaryPayload, Error>
     ) {
         self.feedResult = feedResult
@@ -43,7 +43,7 @@ private final class MockCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
         }
     }
 
-    func setHandoffResult(_ result: Result<HandoffReceiptPayload, Error>) {
+    func setHandoffResult(_ result: Result<SyncReceiptPayload, Error>) {
         lock.withLock {
             handoffResult = result
         }
@@ -63,7 +63,7 @@ private final class MockCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
         return try res.get()
     }
 
-    func executeHandoff(workspacePath: String, sourceId: String) async throws -> HandoffReceiptPayload {
+    func executeSync(workspacePath: String, sourceId: String) async throws -> SyncReceiptPayload {
         let res = lock.withLock {
             handoffCalls.append((workspacePath, sourceId))
             return handoffResult
@@ -258,13 +258,13 @@ final class MenubarViewModelTests: XCTestCase {
 
     func testMenubarRowPresentationAndCandidateBadgeNormalizedCopy() {
         for state in MenubarCandidateState.allCases {
-            assertNoForbiddenJargon(state.statusBadgeText)
+            assertNoForbiddenJargon(state.statusBadgeText(in: .zhHans))
         }
-        XCTAssertEqual(MenubarCandidateState.interruptedStopped.statusBadgeText, "未完成回复")
-        XCTAssertEqual(MenubarCandidateState.completedReady.statusBadgeText, "可继续")
-        XCTAssertEqual(MenubarCandidateState.pendingReconcile.statusBadgeText, "待确认")
-        XCTAssertEqual(MenubarCandidateState.alreadyHanded.statusBadgeText, "已同步")
-        XCTAssertEqual(MenubarCandidateState.activeRunning.statusBadgeText, "对话中")
+        XCTAssertEqual(MenubarCandidateState.interruptedStopped.statusBadgeText(in: .zhHans), "未完成回复")
+        XCTAssertEqual(MenubarCandidateState.completedReady.statusBadgeText(in: .zhHans), "可继续")
+        XCTAssertEqual(MenubarCandidateState.pendingReconcile.statusBadgeText(in: .zhHans), "待确认")
+        XCTAssertEqual(MenubarCandidateState.alreadyHanded.statusBadgeText(in: .zhHans), "已同步")
+        XCTAssertEqual(MenubarCandidateState.activeRunning.statusBadgeText(in: .zhHans), "对话中")
 
         let interrupted = makeItem(
             host: "antigravity",
@@ -407,7 +407,7 @@ final class MenubarViewModelTests: XCTestCase {
             hero: hero,
             recent: [hero, handed, second, third]
         )
-        let receipt = HandoffReceiptPayload(
+        let receipt = SyncReceiptPayload(
             workspace: "/repos/storage-engine",
             sourceHost: "codex",
             sourceId: "tid-second",
@@ -421,7 +421,7 @@ final class MenubarViewModelTests: XCTestCase {
             handoffResult: .success(receipt),
             reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/billing"))
         )
-        let vm = HandoffViewModel(cli: cli, activator: MockActivator())
+        let vm = SessionSyncStore(cli: cli, activator: MockActivator())
 
         await vm.refresh()
 
@@ -478,7 +478,7 @@ final class MenubarViewModelTests: XCTestCase {
             hero: hero,
             recent: [hero]
         )
-        let receipt = HandoffReceiptPayload(
+        let receipt = SyncReceiptPayload(
             workspace: "/repos/alpha",
             sourceHost: "antigravity",
             sourceId: "cid-stopped-1",
@@ -494,10 +494,10 @@ final class MenubarViewModelTests: XCTestCase {
         )
         let activator = MockActivator()
         var callbackCount = 0
-        let vm = HandoffViewModel(
+        let vm = SessionSyncStore(
             cli: cli,
             activator: activator,
-            onDidHandoffAndActivate: { callbackCount += 1 }
+            onDidSyncAndActivate: { callbackCount += 1 }
         )
 
         await vm.refresh()
@@ -536,7 +536,7 @@ final class MenubarViewModelTests: XCTestCase {
             hero: hero,
             recent: [hero]
         )
-        let receipt = HandoffReceiptPayload(
+        let receipt = SyncReceiptPayload(
             workspace: "/repos/beta",
             sourceHost: "codex",
             sourceId: "tid-ready-2",
@@ -551,10 +551,10 @@ final class MenubarViewModelTests: XCTestCase {
             reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/beta"))
         )
         let activator = MockActivator()
-        let vm = HandoffViewModel(cli: cli, activator: activator)
+        let vm = SessionSyncStore(cli: cli, activator: activator)
 
         await vm.refresh()
-        await vm.handoff(hero)
+        await vm.sync(hero)
 
         XCTAssertEqual(activator.activatedHosts, ["antigravity"])
         guard let infoBanner = vm.banner else {
@@ -564,7 +564,7 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(infoBanner.text, "已在 Antigravity 打开现有对话 · Reuse existing target")
         assertNoForbiddenJargon(infoBanner.text)
 
-        let pendingReceipt = HandoffReceiptPayload(
+        let pendingReceipt = SyncReceiptPayload(
             workspace: "/repos/beta",
             sourceHost: "codex",
             sourceId: "tid-ready-2",
@@ -574,7 +574,7 @@ final class MenubarViewModelTests: XCTestCase {
             status: "pending"
         )
         cli.setHandoffResult(.success(pendingReceipt))
-        await vm.handoff(hero)
+        await vm.sync(hero)
         guard let pendingBanner = vm.banner else {
             return XCTFail("Expected error banner for pending receipt")
         }
@@ -623,7 +623,7 @@ final class MenubarViewModelTests: XCTestCase {
             reconcileResult: .success(resolvedSummary)
         )
         let activator = MockActivator()
-        let vm = HandoffViewModel(cli: cli, activator: activator)
+        let vm = SessionSyncStore(cli: cli, activator: activator)
 
         await vm.refresh()
         await vm.performPrimaryAction()
@@ -686,7 +686,7 @@ final class MenubarViewModelTests: XCTestCase {
             handoffResult: .failure(CLIClientError.nonZeroExit(exitCode: 2, stderr: "unused")),
             reconcileResult: .failure(CLIClientError.nonZeroExit(exitCode: 2, stderr: "cwd=/ must never be reconciled"))
         )
-        let cleanVM = HandoffViewModel(cli: cleanCLI, activator: MockActivator())
+        let cleanVM = SessionSyncStore(cli: cleanCLI, activator: MockActivator())
         await cleanVM.refresh()
         await cleanVM.reconcile(workspacePath: nil)
         XCTAssertTrue(cleanCLI.reconcileCalls.isEmpty)
@@ -718,10 +718,10 @@ final class MenubarViewModelTests: XCTestCase {
             handoffResult: .failure(CLIClientError.structuredError(cliErrPayload, exitCode: 2)),
             reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/delta"))
         )
-        let vm = HandoffViewModel(cli: cli, activator: MockActivator())
+        let vm = SessionSyncStore(cli: cli, activator: MockActivator())
 
         await vm.refresh()
-        await vm.handoff(hero)
+        await vm.sync(hero)
         XCTAssertFalse(vm.cliMissing)
         guard case .error(let errMsg)? = vm.banner else {
             return XCTFail("Expected structured error banner")
@@ -799,7 +799,7 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertNil(snap.hero)
 
         do {
-            _ = try await client.executeHandoff(workspacePath: "/repos/alpha", sourceId: "cid-1")
+            _ = try await client.executeSync(workspacePath: "/repos/alpha", sourceId: "cid-1")
             XCTFail("Expected structured CLIErrorPayload")
         } catch let err as CLIClientError {
             XCTAssertEqual(
@@ -857,10 +857,11 @@ final class MenubarViewModelTests: XCTestCase {
             handoffResult: .failure(CLIClientError.nonZeroExit(exitCode: 2, stderr: "unused")),
             reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/ax-demo"))
         )
-        let vm = HandoffViewModel(cli: cli, activator: MockActivator())
+        let vm = SessionSyncStore(cli: cli, activator: MockActivator())
         await vm.refresh()
 
-        let hosting = NSHostingController(rootView: PopoverView(viewModel: vm))
+        let updateVM = UpdateViewModel(preferencesStore: vm.preferencesStore)
+        let hosting = NSHostingController(rootView: PopoverView(store: vm, updateViewModel: updateVM))
         hosting.sizingOptions = [.preferredContentSize]
         hosting.safeAreaRegions = []
 
@@ -951,7 +952,7 @@ final class MenubarViewModelTests: XCTestCase {
             hero: freshHero,
             recent: [freshHero]
         )
-        let freshReceipt = HandoffReceiptPayload(
+        let freshReceipt = SyncReceiptPayload(
             workspace: "/repos/fresh",
             sourceHost: "antigravity",
             sourceId: "cid-fresh",
@@ -966,7 +967,7 @@ final class MenubarViewModelTests: XCTestCase {
             reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/fresh"))
         )
         let activator = MockActivator()
-        let vm = HandoffViewModel(cli: cli, activator: activator)
+        let vm = SessionSyncStore(cli: cli, activator: activator)
 
         await vm.refresh()
         XCTAssertEqual(vm.snapshot?.hero?.sessionId, "cid-stale")
@@ -982,11 +983,11 @@ final class MenubarViewModelTests: XCTestCase {
         final class DelayedFeedCLIRunner: CLIRunnerProtocol, @unchecked Sendable {
             private let lock = NSLock()
             private let snapshot: MenubarFeedSnapshot
-            private let receipt: HandoffReceiptPayload
+            private let receipt: SyncReceiptPayload
             private(set) var fetchCount = 0
             private(set) var handedIds: [String] = []
 
-            init(snapshot: MenubarFeedSnapshot, receipt: HandoffReceiptPayload) {
+            init(snapshot: MenubarFeedSnapshot, receipt: SyncReceiptPayload) {
                 self.snapshot = snapshot
                 self.receipt = receipt
             }
@@ -997,7 +998,7 @@ final class MenubarViewModelTests: XCTestCase {
                 return snapshot
             }
 
-            func executeHandoff(workspacePath: String, sourceId: String) async throws -> HandoffReceiptPayload {
+            func executeSync(workspacePath: String, sourceId: String) async throws -> SyncReceiptPayload {
                 lock.withLock { handedIds.append(sourceId) }
                 return receipt
             }
@@ -1008,7 +1009,7 @@ final class MenubarViewModelTests: XCTestCase {
         }
 
         let inflightCLI = DelayedFeedCLIRunner(snapshot: freshSnapshot, receipt: freshReceipt)
-        let inflightVM = HandoffViewModel(cli: inflightCLI, activator: MockActivator())
+        let inflightVM = SessionSyncStore(cli: inflightCLI, activator: MockActivator())
         let backgroundRefresh = Task { await inflightVM.refresh() }
         await Task.yield()
         await inflightVM.refreshAndPerformPrimaryAction()
@@ -1376,7 +1377,7 @@ final class MenubarViewModelTests: XCTestCase {
             hero: interrupted,
             recent: [interrupted, singleTurnReady]
         )
-        let receipt = HandoffReceiptPayload(
+        let receipt = SyncReceiptPayload(
             workspace: "/repos/beta",
             sourceHost: "antigravity",
             sourceId: "cid-int",
@@ -1390,7 +1391,7 @@ final class MenubarViewModelTests: XCTestCase {
             handoffResult: .success(receipt),
             reconcileResult: .success(ReconcileSummaryPayload(workspace: "/repos/beta"))
         )
-        let vm = HandoffViewModel(cli: cli, activator: MockActivator(), preferencesStore: prefs)
+        let vm = SessionSyncStore(cli: cli, activator: MockActivator(), preferencesStore: prefs)
 
         await vm.refresh()
         await vm.performPrimaryAction()
@@ -1431,6 +1432,72 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertLessThan(elapsed, 1.5)
     }
 
+    func testRunProcessAsyncCancelsChildPromptlyOnTaskCancellation() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-agy-cancel-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let pidFile = dir.appendingPathComponent("child.pid")
+        let start = Date()
+        let task = Task {
+            try await SubprocessCLIClient.runProcessAsync(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "echo $$ > \"\(pidFile.path)\"; exec sleep 30"],
+                environment: [:],
+                timeoutSeconds: 30.0
+            )
+        }
+
+        var spawnedPID: pid_t?
+        for _ in 0..<100 {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+               let parsed = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+               parsed > 0
+            {
+                spawnedPID = parsed
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let pid = try XCTUnwrap(spawnedPID, "Expected child script to record its PID")
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected CancellationError")
+        } catch is CancellationError {
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 2.0)
+
+        var exited = false
+        for _ in 0..<50 {
+            if kill(pid, 0) != 0 && errno == ESRCH {
+                exited = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(exited, "Expected cancelled child pid \(pid) to terminate promptly")
+
+        let preCancelled = Task {
+            try await Task.sleep(for: .milliseconds(50))
+            return try await SubprocessCLIClient.runProcessAsync(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "sleep 30"],
+                environment: [:],
+                timeoutSeconds: 30.0
+            )
+        }
+        preCancelled.cancel()
+        do {
+            _ = try await preCancelled.value
+            XCTFail("Expected CancellationError for pre-cancelled task")
+        } catch is CancellationError {
+        }
+    }
+
     @MainActor
     func testLocalizedFailureUpdateServiceErrorAndUpdaterMutationGuard() async {
         let httpFailure = LocalizedFailure(error: UpdateServiceError.httpError(statusCode: 503))
@@ -1455,7 +1522,7 @@ final class MenubarViewModelTests: XCTestCase {
             hero: hero,
             recent: [hero, pending]
         )
-        let receipt = HandoffReceiptPayload(
+        let receipt = SyncReceiptPayload(
             workspace: hero.workspacePath,
             sourceHost: hero.host,
             sourceId: hero.sessionId,
@@ -1474,7 +1541,7 @@ final class MenubarViewModelTests: XCTestCase {
             var updaterInstalling = true
         }
         let guardState = GuardState()
-        let vm = HandoffViewModel(
+        let vm = SessionSyncStore(
             cli: cli,
             activator: MockActivator(),
             preferencesStore: prefs,
@@ -1482,13 +1549,13 @@ final class MenubarViewModelTests: XCTestCase {
         )
 
         await vm.refresh()
-        await vm.handoff(hero)
+        await vm.sync(hero)
         XCTAssertTrue(cli.handoffCalls.isEmpty)
         XCTAssertEqual(
             vm.banner,
             StatusBanner(
                 kind: .error,
-                text: AppCopy.handoffFailedBanner(
+                text: AppCopy.syncFailedBanner(
                     AppCopy.text(.updatesErrInstallationInProgress, in: .zhHans),
                     in: .zhHans
                 )
@@ -1500,7 +1567,7 @@ final class MenubarViewModelTests: XCTestCase {
             vm.banner,
             StatusBanner(
                 kind: .error,
-                text: AppCopy.handoffFailedBanner(
+                text: AppCopy.syncFailedBanner(
                     AppCopy.text(.updatesErrInstallationInProgress, in: .en),
                     in: .en
                 )
@@ -1521,7 +1588,7 @@ final class MenubarViewModelTests: XCTestCase {
         )
 
         guardState.updaterInstalling = false
-        await vm.handoff(hero)
+        await vm.sync(hero)
         XCTAssertEqual(cli.handoffCalls.count, 1)
 
         let updateVM = UpdateViewModel(preferencesStore: prefs, appVersion: "0.4.1")

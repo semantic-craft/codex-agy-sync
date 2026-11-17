@@ -189,7 +189,7 @@ public enum AppCopyKey: CaseIterable, Sendable {
     case cliSourceMissing
     case cliMissingError
 
-    case handoffUnconfirmedBanner
+    case syncUnconfirmedBanner
     case reconcileSyncedBanner
 
     case searchPlaceholder
@@ -288,7 +288,7 @@ public enum AppCopyKey: CaseIterable, Sendable {
     case updatesErrMissingChecksums
     case updatesErrMissingAssets
     case updatesErrPythonMissing
-    case updatesErrHandoffInProgress
+    case updatesErrSyncInProgress
     case updatesErrInstallationInProgress
     case updatesErrBundlePathMissing
     case updatesErrNoWritableBundleFallback
@@ -353,7 +353,7 @@ public enum AppCopy {
                 en: "codex-agy-sync CLI not found. Click \"Choose CLI…\" to locate it."
             )
 
-        case .handoffUnconfirmedBanner:
+        case .syncUnconfirmedBanner:
             return BilingualText(
                 zhHans: "同步尚未完成确认，请稍后点击重试同步状态。",
                 en: "Sync is not confirmed yet. Click Retry to resync status."
@@ -573,7 +573,7 @@ public enum AppCopy {
                 zhHans: "未找到可用的 Python 3 解释器以更新 CLI。",
                 en: "No Python 3 interpreter found to update the CLI."
             )
-        case .updatesErrHandoffInProgress:
+        case .updatesErrSyncInProgress:
             return BilingualText(
                 zhHans: "正在执行会话同步，请等待当前操作完成后再安装更新。",
                 en: "A session sync is in progress; wait for it to finish before installing."
@@ -654,7 +654,7 @@ public enum AppCopy {
         }
     }
 
-    public static func handoffOpenedBanner(targetName: String, title: String, in language: ResolvedLanguage) -> String {
+    public static func syncOpenedBanner(targetName: String, title: String, in language: ResolvedLanguage) -> String {
         switch language {
         case .zhHans:
             return "已在 \(targetName) 打开对话 · \(title)"
@@ -663,7 +663,7 @@ public enum AppCopy {
         }
     }
 
-    public static func handoffOpenedExistingBanner(targetName: String, title: String, in language: ResolvedLanguage) -> String {
+    public static func syncOpenedExistingBanner(targetName: String, title: String, in language: ResolvedLanguage) -> String {
         switch language {
         case .zhHans:
             return "已在 \(targetName) 打开现有对话 · \(title)"
@@ -672,7 +672,7 @@ public enum AppCopy {
         }
     }
 
-    public static func handoffFailedBanner(_ detail: String, in language: ResolvedLanguage) -> String {
+    public static func syncFailedBanner(_ detail: String, in language: ResolvedLanguage) -> String {
         switch language {
         case .zhHans:
             return "同步未成功：\(detail)"

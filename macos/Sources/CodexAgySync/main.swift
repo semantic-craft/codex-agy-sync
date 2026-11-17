@@ -1,32 +1,30 @@
 import AppKit
 import CodexAgySyncCore
-import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: StatusBarController?
-    private var cancellables = Set<AnyCancellable>()
+    private var languageObserverToken: ObservationToken?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let environment = ProcessInfo.processInfo.environment
         let preferencesStore = PreferencesStore(environment: environment)
         rebuildMainMenu(language: preferencesStore.effectiveLanguage)
-        preferencesStore.$effectiveLanguage
-            .dropFirst()
-            .sink { [weak self] language in
-                self?.rebuildMainMenu(language: language)
-            }
-            .store(in: &cancellables)
+        languageObserverToken = observeContinuously {
+            preferencesStore.effectiveLanguage
+        } onChange: { [weak self] language in
+            self?.rebuildMainMenu(language: language)
+        }
 
         let cli = SubprocessCLIClient(environment: environment)
         let activator = WorkspaceAppActivator(environment: environment)
-        let viewModel = HandoffViewModel(
+        let store = SessionSyncStore(
             cli: cli,
             activator: activator,
             preferencesStore: preferencesStore
         )
         let statusController = StatusBarController(
-            viewModel: viewModel,
+            store: store,
             environment: environment
         )
         self.controller = statusController
@@ -34,7 +32,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        cancellables.removeAll()
+        languageObserverToken?.cancel()
+        languageObserverToken = nil
         controller?.stop()
     }
 

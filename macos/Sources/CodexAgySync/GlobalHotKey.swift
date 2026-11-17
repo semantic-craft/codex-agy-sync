@@ -2,59 +2,69 @@ import Carbon
 import CodexAgySyncCore
 import Foundation
 
-private final class HotKeyCallbackBox: @unchecked Sendable {
-    let signature: OSType = 0x4341_484B // 'CAHK'
-    let identifier: UInt32 = 1
-    let onTrigger: @MainActor @Sendable () -> Void
+@MainActor
+private final class HotKeyCallbackBox {
+    nonisolated let signature: OSType = 0x4341_484B // 'CAHK'
+    nonisolated let identifier: UInt32 = 1
+    nonisolated let onTrigger: @MainActor @Sendable () -> Void
 
-    private let lock = NSLock()
     private var hotKeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
+    private var retainedContext: Unmanaged<HotKeyCallbackBox>?
 
     init(onTrigger: @escaping @MainActor @Sendable () -> Void) {
         self.onTrigger = onTrigger
     }
 
     var hasRegisteredHotKey: Bool {
-        lock.withLock { hotKeyRef != nil }
+        hotKeyRef != nil
     }
 
-    var hasInstalledHandler: Bool {
-        lock.withLock { handlerRef != nil }
-    }
-
-    func setHandler(_ ref: EventHandlerRef) {
-        lock.withLock { handlerRef = ref }
+    func installHandlerIfNeeded() -> Bool {
+        guard handlerRef == nil else { return true }
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let retained = Unmanaged.passRetained(self)
+        var installedHandler: EventHandlerRef?
+        let installStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            globalHotKeyEventCallback,
+            1,
+            &eventType,
+            retained.toOpaque(),
+            &installedHandler
+        )
+        guard installStatus == noErr, let installedHandler else {
+            retained.release()
+            return false
+        }
+        handlerRef = installedHandler
+        retainedContext = retained
+        return true
     }
 
     func setHotKey(_ ref: EventHotKeyRef) {
-        lock.withLock { hotKeyRef = ref }
+        hotKeyRef = ref
     }
 
     func unregisterHotKeyOnly() {
-        let existing: EventHotKeyRef? = lock.withLock {
-            let ref = hotKeyRef
+        if let existing = hotKeyRef {
             hotKeyRef = nil
-            return ref
-        }
-        if let existing {
             UnregisterEventHotKey(existing)
         }
     }
 
     func unregisterAll() {
-        let (existingHotKey, existingHandler): (EventHotKeyRef?, EventHandlerRef?) = lock.withLock {
-            let hk = hotKeyRef
-            let eh = handlerRef
-            hotKeyRef = nil
+        unregisterHotKeyOnly()
+        if let existingHandler = handlerRef {
             handlerRef = nil
-            return (hk, eh)
-        }
-        if let existingHotKey {
-            UnregisterEventHotKey(existingHotKey)
-        }
-        if let existingHandler {
             RemoveEventHandler(existingHandler)
+        }
+        if let retained = retainedContext {
+            retainedContext = nil
+            retained.release()
         }
     }
 }
@@ -101,7 +111,10 @@ final class GlobalHotKey {
     }
 
     deinit {
-        callbackBox.unregisterAll()
+        let box = callbackBox
+        Task { @MainActor in
+            box.unregisterAll()
+        }
     }
 
     @discardableResult
@@ -124,27 +137,10 @@ final class GlobalHotKey {
 
         callbackBox.unregisterHotKeyOnly()
 
-        if !callbackBox.hasInstalledHandler {
-            var eventType = EventTypeSpec(
-                eventClass: OSType(kEventClassKeyboard),
-                eventKind: UInt32(kEventHotKeyPressed)
-            )
-            let userData = Unmanaged.passUnretained(callbackBox).toOpaque()
-            var installedHandler: EventHandlerRef?
-            let installStatus = InstallEventHandler(
-                GetApplicationEventTarget(),
-                globalHotKeyEventCallback,
-                1,
-                &eventType,
-                userData,
-                &installedHandler
-            )
-            guard installStatus == noErr, let installedHandler else {
-                activeShortcut = nil
-                lastRegistrationFailed = true
-                return false
-            }
-            callbackBox.setHandler(installedHandler)
+        guard callbackBox.installHandlerIfNeeded() else {
+            activeShortcut = nil
+            lastRegistrationFailed = true
+            return false
         }
 
         let hotKeyID = EventHotKeyID(

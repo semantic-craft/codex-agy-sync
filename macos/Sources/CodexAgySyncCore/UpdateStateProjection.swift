@@ -60,7 +60,7 @@ enum UpdateFailureReason: Equatable, Sendable {
     case mismatchMissingAsset(tag: String)
     case bundlePathNotFound
     case relaunchFailed(String)
-    case handoffInProgress
+    case syncInProgress
     case stagedArtifactInvalid(String)
     case message(String)
 
@@ -86,8 +86,8 @@ enum UpdateFailureReason: Equatable, Sendable {
             return AppCopy.text(.updatesErrBundlePathMissing, in: language)
         case .relaunchFailed(let detail):
             return AppCopy.updateFailureRelaunchFailed(detail, in: language)
-        case .handoffInProgress:
-            return AppCopy.text(.updatesErrHandoffInProgress, in: language)
+        case .syncInProgress:
+            return AppCopy.text(.updatesErrSyncInProgress, in: language)
         case .stagedArtifactInvalid(let detail):
             return AppCopy.updateFailureStagedArtifactInvalid(detail, in: language)
         case .message(let raw):
@@ -125,28 +125,29 @@ struct UpdateProjectedViewState: Equatable {
 
 @MainActor
 enum UpdateStateProjector {
-    static func project(
-        semanticState: SemanticUpdateState,
-        lastCheckedEpoch: TimeInterval?,
-        lastBackgroundErrorReason: UpdateFailureReason?,
-        canRelaunchApp: Bool,
-        pendingRelaunchVersion: String?,
-        effectiveAppVersion: String,
+    static func formatLastChecked(
+        epoch: TimeInterval?,
         now: Date,
         in lang: ResolvedLanguage
-    ) -> UpdateProjectedViewState {
-        let lastCheckedDisplayText: String
-        if let epoch = lastCheckedEpoch {
+    ) -> String {
+        if let epoch {
             let formatted = AppDateFormatting.formatCheckTimestamp(epoch, now: now, in: lang)
-            lastCheckedDisplayText = AppCopy.lastCheckedReadout(formatted, in: lang)
-        } else {
-            lastCheckedDisplayText = AppCopy.lastCheckedReadout(nil, in: lang)
+            return AppCopy.lastCheckedReadout(formatted, in: lang)
         }
+        return AppCopy.lastCheckedReadout(nil, in: lang)
+    }
 
-        let lastBackgroundCheckError: String? = lastBackgroundErrorReason.map {
-            AppCopy.backgroundCheckErrorReadout($0.localizedText(in: lang), in: lang)
-        }
+    static func formatBackgroundError(
+        reason: UpdateFailureReason?,
+        in lang: ResolvedLanguage
+    ) -> String? {
+        reason.map { AppCopy.backgroundCheckErrorReadout($0.localizedText(in: lang), in: lang) }
+    }
 
+    static func projectAvailabilityAndStatus(
+        semanticState: SemanticUpdateState,
+        in lang: ResolvedLanguage
+    ) -> (availability: UpdateAvailability, statusMessage: String?, stagedManifest: StagedUpdateManifest?) {
         let availability: UpdateAvailability
         let statusMessage: String?
         let stagedManifest: StagedUpdateManifest?
@@ -244,6 +245,23 @@ enum UpdateStateProjector {
             statusMessage = detail
         }
 
+        return (availability, statusMessage, stagedManifest)
+    }
+
+    static func project(
+        semanticState: SemanticUpdateState,
+        lastCheckedEpoch: TimeInterval?,
+        lastBackgroundErrorReason: UpdateFailureReason?,
+        canRelaunchApp: Bool,
+        pendingRelaunchVersion: String?,
+        effectiveAppVersion: String,
+        now: Date,
+        in lang: ResolvedLanguage
+    ) -> UpdateProjectedViewState {
+        let lastCheckedDisplayText = formatLastChecked(epoch: lastCheckedEpoch, now: now, in: lang)
+        let lastBackgroundCheckError = formatBackgroundError(reason: lastBackgroundErrorReason, in: lang)
+        let core = projectAvailabilityAndStatus(semanticState: semanticState, in: lang)
+
         let notice = buildPopoverNotice(
             semanticState: semanticState,
             canRelaunchApp: canRelaunchApp,
@@ -253,9 +271,9 @@ enum UpdateStateProjector {
         )
 
         return UpdateProjectedViewState(
-            availability: availability,
-            statusMessage: statusMessage,
-            stagedManifest: stagedManifest,
+            availability: core.availability,
+            statusMessage: core.statusMessage,
+            stagedManifest: core.stagedManifest,
             lastCheckedDisplayText: lastCheckedDisplayText,
             lastBackgroundCheckError: lastBackgroundCheckError,
             popoverNotice: notice
