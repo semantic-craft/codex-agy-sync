@@ -206,7 +206,23 @@ fn subcommand_name(cmd: &Commands) -> &'static str {
 
 enum PythonServeTarget {
     CliScript(PathBuf),
+    PythonScript { python: PathBuf, script: PathBuf },
     PythonModule(PathBuf),
+}
+
+fn read_shebang_line(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    use std::io::BufRead;
+    if reader.read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    if line.starts_with("#!") {
+        Some(line)
+    } else {
+        None
+    }
 }
 
 fn is_executable_script(path: &Path) -> bool {
@@ -260,19 +276,100 @@ fn is_same_executable(candidate: &Path, self_exe: Option<&Path>) -> bool {
     cand_canon == self_canon
 }
 
+fn parse_python_version_dir_key(path: &Path) -> (u32, u32, String) {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut parts = name.split('.');
+    let major = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let minor = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    (major, minor, name)
+}
+
+fn python_meets_min_version(python: &Path) -> bool {
+    Command::new(python)
+        .args([
+            "-c",
+            "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn python_can_import_package(python: &Path) -> bool {
+    Command::new(python)
+        .args([
+            "-c",
+            "import sys, codex_agy_sync; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn collect_python3_candidates() -> Vec<PathBuf> {
+    let mut python_candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path_var) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_var) {
+            python_candidates.push(dir.join("python3"));
+        }
+    }
+    python_candidates.push(PathBuf::from("/opt/homebrew/bin/python3"));
+    python_candidates.push(PathBuf::from("/usr/local/bin/python3"));
+    python_candidates.push(PathBuf::from("/usr/bin/python3"));
+    python_candidates
+}
+
+fn wrap_cli_script_target(script: PathBuf) -> Option<PythonServeTarget> {
+    if let Some(shebang) = read_shebang_line(&script) {
+        let lower = shebang.to_ascii_lowercase();
+        if lower.contains("/env ") && lower.contains("python") {
+            for py in collect_python3_candidates() {
+                if is_executable_file(&py) && python_meets_min_version(&py) {
+                    return Some(PythonServeTarget::PythonScript { python: py, script });
+                }
+            }
+            return None;
+        }
+    }
+    Some(PythonServeTarget::CliScript(script))
+}
+
 fn resolve_python_serve_target() -> Option<PythonServeTarget> {
     let self_exe = env::current_exe().ok();
     if let Some(explicit) = env::var_os("CODEX_AGY_SYNC_PYTHON_BIN").filter(|v| !v.is_empty()) {
         let p = PathBuf::from(explicit);
         if is_executable_file(&p) && !is_same_executable(&p, self_exe.as_deref()) {
-            return Some(PythonServeTarget::CliScript(p));
+            let is_python_interp = !is_executable_script(&p)
+                && p.file_name()
+                    .map(|n| {
+                        n.to_string_lossy()
+                            .to_ascii_lowercase()
+                            .starts_with("python")
+                    })
+                    .unwrap_or(false);
+            if is_python_interp {
+                if python_can_import_package(&p) {
+                    return Some(PythonServeTarget::PythonModule(p));
+                }
+                return None;
+            }
+            return wrap_cli_script_target(p);
         }
         return None;
     }
 
     let mut script_candidates: Vec<PathBuf> = Vec::new();
     if let Some(ref exe) = self_exe {
-        for ancestor in exe.ancestors().skip(1).take(5) {
+        for ancestor in exe.ancestors().skip(1).take(8) {
             script_candidates.push(ancestor.join("bin").join("codex-agy-sync"));
         }
     }
@@ -293,8 +390,7 @@ fn resolve_python_serve_target() -> Option<PythonServeTarget> {
                 .map(|e| e.path())
                 .filter(|p| p.is_dir())
                 .collect();
-            dirs.sort();
-            dirs.reverse();
+            dirs.sort_by_key(|p| std::cmp::Reverse(parse_python_version_dir_key(p)));
             for dir in dirs {
                 script_candidates.push(dir.join("bin").join("codex-agy-sync"));
             }
@@ -304,31 +400,19 @@ fn resolve_python_serve_target() -> Option<PythonServeTarget> {
     script_candidates.push(PathBuf::from("/usr/local/bin/codex-agy-sync"));
 
     for cand in script_candidates {
-        if is_executable_script(&cand) && !is_same_executable(&cand, self_exe.as_deref()) {
-            return Some(PythonServeTarget::CliScript(cand));
+        if is_executable_script(&cand)
+            && !is_same_executable(&cand, self_exe.as_deref())
+            && let Some(target) = wrap_cli_script_target(cand)
+        {
+            return Some(target);
         }
     }
 
-    let mut python_candidates: Vec<PathBuf> = Vec::new();
-    if let Some(path_var) = env::var_os("PATH") {
-        for dir in env::split_paths(&path_var) {
-            python_candidates.push(dir.join("python3"));
-        }
-    }
-    python_candidates.push(PathBuf::from("/opt/homebrew/bin/python3"));
-    python_candidates.push(PathBuf::from("/usr/local/bin/python3"));
-    python_candidates.push(PathBuf::from("/usr/bin/python3"));
-
-    for py in python_candidates {
+    for py in collect_python3_candidates() {
         if !is_executable_file(&py) {
             continue;
         }
-        let ok = Command::new(&py)
-            .args(["-c", "import codex_agy_sync"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
+        if python_can_import_package(&py) {
             return Some(PythonServeTarget::PythonModule(py));
         }
     }
@@ -363,7 +447,10 @@ fn build_serve_forwarded_args(cli: &Cli, serve_args: &ServeArgs) -> Vec<OsString
 }
 
 fn delegate_serve_to_python(cli: &Cli, serve_args: &ServeArgs) -> ExitCode {
-    if env::var_os("CODEX_AGY_SYNC_SERVE_DELEGATED").is_some() {
+    if env::var_os("CODEX_AGY_SYNC_SERVE_DELEGATED")
+        .filter(|v| !v.is_empty())
+        .is_some()
+    {
         let payload = json!({
             "error": "serve_python_unavailable",
             "message": "Recursive serve delegation detected; install Python codex-agy-sync CLI for `serve`."
@@ -389,6 +476,12 @@ fn delegate_serve_to_python(cli: &Cli, serve_args: &ServeArgs) -> ExitCode {
     let mut cmd = match target {
         PythonServeTarget::CliScript(script) => {
             let mut c = Command::new(script);
+            c.args(&forwarded);
+            c
+        }
+        PythonServeTarget::PythonScript { python, script } => {
+            let mut c = Command::new(python);
+            c.arg(script);
             c.args(&forwarded);
             c
         }

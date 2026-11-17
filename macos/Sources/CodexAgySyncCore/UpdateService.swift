@@ -179,7 +179,7 @@ public final class UpdateViewModel {
             ?? "dev.semanticcraft.codex-agy-sync"
         if let currentAppBundleURL {
             self.currentAppBundleURL = currentAppBundleURL
-        } else if Bundle.main.bundleURL.pathExtension == "app" {
+        } else if Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
             self.currentAppBundleURL = Bundle.main.bundleURL
         } else {
             self.currentAppBundleURL = nil

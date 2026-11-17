@@ -169,6 +169,11 @@ if [[ -z "$CARGO_BIN" ]]; then
     echo "Error: cargo toolchain not found in PATH or standard locations (\$HOME/.cargo/bin, /opt/homebrew/bin, /usr/local/bin)." >&2
     exit 1
 fi
+CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
+case ":$PATH:" in
+    *":$CARGO_BIN_DIR:"*) ;;
+    *) export PATH="$CARGO_BIN_DIR:$PATH" ;;
+esac
 
 discover_developer_id_identity() {
     local line
@@ -290,12 +295,20 @@ fi
 
 APP_VERSION="$(python3 -c '
 import pathlib, re, sys
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.M)
-if not match:
+py_text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+py_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", py_text, re.M)
+if not py_match:
     raise SystemExit("Error: missing version in pyproject.toml")
-print(match.group(1))
-' "$REPO_ROOT/pyproject.toml")"
+py_ver = py_match.group(1)
+cargo_text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+cargo_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", cargo_text, re.M)
+if not cargo_match:
+    raise SystemExit("Error: missing version in rust/Cargo.toml")
+cargo_ver = cargo_match.group(1)
+if cargo_ver != py_ver:
+    raise SystemExit(f"Error: version mismatch between pyproject.toml ({py_ver}) and rust/Cargo.toml ({cargo_ver})")
+print(py_ver)
+' "$REPO_ROOT/pyproject.toml" "$REPO_ROOT/rust/Cargo.toml")"
 
 SCRATCH_PATH="$REPO_ROOT/out/swift-build"
 RUST_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/out/rust-target}"
@@ -383,10 +396,10 @@ PY
 
 if [[ "$SIGN_MODE" == "developer_id" ]]; then
     codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$HELPERS_DIR/codex-agy-sync"
-    codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$STAGE_APP"
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$STAGE_APP"
 else
     codesign --force --sign - "$HELPERS_DIR/codex-agy-sync"
-    codesign --force --deep --sign - "$STAGE_APP"
+    codesign --force --sign - "$STAGE_APP"
 fi
 codesign --verify --deep --strict "$STAGE_APP"
 

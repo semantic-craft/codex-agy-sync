@@ -225,6 +225,8 @@ if tool == "spctl":
         helper_sign_args = sign_calls[0]["args"]
         app_sign_args = sign_calls[1]["args"]
         self.assertTrue(str(helper_sign_args[-1]).endswith("Contents/Helpers/codex-agy-sync"))
+        self.assertNotIn("--deep", helper_sign_args)
+        self.assertNotIn("--deep", app_sign_args)
         for sign_args in (helper_sign_args, app_sign_args):
             self.assertIn("--options", sign_args)
             self.assertIn("runtime", sign_args)

@@ -167,4 +167,62 @@ fn cli_serve_delegates_to_python_cli_and_handles_missing_python_cli() {
     assert_eq!(missing_py.status.code(), Some(2));
     let err_json: Value = serde_json::from_slice(&missing_py.stderr).expect("json error");
     assert_eq!(err_json["error"], "serve_python_unavailable");
+
+    // Empty CODEX_AGY_SYNC_SERVE_DELEGATED must not trigger recursion guard, while non-empty must.
+    let empty_guard = Command::new(bin)
+        .args(["serve", "--help"])
+        .env("HOME", root)
+        .env("CODEX_AGY_SYNC_PYTHON_BIN", &py_cli)
+        .env("CODEX_AGY_SYNC_SERVE_DELEGATED", "")
+        .output()
+        .expect("run serve with empty recursion env");
+    assert!(empty_guard.status.success());
+
+    let recursive_guard = Command::new(bin)
+        .args(["serve", "--status"])
+        .env("HOME", root)
+        .env("CODEX_AGY_SYNC_PYTHON_BIN", &py_cli)
+        .env("CODEX_AGY_SYNC_SERVE_DELEGATED", "1")
+        .output()
+        .expect("run serve with active recursion env");
+    assert_eq!(recursive_guard.status.code(), Some(2));
+    let rec_json: Value = serde_json::from_slice(&recursive_guard.stderr).expect("json error");
+    assert_eq!(rec_json["error"], "serve_python_unavailable");
+
+    // Verify 6-level deep bundled .app/Contents/Helpers/codex-agy-sync resolves <repo>/bin/codex-agy-sync under clean PATH/HOME.
+    let fake_repo = root.join("repo");
+    let fake_repo_bin = fake_repo.join("bin");
+    let bundled_helpers = fake_repo
+        .join("out")
+        .join("app")
+        .join("CodexAgySync.app")
+        .join("Contents")
+        .join("Helpers");
+    fs::create_dir_all(&fake_repo_bin).expect("mkdir fake repo bin");
+    fs::create_dir_all(&bundled_helpers).expect("mkdir bundled helpers");
+    let bundled_bin = bundled_helpers.join("codex-agy-sync");
+    fs::copy(bin, &bundled_bin).expect("copy rust cli into fake app bundle");
+    let fake_py_cli = fake_repo_bin.join("codex-agy-sync");
+    fs::write(&fake_py_cli, "#!/bin/sh\necho \"delegated-ok:$*\"\n").expect("write fake py cli");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_py_cli, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake py cli");
+    }
+    let bundled_serve = Command::new(&bundled_bin)
+        .args(["serve", "--status"])
+        .env("HOME", root.join("empty-home"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .expect("run bundled serve");
+    assert!(
+        bundled_serve.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&bundled_serve.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&bundled_serve.stdout).trim(),
+        "delegated-ok:serve --status"
+    );
 }
