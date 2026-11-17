@@ -9,17 +9,28 @@ BUNDLE_ID="dev.semanticcraft.codex-agy-sync"
 OUTPUT_DIR=""
 ARCHIVE_ZIP=""
 INSTALL=0
+ADHOC=0
+NOTARIZE=0
+RELEASE=0
+SIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
+SIGN_IDENTITY_CLI_SET=0
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
 usage() {
     cat <<'EOF'
 Usage: build_menubar_app.sh [options]
 
 Options:
-  --output-dir <dir>    Target directory for CodexAgySync.app (default: $REPO_ROOT/out/app)
-  --bundle-id <id>      CFBundleIdentifier (default: dev.semanticcraft.codex-agy-sync)
-  --archive-zip <path>  Package signed .app into <path> via ditto and write <path>.sha256
-  --install             Output to $HOME/Applications and register with LaunchServices
-  -h, --help            Show this help text
+  --output-dir <dir>        Target directory for CodexAgySync.app (default: $REPO_ROOT/out/app)
+  --bundle-id <id>          CFBundleIdentifier (default: dev.semanticcraft.codex-agy-sync)
+  --archive-zip <path>      Package signed .app into <path> via ditto and write <path>.sha256
+  --install                 Output to $HOME/Applications and register with LaunchServices
+  --adhoc                   Force ad-hoc signing (--sign -) for local dev/QA builds
+  --sign-identity <id>      Explicit Developer ID Application signing identity (or CODESIGN_IDENTITY env)
+  --notarize                Sign with Developer ID + hardened runtime + timestamp and notarize
+  --release                 Implies --notarize and writes zipped release artifact + SHA256SUMS.txt
+  --notary-profile <name>   Notary keychain profile name (or NOTARY_PROFILE / macos-notary-profile)
+  -h, --help                Show this help text
 EOF
 }
 
@@ -44,6 +55,30 @@ while [[ $# -gt 0 ]]; do
             INSTALL=1
             shift
             ;;
+        --adhoc)
+            ADHOC=1
+            shift
+            ;;
+        --sign-identity)
+            [[ $# -ge 2 ]] || { echo "Error: --sign-identity requires an argument" >&2; exit 1; }
+            SIGN_IDENTITY="$2"
+            SIGN_IDENTITY_CLI_SET=1
+            shift 2
+            ;;
+        --notarize)
+            NOTARIZE=1
+            shift
+            ;;
+        --release)
+            RELEASE=1
+            NOTARIZE=1
+            shift
+            ;;
+        --notary-profile)
+            [[ $# -ge 2 ]] || { echo "Error: --notary-profile requires an argument" >&2; exit 1; }
+            NOTARY_PROFILE="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -56,11 +91,34 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$OUTPUT_DIR" ]]; then
+if [[ "$ADHOC" -eq 1 && "$NOTARIZE" -eq 1 ]]; then
+    echo "Error: --adhoc cannot be combined with --notarize or --release." >&2
+    exit 1
+fi
+
+if [[ "$ADHOC" -eq 1 && "$SIGN_IDENTITY_CLI_SET" -eq 1 && "$SIGN_IDENTITY" != "-" ]]; then
+    echo "Error: --adhoc cannot be combined with --sign-identity '$SIGN_IDENTITY'." >&2
+    exit 1
+fi
+
+USER_SPECIFIED_OUTPUT_DIR=0
+if [[ -n "$OUTPUT_DIR" ]]; then
+    USER_SPECIFIED_OUTPUT_DIR=1
+else
     if [[ "$INSTALL" -eq 1 ]]; then
         OUTPUT_DIR="$HOME/Applications"
+    elif [[ "$RELEASE" -eq 1 ]]; then
+        OUTPUT_DIR="${OUT_DIR:-$REPO_ROOT/out/release}"
     else
         OUTPUT_DIR="$REPO_ROOT/out/app"
+    fi
+fi
+
+if [[ "$RELEASE" -eq 1 && -z "$ARCHIVE_ZIP" ]]; then
+    if [[ "$INSTALL" -eq 0 && "$USER_SPECIFIED_OUTPUT_DIR" -eq 1 ]]; then
+        ARCHIVE_ZIP="$OUTPUT_DIR/${APP_NAME}-macos.zip"
+    else
+        ARCHIVE_ZIP="${OUT_DIR:-$REPO_ROOT/out/release}/${APP_NAME}-macos.zip"
     fi
 fi
 
@@ -90,6 +148,124 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 command -v swift >/dev/null 2>&1 || { echo "Error: swift toolchain not found in PATH." >&2; exit 1; }
+
+discover_developer_id_identity() {
+    local line
+    line="$(security find-identity -v -p codesigning 2>/dev/null | grep 'Developer ID Application:' | head -n 1 || true)"
+    if [[ -n "$line" ]]; then
+        if [[ "$line" =~ \"([^\"]*Developer\ ID\ Application:[^\"]*)\" ]]; then
+            printf '%s\n' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+        local hash
+        hash="$(printf '%s\n' "$line" | awk '{print $2}')"
+        if [[ -n "$hash" ]]; then
+            printf '%s\n' "$hash"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+resolve_notary_profile() {
+    if [[ -n "$NOTARY_PROFILE" ]]; then
+        printf '%s\n' "$NOTARY_PROFILE"
+        return 0
+    fi
+    local profile_cmd=""
+    if command -v macos-notary-profile >/dev/null 2>&1; then
+        profile_cmd="$(command -v macos-notary-profile)"
+    elif [[ -x "$HOME/.local/bin/macos-notary-profile" ]]; then
+        profile_cmd="$HOME/.local/bin/macos-notary-profile"
+    else
+        echo "Error: NOTARY_PROFILE is not set and macos-notary-profile was not found in PATH or \$HOME/.local/bin." >&2
+        return 1
+    fi
+    local resolved
+    resolved="$("$profile_cmd")" || {
+        echo "Error: Failed to resolve notary profile via $profile_cmd." >&2
+        return 1
+    }
+    resolved="$(printf '%s' "$resolved" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [[ -z "$resolved" ]]; then
+        echo "Error: $profile_cmd returned an empty notary profile." >&2
+        return 1
+    fi
+    printf '%s\n' "$resolved"
+}
+
+notarize_and_verify_stage_app() {
+    local app_path="$1"
+    local notary_bin=""
+    if command -v macos-notary >/dev/null 2>&1; then
+        notary_bin="$(command -v macos-notary)"
+    elif [[ -x "$HOME/.local/bin/macos-notary" ]]; then
+        notary_bin="$HOME/.local/bin/macos-notary"
+    fi
+
+    if [[ -n "$notary_bin" ]]; then
+        "$notary_bin" submit "$app_path" --profile "$NOTARY_PROFILE"
+    else
+        local submit_zip="$STAGE_DIR/${APP_NAME}-notarize.zip"
+        rm -f "$submit_zip"
+        /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app_path" "$submit_zip"
+        local submit_json
+        submit_json="$(xcrun notarytool submit "$submit_zip" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json)" || {
+            echo "Error: xcrun notarytool submit failed for $app_path." >&2
+            return 1
+        }
+        python3 - "$submit_json" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+if not isinstance(payload, dict) or payload.get("status") != "Accepted":
+    raise SystemExit(f"Error: notarization was not accepted: {payload}")
+PY
+        xcrun stapler staple "$app_path"
+        xcrun stapler validate "$app_path"
+    fi
+
+    local spctl_out=""
+    spctl_out="$(spctl --assess --type execute --verbose=4 "$app_path" 2>&1)" || {
+        echo "Error: spctl Gatekeeper assessment failed for $app_path:" >&2
+        echo "$spctl_out" >&2
+        return 1
+    }
+    if [[ "$spctl_out" != *"Notarized Developer ID"* ]]; then
+        echo "Error: spctl did not report 'Notarized Developer ID' for $app_path:" >&2
+        echo "$spctl_out" >&2
+        return 1
+    fi
+}
+
+SIGN_MODE=""
+if [[ "$ADHOC" -eq 1 ]]; then
+    SIGN_MODE="adhoc"
+    SIGN_IDENTITY="-"
+elif [[ "$SIGN_IDENTITY" == "-" ]]; then
+    if [[ "$NOTARIZE" -eq 1 ]]; then
+        echo "Error: ad-hoc signing ('-') cannot be used with --notarize or --release." >&2
+        exit 1
+    fi
+    SIGN_MODE="adhoc"
+elif [[ -n "$SIGN_IDENTITY" ]]; then
+    SIGN_MODE="developer_id"
+else
+    SIGN_IDENTITY="$(discover_developer_id_identity || true)"
+    if [[ -n "$SIGN_IDENTITY" ]]; then
+        SIGN_MODE="developer_id"
+    elif [[ "$NOTARIZE" -eq 1 ]]; then
+        echo "Error: No 'Developer ID Application:' codesigning identity found (set CODESIGN_IDENTITY or install a Developer ID certificate)." >&2
+        exit 1
+    else
+        SIGN_MODE="adhoc"
+        SIGN_IDENTITY="-"
+        echo "Note: No Developer ID Application identity found; using ad-hoc dev signing (--sign -)." >&2
+    fi
+fi
+
+if [[ "$NOTARIZE" -eq 1 ]]; then
+    NOTARY_PROFILE="$(resolve_notary_profile)"
+fi
 
 APP_VERSION="$(python3 -c '
 import pathlib, re, sys
@@ -169,8 +345,16 @@ with open(plist_path, "wb") as handle:
     plistlib.dump(payload, handle)
 PY
 
-codesign --force --deep --sign - "$STAGE_APP"
+if [[ "$SIGN_MODE" == "developer_id" ]]; then
+    codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$STAGE_APP"
+else
+    codesign --force --deep --sign - "$STAGE_APP"
+fi
 codesign --verify --deep --strict "$STAGE_APP"
+
+if [[ "$NOTARIZE" -eq 1 ]]; then
+    notarize_and_verify_stage_app "$STAGE_APP"
+fi
 
 rm -rf "$DEST_STAGE"
 /usr/bin/ditto "$STAGE_APP" "$DEST_STAGE"
@@ -201,6 +385,9 @@ if [[ -n "$ARCHIVE_ZIP" ]]; then
         cd "$ARCHIVE_DIR"
         shasum -a 256 "$ARCHIVE_BASE"
     ) > "$ARCHIVE_ZIP_ABS.sha256"
+    if [[ "$NOTARIZE" -eq 1 ]]; then
+        cp -f "$ARCHIVE_ZIP_ABS.sha256" "$ARCHIVE_DIR/SHA256SUMS.txt"
+    fi
 fi
 
 if [[ "$INSTALL" -eq 1 ]]; then
