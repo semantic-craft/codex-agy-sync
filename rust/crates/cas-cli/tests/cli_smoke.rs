@@ -123,3 +123,48 @@ fn cli_version_pair_status_and_invalid_flag_exit_codes() {
         .expect("run bad dry");
     assert_eq!(bad_dry.status.code(), Some(2));
 }
+
+#[test]
+fn cli_serve_delegates_to_python_cli_and_handles_missing_python_cli() {
+    let bin = env!("CARGO_BIN_EXE_codex-agy-sync");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let py_cli = repo_root.join("bin").join("codex-agy-sync");
+
+    let tmp = make_sandbox();
+    let root = tmp.path();
+
+    let ok_help = Command::new(bin)
+        .args([
+            "--sync-state-dir",
+            &root.display().to_string(),
+            "serve",
+            "--help",
+        ])
+        .env("HOME", root)
+        .env("CODEX_AGY_SYNC_PYTHON_BIN", &py_cli)
+        .output()
+        .expect("run serve --help");
+    assert!(
+        ok_help.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&ok_help.stderr)
+    );
+    let help_out = String::from_utf8_lossy(&ok_help.stdout);
+    assert!(help_out.contains("--idle-timeout"), "stdout={help_out}");
+
+    let missing_py = Command::new(bin)
+        .args(["serve", "--status"])
+        .env("HOME", root)
+        .env("PATH", "/nonexistent")
+        .env("CODEX_AGY_SYNC_PYTHON_BIN", root.join("missing-python-cli"))
+        .output()
+        .expect("run serve with missing python cli");
+    assert_eq!(missing_py.status.code(), Some(2));
+    let err_json: Value = serde_json::from_slice(&missing_py.stderr).expect("json error");
+    assert_eq!(err_json["error"], "serve_python_unavailable");
+}

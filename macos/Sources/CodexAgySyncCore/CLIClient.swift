@@ -4,6 +4,7 @@ import Foundation
 public enum CLIResolutionSource: String, Codable, Equatable, Sendable {
     case envOverride = "env_override"
     case customPath = "custom_path"
+    case bundled = "bundled"
     case autoDiscovered = "auto_discovered"
     case missing = "missing"
 
@@ -13,6 +14,8 @@ public enum CLIResolutionSource: String, Codable, Equatable, Sendable {
             return AppCopy.text(.cliSourceEnv, in: language)
         case .customPath:
             return AppCopy.text(.cliSourceCustom, in: language)
+        case .bundled:
+            return AppCopy.text(.cliSourceBundled, in: language)
         case .autoDiscovered:
             return AppCopy.text(.cliSourceAuto, in: language)
         case .missing:
@@ -76,9 +79,9 @@ private actor CLIEnvironmentScanner {
     func resolveExecutionContext(
         executableOverride: URL?,
         environment: [String: String],
-        customCLIPath: String?
+        customCLIPath: String?,
+        bundleURL: URL
     ) throws -> (executableURL: URL, childEnv: [String: String]) {
-        let pyBins = SubprocessCLIClient.userPythonBinDirectories()
         let executableURL: URL
         if let executableOverride {
             guard FileManager.default.isExecutableFile(atPath: executableOverride.path) else {
@@ -89,14 +92,14 @@ private actor CLIEnvironmentScanner {
             let resolved = SubprocessCLIClient.resolveExecutableURL(
                 environment: environment,
                 customCLIPath: customCLIPath,
-                pythonBinDirectories: pyBins
+                bundleURL: bundleURL
             )
             guard let url = resolved.url else {
                 throw CLIClientError.cliMissing(searchedLocations: resolved.searched)
             }
             executableURL = url
         }
-        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment, pythonBinDirectories: pyBins)
+        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
         return (executableURL, childEnv)
     }
 }
@@ -308,47 +311,31 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
     private let environment: [String: String]
     private let timeoutSeconds: TimeInterval
     private let executableOverride: URL?
+    private let bundleURL: URL
 
     public init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         defaultsSuiteName: String? = nil,
         timeoutSeconds: TimeInterval = 15.0,
-        executableOverride: URL? = nil
+        executableOverride: URL? = nil,
+        bundleURL: URL = Bundle.main.bundleURL
     ) {
         self.environment = environment
         self.defaultsSuiteName = defaultsSuiteName
         self.timeoutSeconds = timeoutSeconds
         self.executableOverride = executableOverride
+        self.bundleURL = bundleURL
     }
 
-    public static func userPythonBinDirectories(
-        homeDirectory: URL? = nil,
-        fileManager: FileManager = .default
-    ) -> [String] {
-        let home = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
-        let pyRoot = home.appendingPathComponent("Library/Python", isDirectory: true)
-        guard let children = try? fileManager.contentsOfDirectory(
-            at: pyRoot,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
+    public static func bundledExecutablePath(bundleURL: URL = Bundle.main.bundleURL) -> String? {
+        guard bundleURL.pathExtension.lowercased() == "app" else {
+            return nil
         }
-
-        let sortedDirs = children
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .sorted { lhs, rhs in
-                let lv = lhs.lastPathComponent.split(separator: ".").map { Int($0) ?? -1 }
-                let rv = rhs.lastPathComponent.split(separator: ".").map { Int($0) ?? -1 }
-                for idx in 0..<max(lv.count, rv.count) {
-                    let a = idx < lv.count ? lv[idx] : 0
-                    let b = idx < rv.count ? rv[idx] : 0
-                    if a != b { return a > b }
-                }
-                return lhs.lastPathComponent > rhs.lastPathComponent
-            }
-
-        return sortedDirs.map { $0.appendingPathComponent("bin", isDirectory: true).path }
+        return bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Helpers", isDirectory: true)
+            .appendingPathComponent("codex-agy-sync", isDirectory: false)
+            .path
     }
 
     public static func candidateExecutableEntries(
@@ -356,14 +343,14 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         defaults: UserDefaults = .standard,
         fileManager: FileManager = .default,
         homeDirectory: URL? = nil,
-        pythonBinDirectories: [String]? = nil
+        bundleURL: URL = Bundle.main.bundleURL
     ) -> [(path: String, source: CLIResolutionSource)] {
         candidateExecutableEntries(
             environment: environment,
             customCLIPath: defaults.string(forKey: cliExecutableDefaultsKey),
             fileManager: fileManager,
             homeDirectory: homeDirectory,
-            pythonBinDirectories: pythonBinDirectories
+            bundleURL: bundleURL
         )
     }
 
@@ -372,7 +359,7 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         customCLIPath: String?,
         fileManager: FileManager = .default,
         homeDirectory: URL? = nil,
-        pythonBinDirectories: [String]? = nil
+        bundleURL: URL = Bundle.main.bundleURL
     ) -> [(path: String, source: CLIResolutionSource)] {
         var entries: [(path: String, source: CLIResolutionSource)] = []
         var seen = Set<String>()
@@ -396,6 +383,7 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         }
 
         appendCandidate(customCLIPath, source: .customPath)
+        appendCandidate(bundledExecutablePath(bundleURL: bundleURL), source: .bundled)
 
         if let pathEnv = environment["PATH"], !pathEnv.isEmpty {
             for dir in pathEnv.split(separator: ":") {
@@ -410,13 +398,6 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
             home.appendingPathComponent(".local/bin/codex-agy-sync").path,
             source: .autoDiscovered
         )
-        let pyBins = pythonBinDirectories ?? userPythonBinDirectories(homeDirectory: home, fileManager: fileManager)
-        for pyBin in pyBins {
-            appendCandidate(
-                URL(fileURLWithPath: pyBin).appendingPathComponent("codex-agy-sync").path,
-                source: .autoDiscovered
-            )
-        }
         appendCandidate("/opt/homebrew/bin/codex-agy-sync", source: .autoDiscovered)
         appendCandidate("/usr/local/bin/codex-agy-sync", source: .autoDiscovered)
 
@@ -428,14 +409,14 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         defaults: UserDefaults = .standard,
         fileManager: FileManager = .default,
         homeDirectory: URL? = nil,
-        pythonBinDirectories: [String]? = nil
+        bundleURL: URL = Bundle.main.bundleURL
     ) -> [String] {
         candidateExecutableEntries(
             environment: environment,
             defaults: defaults,
             fileManager: fileManager,
             homeDirectory: homeDirectory,
-            pythonBinDirectories: pythonBinDirectories
+            bundleURL: bundleURL
         ).map(\.path)
     }
 
@@ -444,14 +425,14 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         defaults: UserDefaults = .standard,
         fileManager: FileManager = .default,
         homeDirectory: URL? = nil,
-        pythonBinDirectories: [String]? = nil
+        bundleURL: URL = Bundle.main.bundleURL
     ) -> (url: URL?, source: CLIResolutionSource, searched: [String]) {
         resolveExecutableWithSource(
             environment: environment,
             customCLIPath: defaults.string(forKey: cliExecutableDefaultsKey),
             fileManager: fileManager,
             homeDirectory: homeDirectory,
-            pythonBinDirectories: pythonBinDirectories
+            bundleURL: bundleURL
         )
     }
 
@@ -460,14 +441,14 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         customCLIPath: String?,
         fileManager: FileManager = .default,
         homeDirectory: URL? = nil,
-        pythonBinDirectories: [String]? = nil
+        bundleURL: URL = Bundle.main.bundleURL
     ) -> (url: URL?, source: CLIResolutionSource, searched: [String]) {
         let entries = candidateExecutableEntries(
             environment: environment,
             customCLIPath: customCLIPath,
             fileManager: fileManager,
             homeDirectory: homeDirectory,
-            pythonBinDirectories: pythonBinDirectories
+            bundleURL: bundleURL
         )
         let searched = entries.map(\.path)
         for entry in entries where fileManager.isExecutableFile(atPath: entry.path) {
@@ -481,14 +462,14 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         defaults: UserDefaults = .standard,
         fileManager: FileManager = .default,
         homeDirectory: URL? = nil,
-        pythonBinDirectories: [String]? = nil
+        bundleURL: URL = Bundle.main.bundleURL
     ) -> (url: URL?, searched: [String]) {
         let resolved = resolveExecutableWithSource(
             environment: environment,
             defaults: defaults,
             fileManager: fileManager,
             homeDirectory: homeDirectory,
-            pythonBinDirectories: pythonBinDirectories
+            bundleURL: bundleURL
         )
         return (resolved.url, resolved.searched)
     }
@@ -498,14 +479,14 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         customCLIPath: String?,
         fileManager: FileManager = .default,
         homeDirectory: URL? = nil,
-        pythonBinDirectories: [String]? = nil
+        bundleURL: URL = Bundle.main.bundleURL
     ) -> (url: URL?, searched: [String]) {
         let resolved = resolveExecutableWithSource(
             environment: environment,
             customCLIPath: customCLIPath,
             fileManager: fileManager,
             homeDirectory: homeDirectory,
-            pythonBinDirectories: pythonBinDirectories
+            bundleURL: bundleURL
         )
         return (resolved.url, resolved.searched)
     }
@@ -513,14 +494,12 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
     public static func mergedEnvironment(
         from environment: [String: String],
         fileManager: FileManager = .default,
-        homeDirectory: URL? = nil,
-        pythonBinDirectories: [String]? = nil
+        homeDirectory: URL? = nil
     ) -> [String: String] {
         var env = environment
         let home = homeDirectory ?? fileManager.homeDirectoryForCurrentUser
         let homeLocalBin = home.appendingPathComponent(".local/bin").path
-        let pyBins = pythonBinDirectories ?? userPythonBinDirectories(homeDirectory: home, fileManager: fileManager)
-        let extraPathEntries = [homeLocalBin] + pyBins + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        let extraPathEntries = [homeLocalBin, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         var existing = (env["PATH"] ?? "").split(separator: ":").map(String.init)
         for entry in extraPathEntries where !existing.contains(entry) {
             existing.append(entry)
@@ -575,7 +554,8 @@ public struct SubprocessCLIClient: CLIRunnerProtocol, Sendable {
         let context = try await CLIEnvironmentScanner.shared.resolveExecutionContext(
             executableOverride: executableOverride,
             environment: environment,
-            customCLIPath: customCLIPath
+            customCLIPath: customCLIPath,
+            bundleURL: bundleURL
         )
         let output = try await Self.runProcessAsync(
             executableURL: context.executableURL,

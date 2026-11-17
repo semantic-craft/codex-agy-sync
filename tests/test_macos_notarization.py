@@ -32,10 +32,12 @@ class MacosNotarizationTest(unittest.TestCase):
         self.bin_dir = self.root / "bin"
         self.home_dir = self.root / "home"
         self.fake_swift_bin = self.root / "fake-swift-bin"
+        self.rust_target_dir = self.root / "rust-target"
         self.log_file = self.root / "invocations.jsonl"
         self.bin_dir.mkdir(parents=True, exist_ok=True)
         self.home_dir.mkdir(parents=True, exist_ok=True)
         self.fake_swift_bin.mkdir(parents=True, exist_ok=True)
+        self.rust_target_dir.mkdir(parents=True, exist_ok=True)
         self._install_common_stubs()
 
     def tearDown(self) -> None:
@@ -66,6 +68,22 @@ if [[ "${{1:-}}" == *generate_app_icon.swift ]]; then
     exit 0
 fi
 echo "Unexpected swift args: $*" >&2
+exit 1
+""",
+        )
+
+        _write_executable(
+            self.bin_dir / "cargo",
+            f"""#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${{1:-}}" == "build" ]]; then
+    target_dir="${{CARGO_TARGET_DIR:-{self.rust_target_dir}}}"
+    mkdir -p "$target_dir/release"
+    printf '#!/usr/bin/env sh\\nexit 0\\n' > "$target_dir/release/codex-agy-sync"
+    chmod 755 "$target_dir/release/codex-agy-sync"
+    exit 0
+fi
+echo "Unexpected cargo args: $*" >&2
 exit 1
 """,
         )
@@ -150,6 +168,7 @@ if tool == "spctl":
         env = {
             "HOME": str(self.home_dir),
             "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+            "CARGO_TARGET_DIR": str(self.rust_target_dir),
         }
         if extra:
             env.update(extra)
@@ -196,16 +215,22 @@ if tool == "spctl":
         with zipfile.ZipFile(zip_path) as zf:
             names = zf.namelist()
             self.assertTrue(any(n.startswith("CodexAgySync.app/Contents/MacOS/CodexAgySync") for n in names))
+            self.assertTrue(any(n.startswith("CodexAgySync.app/Contents/Helpers/codex-agy-sync") for n in names))
+
+        self.assertTrue((app_bundle / "Contents" / "Helpers" / "codex-agy-sync").is_file())
 
         invocations = self._invocations()
         sign_calls = [c for c in invocations if c["tool"] == "codesign" and "--sign" in c["args"]]
-        self.assertEqual(len(sign_calls), 1)
-        sign_args = sign_calls[0]["args"]
-        self.assertIn("--options", sign_args)
-        self.assertIn("runtime", sign_args)
-        self.assertIn("--timestamp", sign_args)
-        self.assertIn("Developer ID Application: Test Developer (TEAM12345)", sign_args)
-        self.assertNotIn("-", sign_args)
+        self.assertEqual(len(sign_calls), 2)
+        helper_sign_args = sign_calls[0]["args"]
+        app_sign_args = sign_calls[1]["args"]
+        self.assertTrue(str(helper_sign_args[-1]).endswith("Contents/Helpers/codex-agy-sync"))
+        for sign_args in (helper_sign_args, app_sign_args):
+            self.assertIn("--options", sign_args)
+            self.assertIn("runtime", sign_args)
+            self.assertIn("--timestamp", sign_args)
+            self.assertIn("Developer ID Application: Test Developer (TEAM12345)", sign_args)
+            self.assertNotIn("-", sign_args)
 
         notary_calls = [c for c in invocations if c["tool"] == "macos-notary"]
         self.assertEqual(len(notary_calls), 1)
@@ -239,6 +264,7 @@ if tool == "spctl":
 
         installed_app = self.home_dir / "Applications" / "CodexAgySync.app"
         self.assertTrue((installed_app / "Contents" / "MacOS" / "CodexAgySync").is_file())
+        self.assertTrue((installed_app / "Contents" / "Helpers" / "codex-agy-sync").is_file())
         self.assertFalse((installed_app / "Contents" / "MacOS" / "old-marker").exists())
         self.assertTrue((release_dir / "CodexAgySync-macos.zip").is_file())
         self.assertTrue((release_dir / "SHA256SUMS.txt").is_file())

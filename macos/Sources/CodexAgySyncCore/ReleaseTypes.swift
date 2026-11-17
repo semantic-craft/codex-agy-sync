@@ -32,8 +32,8 @@ public enum UpdateAvailability: Equatable, Sendable {
     case idle
     case checking
     case upToDate(currentVersion: String)
-    case releaseAvailable(latestTag: String, notesSummary: String, hasAppAsset: Bool, hasWheelAsset: Bool)
-    case stagedReady(tagName: String, version: String, notesSummary: String, hasAppAsset: Bool, hasWheelAsset: Bool)
+    case releaseAvailable(latestTag: String, notesSummary: String, hasAppAsset: Bool)
+    case stagedReady(tagName: String, version: String, notesSummary: String, hasAppAsset: Bool)
     case localSyncReady(repoPath: String, repoVersion: String)
     case updating(stepDescription: String)
     case failed(String)
@@ -77,8 +77,6 @@ public struct StagedUpdateManifest: Codable, Equatable, Sendable {
     public let tagName: String
     public let version: String
     public let notesSummary: String
-    public let wheelFileName: String?
-    public let wheelSHA256: String?
     public let appBundleName: String?
     public let stagedAtEpoch: TimeInterval
 
@@ -86,16 +84,12 @@ public struct StagedUpdateManifest: Codable, Equatable, Sendable {
         tagName: String,
         version: String,
         notesSummary: String,
-        wheelFileName: String?,
-        wheelSHA256: String?,
         appBundleName: String?,
         stagedAtEpoch: TimeInterval
     ) {
         self.tagName = tagName
         self.version = version
         self.notesSummary = notesSummary
-        self.wheelFileName = wheelFileName
-        self.wheelSHA256 = wheelSHA256
         self.appBundleName = appBundleName
         self.stagedAtEpoch = stagedAtEpoch
     }
@@ -142,7 +136,6 @@ public struct GitHubReleaseInfo: Equatable, Sendable {
     public let version: String
     public let htmlURL: URL?
     private let rawNotesSummary: String?
-    public let wheelAsset: ReleaseAssetInfo?
     public let appZipAsset: ReleaseAssetInfo?
     public let checksumsAsset: ReleaseAssetInfo?
 
@@ -159,7 +152,6 @@ public struct GitHubReleaseInfo: Equatable, Sendable {
         version: String,
         htmlURL: URL?,
         notesSummary: String,
-        wheelAsset: ReleaseAssetInfo?,
         appZipAsset: ReleaseAssetInfo?,
         checksumsAsset: ReleaseAssetInfo?
     ) {
@@ -168,7 +160,6 @@ public struct GitHubReleaseInfo: Equatable, Sendable {
         self.htmlURL = htmlURL
         let trimmed = notesSummary.trimmingCharacters(in: .whitespacesAndNewlines)
         self.rawNotesSummary = trimmed.isEmpty ? nil : trimmed
-        self.wheelAsset = wheelAsset
         self.appZipAsset = appZipAsset
         self.checksumsAsset = checksumsAsset
     }
@@ -178,7 +169,6 @@ public struct GitHubReleaseInfo: Equatable, Sendable {
         version: String,
         htmlURL: URL?,
         rawNotesSummary: String?,
-        wheelAsset: ReleaseAssetInfo?,
         appZipAsset: ReleaseAssetInfo?,
         checksumsAsset: ReleaseAssetInfo?
     ) {
@@ -186,7 +176,6 @@ public struct GitHubReleaseInfo: Equatable, Sendable {
         self.version = version
         self.htmlURL = htmlURL
         self.rawNotesSummary = rawNotesSummary
-        self.wheelAsset = wheelAsset
         self.appZipAsset = appZipAsset
         self.checksumsAsset = checksumsAsset
     }
@@ -203,11 +192,6 @@ public struct GitHubReleaseInfo: Equatable, Sendable {
         let normalizedVersion = SemanticVersion.parse(raw.tag_name)?.description
             ?? raw.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV \t\r\n"))
         let assets = raw.assets ?? []
-        let wheel = assets.first {
-            !isSignatureAssetName($0.name)
-                && $0.name.hasPrefix("codex_agy_sync-")
-                && $0.name.hasSuffix(".whl")
-        }
         let appZip = assets.first { $0.name == "CodexAgySync-macos.zip" }
             ?? assets.first { !isSignatureAssetName($0.name) && $0.name.lowercased().hasSuffix("-macos.zip") }
         let checksums = assets.first { $0.name == "SHA256SUMS" }
@@ -221,7 +205,6 @@ public struct GitHubReleaseInfo: Equatable, Sendable {
             version: normalizedVersion,
             htmlURL: url,
             rawNotesSummary: summary,
-            wheelAsset: wheel,
             appZipAsset: appZip,
             checksumsAsset: checksums
         )
@@ -264,7 +247,6 @@ public enum UpdateServiceError: LocalizedError, Equatable, Sendable {
     case checksumMismatch(assetName: String, expected: String, actual: String)
     case invalidLocalRepo(String)
     case targetBundleNotWritable(String)
-    case pythonInterpreterMissing
     case commandFailed(step: String, detail: String)
     case codesignVerificationFailed(String)
     case updateInstallationInProgress
@@ -300,8 +282,6 @@ public enum UpdateServiceError: LocalizedError, Equatable, Sendable {
             return AppCopy.updateErrInvalidLocalRepo(path, in: language)
         case .targetBundleNotWritable(let detail):
             return AppCopy.updateErrTargetBundleNotWritable(detail, in: language)
-        case .pythonInterpreterMissing:
-            return AppCopy.text(.updatesErrPythonMissing, in: language)
         case .commandFailed(let step, let detail):
             return AppCopy.updateErrCommandFailed(step: step, detail: detail, in: language)
         case .codesignVerificationFailed(let detail):

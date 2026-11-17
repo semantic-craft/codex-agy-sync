@@ -1,8 +1,11 @@
 //! Unified `codex-agy-sync` Rust CLI binary with Wave-1 parity across `menubar-feed`, `pair`, `status`, `inspect`, and `sync`.
 
 use std::env;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::ffi::OsString;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 
 use cas_core::{
     PACKAGE_VERSION, PairingPolicy, SyncDirection, TransportMode, normalize_workspace_spec,
@@ -60,6 +63,16 @@ enum Commands {
 
     /// One-shot session handoff or pending receipt reconciliation
     Sync(SyncArgs),
+
+    /// Start the Stage-1 read-only Local Workbench server (delegates to Python CLI)
+    #[command(name = "serve", disable_help_flag = true)]
+    Serve(ServeArgs),
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<OsString>,
 }
 
 #[derive(Debug, Args)]
@@ -187,6 +200,238 @@ fn subcommand_name(cmd: &Commands) -> &'static str {
         Commands::Status(_) => "status",
         Commands::Inspect(_) => "inspect",
         Commands::Sync(_) => "sync",
+        Commands::Serve(_) => "serve",
+    }
+}
+
+enum PythonServeTarget {
+    CliScript(PathBuf),
+    PythonModule(PathBuf),
+}
+
+fn is_executable_script(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(meta) = fs::metadata(path) else {
+            return false;
+        };
+        if (meta.permissions().mode() & 0o111) == 0 {
+            return false;
+        }
+    }
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0_u8; 2];
+    matches!(file.read_exact(&mut magic), Ok(()) if &magic == b"#!")
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|m| (m.permissions().mode() & 0o111) != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn is_same_executable(candidate: &Path, self_exe: Option<&Path>) -> bool {
+    let Some(self_path) = self_exe else {
+        return false;
+    };
+    let Ok(cand_canon) = fs::canonicalize(candidate) else {
+        return false;
+    };
+    let Ok(self_canon) = fs::canonicalize(self_path) else {
+        return false;
+    };
+    cand_canon == self_canon
+}
+
+fn resolve_python_serve_target() -> Option<PythonServeTarget> {
+    let self_exe = env::current_exe().ok();
+    if let Some(explicit) = env::var_os("CODEX_AGY_SYNC_PYTHON_BIN").filter(|v| !v.is_empty()) {
+        let p = PathBuf::from(explicit);
+        if is_executable_file(&p) && !is_same_executable(&p, self_exe.as_deref()) {
+            return Some(PythonServeTarget::CliScript(p));
+        }
+        return None;
+    }
+
+    let mut script_candidates: Vec<PathBuf> = Vec::new();
+    if let Some(ref exe) = self_exe {
+        for ancestor in exe.ancestors().skip(1).take(5) {
+            script_candidates.push(ancestor.join("bin").join("codex-agy-sync"));
+        }
+    }
+    if let Some(path_var) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_var) {
+            script_candidates.push(dir.join("codex-agy-sync"));
+        }
+    }
+    if let Some(home) = env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+    {
+        script_candidates.push(home.join(".local").join("bin").join("codex-agy-sync"));
+        let py_lib = home.join("Library").join("Python");
+        if let Ok(entries) = fs::read_dir(py_lib) {
+            let mut dirs: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            dirs.sort();
+            dirs.reverse();
+            for dir in dirs {
+                script_candidates.push(dir.join("bin").join("codex-agy-sync"));
+            }
+        }
+    }
+    script_candidates.push(PathBuf::from("/opt/homebrew/bin/codex-agy-sync"));
+    script_candidates.push(PathBuf::from("/usr/local/bin/codex-agy-sync"));
+
+    for cand in script_candidates {
+        if is_executable_script(&cand) && !is_same_executable(&cand, self_exe.as_deref()) {
+            return Some(PythonServeTarget::CliScript(cand));
+        }
+    }
+
+    let mut python_candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path_var) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_var) {
+            python_candidates.push(dir.join("python3"));
+        }
+    }
+    python_candidates.push(PathBuf::from("/opt/homebrew/bin/python3"));
+    python_candidates.push(PathBuf::from("/usr/local/bin/python3"));
+    python_candidates.push(PathBuf::from("/usr/bin/python3"));
+
+    for py in python_candidates {
+        if !is_executable_file(&py) {
+            continue;
+        }
+        let ok = Command::new(&py)
+            .args(["-c", "import codex_agy_sync"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(PythonServeTarget::PythonModule(py));
+        }
+    }
+    None
+}
+
+fn build_serve_forwarded_args(cli: &Cli, serve_args: &ServeArgs) -> Vec<OsString> {
+    let mut out: Vec<OsString> = Vec::new();
+    if let Some(ref p) = cli.agy_data_dir {
+        out.push(OsString::from("--agy-data-dir"));
+        out.push(p.as_os_str().to_os_string());
+    }
+    if let Some(ref p) = cli.agy_cli_data_dir {
+        out.push(OsString::from("--agy-cli-data-dir"));
+        out.push(p.as_os_str().to_os_string());
+    }
+    if let Some(ref p) = cli.gemini_config_dir {
+        out.push(OsString::from("--gemini-config-dir"));
+        out.push(p.as_os_str().to_os_string());
+    }
+    if let Some(ref p) = cli.codex_home_dir {
+        out.push(OsString::from("--codex-home-dir"));
+        out.push(p.as_os_str().to_os_string());
+    }
+    if let Some(ref p) = cli.sync_state_dir {
+        out.push(OsString::from("--sync-state-dir"));
+        out.push(p.as_os_str().to_os_string());
+    }
+    out.push(OsString::from("serve"));
+    out.extend(serve_args.args.iter().cloned());
+    out
+}
+
+fn delegate_serve_to_python(cli: &Cli, serve_args: &ServeArgs) -> ExitCode {
+    if env::var_os("CODEX_AGY_SYNC_SERVE_DELEGATED").is_some() {
+        let payload = json!({
+            "error": "serve_python_unavailable",
+            "message": "Recursive serve delegation detected; install Python codex-agy-sync CLI for `serve`."
+        });
+        let rendered =
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+        eprintln!("{rendered}");
+        return ExitCode::from(2);
+    }
+
+    let Some(target) = resolve_python_serve_target() else {
+        let payload = json!({
+            "error": "serve_python_unavailable",
+            "message": "The `serve` workbench requires the Python `codex-agy-sync` CLI, which was not found in PATH or standard Python locations."
+        });
+        let rendered =
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+        eprintln!("{rendered}");
+        return ExitCode::from(2);
+    };
+
+    let forwarded = build_serve_forwarded_args(cli, serve_args);
+    let mut cmd = match target {
+        PythonServeTarget::CliScript(script) => {
+            let mut c = Command::new(script);
+            c.args(&forwarded);
+            c
+        }
+        PythonServeTarget::PythonModule(py) => {
+            let mut c = Command::new(py);
+            c.args(["-m", "codex_agy_sync"]);
+            c.args(&forwarded);
+            c
+        }
+    };
+    cmd.env("CODEX_AGY_SYNC_SERVE_DELEGATED", "1");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        let payload = json!({
+            "error": "serve_launch_failed",
+            "message": format!("Failed to delegate `serve` to Python CLI: {err}")
+        });
+        let rendered =
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+        eprintln!("{rendered}");
+        ExitCode::from(2)
+    }
+    #[cfg(not(unix))]
+    {
+        match cmd.status() {
+            Ok(status) => {
+                let code = u8::try_from(status.code().unwrap_or(1)).unwrap_or(1);
+                ExitCode::from(code)
+            }
+            Err(err) => {
+                let payload = json!({
+                    "error": "serve_launch_failed",
+                    "message": format!("Failed to delegate `serve` to Python CLI: {err}")
+                });
+                let rendered =
+                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+                eprintln!("{rendered}");
+                ExitCode::from(2)
+            }
+        }
     }
 }
 
@@ -280,7 +525,9 @@ fn validate_cli_args(cmd: &Commands) -> Result<(), HostError> {
                 false,
             )
         }
-        Commands::Pair(_) | Commands::Status(_) | Commands::Inspect(_) => Ok(()),
+        Commands::Pair(_) | Commands::Status(_) | Commands::Inspect(_) | Commands::Serve(_) => {
+            Ok(())
+        }
     }
 }
 
@@ -403,6 +650,9 @@ fn run_command(
             let receipt = execute_handoff(paths, &resolved, args.include_interrupted)?;
             Ok(serde_json::to_value(receipt)?)
         }
+        Commands::Serve(_) => Err(HostError::InvalidArgument(
+            "serve must be delegated prior to run_command".to_owned(),
+        )),
     }
 }
 
@@ -425,6 +675,10 @@ fn main() -> ExitCode {
     };
 
     let subcmd = subcommand_name(&cli.command);
+    if let Commands::Serve(ref serve_args) = cli.command {
+        return delegate_serve_to_python(&cli, serve_args);
+    }
+
     if let Err(err) = validate_cli_args(&cli.command) {
         let payload = err.to_error_payload(subcmd);
         let rendered =

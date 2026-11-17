@@ -149,6 +149,27 @@ fi
 
 command -v swift >/dev/null 2>&1 || { echo "Error: swift toolchain not found in PATH." >&2; exit 1; }
 
+resolve_cargo_bin() {
+    if command -v cargo >/dev/null 2>&1; then
+        command -v cargo
+        return 0
+    fi
+    local cand
+    for cand in "$HOME/.cargo/bin/cargo" "/opt/homebrew/bin/cargo" "/usr/local/bin/cargo"; do
+        if [[ -x "$cand" ]]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+CARGO_BIN="$(resolve_cargo_bin || true)"
+if [[ -z "$CARGO_BIN" ]]; then
+    echo "Error: cargo toolchain not found in PATH or standard locations (\$HOME/.cargo/bin, /opt/homebrew/bin, /usr/local/bin)." >&2
+    exit 1
+fi
+
 discover_developer_id_identity() {
     local line
     line="$(security find-identity -v -p codesigning 2>/dev/null | grep 'Developer ID Application:' | head -n 1 || true)"
@@ -277,8 +298,9 @@ print(match.group(1))
 ' "$REPO_ROOT/pyproject.toml")"
 
 SCRATCH_PATH="$REPO_ROOT/out/swift-build"
+RUST_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/out/rust-target}"
 ICON_SCRATCH_PATH="$REPO_ROOT/out/app-icon"
-mkdir -p "$OUTPUT_DIR" "$SCRATCH_PATH" "$ICON_SCRATCH_PATH"
+mkdir -p "$OUTPUT_DIR" "$SCRATCH_PATH" "$RUST_TARGET_DIR" "$ICON_SCRATCH_PATH"
 
 swift build \
     --package-path "$REPO_ROOT/macos" \
@@ -298,6 +320,17 @@ if [[ ! -x "$BIN_PATH" ]]; then
     exit 1
 fi
 
+CARGO_TARGET_DIR="$RUST_TARGET_DIR" "$CARGO_BIN" build \
+    --manifest-path "$REPO_ROOT/rust/Cargo.toml" \
+    --release \
+    -p cas-cli
+
+RUST_CLI_PATH="$RUST_TARGET_DIR/release/codex-agy-sync"
+if [[ ! -x "$RUST_CLI_PATH" ]]; then
+    echo "Error: built Rust CLI binary missing at $RUST_CLI_PATH" >&2
+    exit 1
+fi
+
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 STAGE_DIR="$(mktemp -d "$SCRATCH_PATH/bundle-stage.XXXXXX")"
 DEST_STAGE="$OUTPUT_DIR/.${APP_NAME}.app.stage.$$"
@@ -309,13 +342,16 @@ trap cleanup_stage EXIT
 STAGE_APP="$STAGE_DIR/$APP_NAME.app"
 CONTENTS_DIR="$STAGE_APP/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
+HELPERS_DIR="$CONTENTS_DIR/Helpers"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 PLIST_PATH="$CONTENTS_DIR/Info.plist"
 ICNS_PATH="$RESOURCES_DIR/AppIcon.icns"
 
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$HELPERS_DIR" "$RESOURCES_DIR"
 cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 chmod 755 "$MACOS_DIR/$APP_NAME"
+cp "$RUST_CLI_PATH" "$HELPERS_DIR/codex-agy-sync"
+chmod 755 "$HELPERS_DIR/codex-agy-sync"
 
 swift "$REPO_ROOT/scripts/generate_app_icon.swift" "$ICNS_PATH" "$ICON_SCRATCH_PATH"
 
@@ -346,8 +382,10 @@ with open(plist_path, "wb") as handle:
 PY
 
 if [[ "$SIGN_MODE" == "developer_id" ]]; then
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$HELPERS_DIR/codex-agy-sync"
     codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$STAGE_APP"
 else
+    codesign --force --sign - "$HELPERS_DIR/codex-agy-sync"
     codesign --force --deep --sign - "$STAGE_APP"
 fi
 codesign --verify --deep --strict "$STAGE_APP"

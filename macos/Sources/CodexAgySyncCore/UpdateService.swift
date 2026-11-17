@@ -294,7 +294,8 @@ public final class UpdateViewModel {
         let probed = await UpdateEnvironmentProber.shared.probeCLIAndRepo(
             environment: environment,
             customCLIPath: signature.customCLIPath,
-            localRepoPathForSync: signature.localRepoPath
+            localRepoPathForSync: signature.localRepoPath,
+            bundleURL: currentAppBundleURL ?? Bundle.main.bundleURL
         )
         guard !Task.isCancelled, myProbeGen == probeGeneration else { return }
 
@@ -341,13 +342,6 @@ public final class UpdateViewModel {
             nextAlignment = .cliUnavailable(appVersion: effectiveAppVersion, reason: error.localizedDescription)
         }
         self.rawAlignment = nextAlignment
-
-        await discoverEditableRepoIfNeeded(
-            fromCLI: cliURL,
-            childEnv: probed.childEnv,
-            probeGenerationSnapshot: myProbeGen
-        )
-        guard !Task.isCancelled, myProbeGen == probeGeneration else { return }
         reconcilePersistedStagedRelease(recoverFromFailure: recoverStagedFromFailure)
     }
 
@@ -663,7 +657,7 @@ public final class UpdateViewModel {
         case .cliUnavailable:
             if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
                 semanticState = .localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .cliMissing)
-            } else if release.wheelAsset != nil {
+            } else if release.appZipAsset != nil {
                 await handleReleaseAvailable(
                     release,
                     reason: .cliMissing,
@@ -681,7 +675,7 @@ public final class UpdateViewModel {
         case .mismatched:
             if let repoPath = effectiveRepoPath, let repoVer = effectiveRepoVersion {
                 semanticState = .localSyncReady(repoPath: repoPath, repoVersion: repoVer, reason: .versionMismatch)
-            } else if release.wheelAsset != nil || release.appZipAsset != nil {
+            } else if release.appZipAsset != nil {
                 await handleReleaseAvailable(
                     release,
                     reason: .versionMismatch,
@@ -793,7 +787,7 @@ public final class UpdateViewModel {
 
         if let release = latestRelease,
            release.checksumsAsset != nil,
-           release.wheelAsset != nil || release.appZipAsset != nil
+           release.appZipAsset != nil
         {
             let remoteSem = SemanticVersion.parse(release.version)
             let localRepoSem = effectiveRepoVersion.flatMap(SemanticVersion.parse)
@@ -825,7 +819,7 @@ public final class UpdateViewModel {
         semanticState = .updating(step: .applyingStagedUpdate(tagName: manifest.tagName))
 
         do {
-            let validated = try await stagingStore.prepareValidatedStagedAssets(
+            let stagedAppURL = try await stagingStore.prepareValidatedStagedAssets(
                 for: manifest,
                 in: stagedDir,
                 targetBundleURL: currentAppBundleURL,
@@ -834,34 +828,19 @@ public final class UpdateViewModel {
                 language: lang
             )
 
-            if let wheelURL = validated.verifiedWheelURL {
-                let cliURL = await resolveCLIExecutableURLOffMain()
-                let pyEnv = try await LocalRepoEnvironment.resolvePythonEnvironment(
-                    for: cliURL,
-                    childEnv: childEnv,
-                    commandRunner: commandRunner
-                )
-                guard canMutateEnvironment?() ?? true else {
-                    throw UpdateFailureReasonError(.syncInProgress)
-                }
-                try await releaseClient.installWheel(at: wheelURL, pythonEnv: pyEnv, childEnv: childEnv)
-            }
-
-            if let stagedAppURL = validated.stagedAppURL {
-                try replaceRunningBundleIfPermitted(with: stagedAppURL)
-                pendingRelaunchVersion = manifest.version
-                canRelaunchApp = true
-            }
+            try replaceRunningBundleIfPermitted(with: stagedAppURL)
+            pendingRelaunchVersion = manifest.version
+            canRelaunchApp = true
 
             stagingStore.clearPersistedStagedDirectory()
             await probeEnvironment()
 
-            let upToDateKind: UpToDateMessage = validated.stagedAppURL != nil
-                ? .releaseSyncedWithApp(tag: manifest.tagName)
-                : .releaseSyncedCLIOnly(tag: manifest.tagName)
-            semanticState = .upToDate(currentVersion: manifest.version, message: upToDateKind)
+            semanticState = .upToDate(
+                currentVersion: manifest.version,
+                message: .releaseSyncedWithApp(tag: manifest.tagName)
+            )
 
-            if validated.stagedAppURL != nil, !skipsSelfReplace {
+            if !skipsSelfReplace {
                 _ = relaunchApp()
             }
         } catch let wrapped as UpdateFailureReasonError {
@@ -884,7 +863,7 @@ public final class UpdateViewModel {
     ) async {
         guard effectiveRepoPath == nil else { return }
         guard let checksumsAsset = release.checksumsAsset,
-              release.wheelAsset != nil || release.appZipAsset != nil
+              release.appZipAsset != nil
         else {
             return
         }
@@ -894,13 +873,11 @@ public final class UpdateViewModel {
         let lang = preferencesStore.effectiveLanguage
 
         do {
-            if release.appZipAsset != nil {
-                try UpdateStagingStore.validateReplacementTargetIfNeeded(
-                    targetBundleURL: currentAppBundleURL,
-                    skipSelfReplace: skipsSelfReplace,
-                    language: lang
-                )
-            }
+            try UpdateStagingStore.validateReplacementTargetIfNeeded(
+                targetBundleURL: currentAppBundleURL,
+                skipSelfReplace: skipsSelfReplace,
+                language: lang
+            )
             let tmpDir = try stagingStore.makeStagingSessionDirectory()
             defer { try? FileManager.default.removeItem(at: tmpDir) }
 
@@ -934,8 +911,6 @@ public final class UpdateViewModel {
                 tagName: release.tagName,
                 version: normalizedVer,
                 notesSummary: release.rawNotesSummaryForPersistence ?? "",
-                wheelFileName: prepared.wheelURL?.lastPathComponent,
-                wheelSHA256: prepared.wheelSHA256,
                 appBundleName: prepared.extractedAppURL?.lastPathComponent,
                 stagedAtEpoch: nowProvider().timeIntervalSince1970
             )
@@ -1006,12 +981,6 @@ public final class UpdateViewModel {
             defer { try? FileManager.default.removeItem(at: stagingDir) }
 
             semanticState = .updating(step: .buildingLocalApp)
-            let cliURL = await resolveCLIExecutableURLOffMain()
-            let pyEnv = try await LocalRepoEnvironment.resolvePythonEnvironment(
-                for: cliURL,
-                childEnv: childEnv,
-                commandRunner: commandRunner
-            )
 
             let targetBundleIdentifier = currentBundleIdentifier.lowercased().hasSuffix(Self.legacyBundleSuffix)
                 ? "dev.semanticcraft.codex-agy-sync"
@@ -1023,12 +992,6 @@ public final class UpdateViewModel {
                 childEnv: childEnv,
                 language: lang
             )
-
-            semanticState = .updating(step: .upgradingLocalCLI)
-            guard canMutateEnvironment?() ?? true else {
-                throw UpdateFailureReasonError(.syncInProgress)
-            }
-            try await releaseClient.installLocalCLI(repoURL: repoURL, pythonEnv: pyEnv, childEnv: childEnv)
 
             try replaceRunningBundleIfPermitted(with: builtAppURL)
 
@@ -1057,7 +1020,7 @@ public final class UpdateViewModel {
             semanticState = .failed(.service(.missingChecksumsAsset))
             return
         }
-        guard release.wheelAsset != nil || release.appZipAsset != nil else {
+        guard release.appZipAsset != nil else {
             semanticState = .failed(.service(.missingUpdateAssets))
             return
         }
@@ -1066,28 +1029,15 @@ public final class UpdateViewModel {
         let lang = preferencesStore.effectiveLanguage
 
         do {
-            if release.appZipAsset != nil {
-                try UpdateStagingStore.validateReplacementTargetIfNeeded(
-                    targetBundleURL: currentAppBundleURL,
-                    skipSelfReplace: skipsSelfReplace,
-                    language: lang
-                )
-            }
+            try UpdateStagingStore.validateReplacementTargetIfNeeded(
+                targetBundleURL: currentAppBundleURL,
+                skipSelfReplace: skipsSelfReplace,
+                language: lang
+            )
             let stagingDir = try stagingStore.makeStagingSessionDirectory()
             defer { try? FileManager.default.removeItem(at: stagingDir) }
 
             semanticState = .updating(step: .downloadingChecksums)
-            let resolvedPyEnv: PythonRuntimeEnvironment?
-            if release.wheelAsset != nil {
-                let cliURL = await resolveCLIExecutableURLOffMain()
-                resolvedPyEnv = try await LocalRepoEnvironment.resolvePythonEnvironment(
-                    for: cliURL,
-                    childEnv: childEnv,
-                    commandRunner: commandRunner
-                )
-            } else {
-                resolvedPyEnv = nil
-            }
 
             let prepared = try await releaseClient.downloadAndVerifyReleaseAssets(
                 release,
@@ -1101,27 +1051,21 @@ public final class UpdateViewModel {
                 }
             )
 
-            if let wheelPath = prepared.wheelURL, let pyEnv = resolvedPyEnv {
-                semanticState = .updating(step: .installingCLI)
-                guard canMutateEnvironment?() ?? true else {
-                    throw UpdateFailureReasonError(.syncInProgress)
-                }
-                try await releaseClient.installWheel(at: wheelPath, pythonEnv: pyEnv, childEnv: childEnv)
+            guard let extractedApp = prepared.extractedAppURL else {
+                throw UpdateServiceError.missingUpdateAssets
             }
 
             let normalizedReleaseVer = SemanticVersion.parse(release.version)?.description ?? release.version
-            if let extractedApp = prepared.extractedAppURL {
-                try replaceRunningBundleIfPermitted(with: extractedApp)
-                pendingRelaunchVersion = normalizedReleaseVer
-                canRelaunchApp = true
-            }
+            try replaceRunningBundleIfPermitted(with: extractedApp)
+            pendingRelaunchVersion = normalizedReleaseVer
+            canRelaunchApp = true
 
             stagingStore.clearPersistedStagedDirectory()
             await probeEnvironment()
-            let upToDateKind: UpToDateMessage = prepared.extractedAppURL != nil
-                ? .releaseSyncedWithApp(tag: release.tagName)
-                : .releaseSyncedCLIOnly(tag: release.tagName)
-            semanticState = .upToDate(currentVersion: normalizedReleaseVer, message: upToDateKind)
+            semanticState = .upToDate(
+                currentVersion: normalizedReleaseVer,
+                message: .releaseSyncedWithApp(tag: release.tagName)
+            )
         } catch let wrapped as UpdateFailureReasonError {
             await probeEnvironment()
             semanticState = .failed(wrapped.reason)
@@ -1183,44 +1127,6 @@ public final class UpdateViewModel {
         } else {
             if case .stagedReady = semanticState {
                 semanticState = .idle
-            }
-        }
-    }
-
-    private func resolveCLIExecutableURLOffMain() async -> URL? {
-        if let resolvedCLIPath {
-            return URL(fileURLWithPath: resolvedCLIPath)
-        }
-        let customCLIPath = preferencesStore.preferences.customCLIPath
-            ?? preferencesStore.defaults.string(forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
-        return await UpdateEnvironmentProber.shared.probeCLIAndRepo(
-            environment: environment,
-            customCLIPath: customCLIPath,
-            localRepoPathForSync: nil
-        ).cliURL
-    }
-
-    private func discoverEditableRepoIfNeeded(
-        fromCLI cliURL: URL,
-        childEnv: [String: String],
-        probeGenerationSnapshot: UInt64
-    ) async {
-        guard detectedRepoPath == nil else { return }
-
-        if let pyInfo = try? await LocalRepoEnvironment.resolvePythonEnvironment(
-            for: cliURL,
-            childEnv: childEnv,
-            commandRunner: commandRunner
-        ),
-           !Task.isCancelled,
-           probeGenerationSnapshot == probeGeneration,
-           let repoPath = pyInfo.repoPath
-        {
-            let repoURL = URL(fileURLWithPath: repoPath, isDirectory: true)
-            let check = await UpdateEnvironmentProber.shared.validateRepoURL(repoURL)
-            if let validated = check.validatedURL, probeGenerationSnapshot == probeGeneration {
-                detectedRepoPath = validated.path
-                detectedRepoVersion = check.version
             }
         }
     }

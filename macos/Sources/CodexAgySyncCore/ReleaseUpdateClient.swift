@@ -1,8 +1,6 @@
 import Foundation
 
 struct PreparedReleaseAssets: Sendable {
-    let wheelURL: URL?
-    let wheelSHA256: String?
     let zipURL: URL?
     let extractedAppURL: URL?
 }
@@ -49,6 +47,10 @@ struct ReleaseUpdateClient: Sendable {
         language: ResolvedLanguage,
         onStep: @MainActor (UpdateProgressStep) -> Void
     ) async throws -> PreparedReleaseAssets {
+        guard let appZipAsset = release.appZipAsset else {
+            throw UpdateServiceError.missingUpdateAssets
+        }
+
         await onStep(.downloadingChecksums)
         let (checksumsData, checksumsStatus) = try await httpFetcher.fetchData(
             from: checksumsAsset.browserDownloadURL,
@@ -62,119 +64,56 @@ struct ReleaseUpdateClient: Sendable {
         }
         let checksums = SHA256Verifier.parseChecksums(checksumsText)
 
-        var verifiedWheelURL: URL?
-        var wheelSHA256: String?
-        if let wheelAsset = release.wheelAsset {
-            let wheelDest = try UpdatePathGuard.stagedAssetFileURL(for: wheelAsset.name, in: stagingDir)
-            let safeWheelName = wheelDest.lastPathComponent
-            await onStep(.downloadingWheel(fileName: safeWheelName))
-            let wheelStatus = try await httpFetcher.downloadFile(
-                from: wheelAsset.browserDownloadURL,
-                headers: ["User-Agent": "CodexAgySync/\(appVersion)"],
-                timeoutSeconds: 30.0,
-                to: wheelDest
+        let zipDest = try UpdatePathGuard.stagedAssetFileURL(for: appZipAsset.name, in: stagingDir)
+        let safeZipName = zipDest.lastPathComponent
+        await onStep(.downloadingAppArchive(fileName: safeZipName))
+        let zipStatus = try await httpFetcher.downloadFile(
+            from: appZipAsset.browserDownloadURL,
+            headers: ["User-Agent": "CodexAgySync/\(appVersion)"],
+            timeoutSeconds: 60.0,
+            to: zipDest
+        )
+        guard (200..<300).contains(zipStatus) else {
+            throw UpdateServiceError.httpError(statusCode: zipStatus)
+        }
+        do {
+            _ = try SHA256Verifier.verify(
+                fileURL: zipDest,
+                assetName: safeZipName,
+                checksums: checksums
             )
-            guard (200..<300).contains(wheelStatus) else {
-                throw UpdateServiceError.httpError(statusCode: wheelStatus)
-            }
-            do {
-                wheelSHA256 = try SHA256Verifier.verify(
-                    fileURL: wheelDest,
-                    assetName: safeWheelName,
-                    checksums: checksums
-                )
-            } catch {
-                try? FileManager.default.removeItem(at: wheelDest)
-                throw error
-            }
-            verifiedWheelURL = wheelDest
+        } catch {
+            try? FileManager.default.removeItem(at: zipDest)
+            throw error
         }
 
-        var verifiedZipURL: URL?
-        var verifiedExtractedAppURL: URL?
-        if let appZipAsset = release.appZipAsset {
-            let zipDest = try UpdatePathGuard.stagedAssetFileURL(for: appZipAsset.name, in: stagingDir)
-            let safeZipName = zipDest.lastPathComponent
-            await onStep(.downloadingAppArchive(fileName: safeZipName))
-            let zipStatus = try await httpFetcher.downloadFile(
-                from: appZipAsset.browserDownloadURL,
-                headers: ["User-Agent": "CodexAgySync/\(appVersion)"],
-                timeoutSeconds: 60.0,
-                to: zipDest
+        await onStep(.verifyingAppArchive)
+        let extractDir = stagingDir.appendingPathComponent("extracted", isDirectory: true)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+        let dittoOut = try await commandRunner.run(
+            executableURL: URL(fileURLWithPath: "/usr/bin/ditto"),
+            arguments: ["-x", "-k", zipDest.path, extractDir.path],
+            environment: childEnv,
+            timeoutSeconds: 30.0
+        )
+        if dittoOut.exitCode != 0 {
+            throw UpdateServiceError.commandFailed(
+                step: "ditto",
+                detail: dittoOut.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
             )
-            guard (200..<300).contains(zipStatus) else {
-                throw UpdateServiceError.httpError(statusCode: zipStatus)
-            }
-            do {
-                _ = try SHA256Verifier.verify(
-                    fileURL: zipDest,
-                    assetName: safeZipName,
-                    checksums: checksums
-                )
-            } catch {
-                try? FileManager.default.removeItem(at: zipDest)
-                throw error
-            }
-            verifiedZipURL = zipDest
-
-            await onStep(.verifyingAppArchive)
-            let extractDir = stagingDir.appendingPathComponent("extracted", isDirectory: true)
-            try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
-            let dittoOut = try await commandRunner.run(
-                executableURL: URL(fileURLWithPath: "/usr/bin/ditto"),
-                arguments: ["-x", "-k", zipDest.path, extractDir.path],
-                environment: childEnv,
-                timeoutSeconds: 30.0
-            )
-            if dittoOut.exitCode != 0 {
-                throw UpdateServiceError.commandFailed(
-                    step: "ditto",
-                    detail: dittoOut.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-            }
-            let extractedApp = UpdateStagingStore.resolveExtractedAppBundle(in: extractDir)
-            try await stagingStore.verifyCodesign(
-                of: extractedApp,
-                inside: extractDir,
-                childEnv: childEnv,
-                language: language
-            )
-            verifiedExtractedAppURL = extractedApp
         }
+        let extractedApp = UpdateStagingStore.resolveExtractedAppBundle(in: extractDir)
+        try await stagingStore.verifyCodesign(
+            of: extractedApp,
+            inside: extractDir,
+            childEnv: childEnv,
+            language: language
+        )
 
         return PreparedReleaseAssets(
-            wheelURL: verifiedWheelURL,
-            wheelSHA256: wheelSHA256,
-            zipURL: verifiedZipURL,
-            extractedAppURL: verifiedExtractedAppURL
+            zipURL: zipDest,
+            extractedAppURL: extractedApp
         )
-    }
-
-    func installWheel(
-        at wheelURL: URL,
-        pythonEnv: PythonRuntimeEnvironment,
-        childEnv: [String: String]
-    ) async throws {
-        var pipArgs = ["-m", "pip", "install", "--upgrade"]
-        if !pythonEnv.inVenv {
-            pipArgs.append("--user")
-            if pythonEnv.supportsBreakSystemPackages {
-                pipArgs.append("--break-system-packages")
-            }
-        }
-        pipArgs.append(wheelURL.path)
-        let pipOut = try await commandRunner.run(
-            executableURL: pythonEnv.pythonURL,
-            arguments: pipArgs,
-            environment: childEnv,
-            timeoutSeconds: 90.0
-        )
-        if pipOut.exitCode != 0 {
-            throw UpdateServiceError.commandFailed(
-                step: "pip install",
-                detail: pipOut.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-        }
     }
 
     func buildAndVerifyLocalApp(
@@ -210,37 +149,5 @@ struct ReleaseUpdateClient: Sendable {
             language: language
         )
         return builtAppURL
-    }
-
-    func installLocalCLI(
-        repoURL: URL,
-        pythonEnv: PythonRuntimeEnvironment,
-        childEnv: [String: String]
-    ) async throws {
-        var pipArgs = ["-m", "pip", "install", "--no-build-isolation"]
-        if !pythonEnv.inVenv {
-            pipArgs.append("--user")
-            if pythonEnv.supportsBreakSystemPackages {
-                pipArgs.append("--break-system-packages")
-            }
-        }
-        if pythonEnv.editable {
-            pipArgs.append(contentsOf: ["--no-deps", "--force-reinstall", "-e", repoURL.path])
-        } else {
-            pipArgs.append(contentsOf: ["--no-deps", "--upgrade", repoURL.path])
-        }
-
-        let pipResult = try await commandRunner.run(
-            executableURL: pythonEnv.pythonURL,
-            arguments: pipArgs,
-            environment: childEnv,
-            timeoutSeconds: 90.0
-        )
-        if pipResult.exitCode != 0 {
-            throw UpdateServiceError.commandFailed(
-                step: "pip install",
-                detail: pipResult.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-        }
     }
 }

@@ -45,12 +45,4 @@ extension UpdateViewModel {
     ) -> URL {
         UpdateStagingStore.resolveExtractedAppBundle(in: extractDir, fileManager: fileManager)
     }
-
-    public static func findPythonExecutable(
-        for cliURL: URL?,
-        childEnv: [String: String],
-        fileManager: FileManager = .default
-    ) -> URL? {
-        LocalRepoEnvironment.findPythonExecutable(for: cliURL, childEnv: childEnv, fileManager: fileManager)
-    }
 }

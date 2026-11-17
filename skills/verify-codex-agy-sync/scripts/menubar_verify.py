@@ -122,7 +122,6 @@ def _make_sandbox_env(run_dir: Path, release_api_url: str) -> tuple[dict[str, Pa
         "CODEX_HOME": str(dirs["codex_home"]),
         "CODEX_AGY_SYNC_STATE_DIR": str(dirs["sync_state"]),
         "CODEX_APP_SERVER_SOCKET": str(dirs["sock_path"]),
-        "CODEX_AGY_SYNC_BIN": str(CLI_BIN),
         "PATH": os.environ.get("PATH", ""),
         "MENUBAR_AUTO_OPEN_PANEL": "1",
         "MENUBAR_PIN_PANEL": "1",
@@ -136,11 +135,17 @@ def _make_sandbox_env(run_dir: Path, release_api_url: str) -> tuple[dict[str, Pa
 
 
 def _verify_app_bundle_assets(app_bundle: Path) -> dict[str, Any]:
-    """Assert AppIcon.icns exists and Info.plist matches bundle ID, localizations, and pyproject.toml version."""
+    """Assert AppIcon.icns, bundled Rust helper CLI, and Info.plist match bundle ID, localizations, and version."""
     icon_path = app_bundle / "Contents" / "Resources" / "AppIcon.icns"
+    helper_cli = app_bundle / "Contents" / "Helpers" / "codex-agy-sync"
     plist_path = app_bundle / "Contents" / "Info.plist"
     if not icon_path.is_file() or icon_path.stat().st_size <= 10_000:
         raise AssertionError(f"Expected non-trivial AppIcon.icns at {icon_path}")
+    if not helper_cli.is_file() or not os.access(helper_cli, os.X_OK):
+        raise AssertionError(f"Expected executable bundled Rust CLI at {helper_cli}")
+    ver_proc = run_cmd([str(helper_cli), "--version"], check=True, timeout=10.0)
+    if PACKAGE_VERSION not in ver_proc.stdout:
+        raise AssertionError(f"Bundled helper version {ver_proc.stdout!r} does not contain {PACKAGE_VERSION!r}")
     info = plistlib.loads(plist_path.read_bytes())
     if info.get("CFBundleIdentifier") != QA_BUNDLE_ID:
         raise AssertionError(f"Expected CFBundleIdentifier={QA_BUNDLE_ID!r}, got {info.get('CFBundleIdentifier')!r}")
@@ -155,6 +160,7 @@ def _verify_app_bundle_assets(app_bundle: Path) -> dict[str, Any]:
     return {
         "bundle_id": str(info["CFBundleIdentifier"]),
         "app_icon_bytes": icon_path.stat().st_size,
+        "bundled_cli_version": ver_proc.stdout.strip(),
         "bundle_version": str(info["CFBundleShortVersionString"]),
         "localizations": list(info["CFBundleLocalizations"]),
     }
@@ -313,11 +319,11 @@ def _drive_settings_gui(
     click_until(pid, swid, "设置分栏：版本与更新", session_name, lambda: _has_el("检查更新"))
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
-        if _has_el("双端已同频") and _has_el(f"v{PACKAGE_VERSION}"):
+        if _has_el("双端已同频") and _has_el(f"v{PACKAGE_VERSION}") and _has_el("内置引擎"):
             break
         time.sleep(0.3)
     else:
-        raise RuntimeError(f"Settings Updates tab did not display aligned version v{PACKAGE_VERSION}.")
+        raise RuntimeError(f"Settings Updates tab did not display aligned bundled engine v{PACKAGE_VERSION}.")
 
     for policy_label in ("手动检查", "仅自动检查", "自动下载准备", "上次检查："):
         if not _has_el(policy_label):

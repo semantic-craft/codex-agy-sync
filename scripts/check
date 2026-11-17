@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 mkdir -p out
 
-echo "[1/5] Verifying Phase 1 schema artifacts and binary descriptor integrity..."
+echo "[1/6] Verifying Phase 1 schema artifacts and binary descriptor integrity..."
 if [[ "${1:-}" == "--refresh-schema" ]]; then
   python3 scripts/extract_schema.py > out/extract_schema_check.json
 fi
@@ -16,7 +16,7 @@ git diff --exit-code schema/antigravity_2_30_schema.json schema/antigravity_2_30
   exit 1
 }
 
-echo "[2/5] Running read-only session decoding, field mapping, and negative controls..."
+echo "[2/6] Running read-only session decoding, field mapping, and negative controls..."
 python3 scripts/verify_session_mapping.py --output out/session_mapping_report.json > /dev/null
 python3 -c '
 import json
@@ -38,7 +38,7 @@ print("  AGY session {}: {} steps decoded, 0 unknown wire fields.".format(agy["c
 print("  Codex session {}: {} user msgs, {} reasoning items, {} paired tool calls.".format(codex["thread_id"], codex["counts"]["user_messages"], codex["counts"]["reasoning_items"], codex["counts"]["tool_calls"]))
 '
 
-echo "[3/5] Verifying src/codex_agy_sync domain architecture against Phase 1 schema..."
+echo "[3/6] Verifying src/codex_agy_sync domain architecture against Phase 1 schema..."
 find src/codex_agy_sync tests skills/verify-codex-agy-sync/scripts -name '*.py' -print0 | sort -z | xargs -0 python3 -m py_compile bin/codex-agy-sync
 PYTHONPATH=src python3 -c '
 import ast, json, pathlib, re, subprocess, sys
@@ -101,6 +101,8 @@ pyproject_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("pyproj
 assert pyproject_match is not None, "Missing version in pyproject.toml"
 pyproject_ver = pyproject_match.group(1)
 assert pkg.__version__ == pyproject_ver == "0.4.3", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
+cargo_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("rust/Cargo.toml").read_text(encoding="utf-8"), re.M)
+assert cargo_match is not None and cargo_match.group(1) == pyproject_ver, f"rust/Cargo.toml version mismatch: {cargo_match.group(1) if cargo_match else None} != {pyproject_ver}"
 build_sh_src = pathlib.Path("scripts/build_menubar_app.sh").read_text(encoding="utf-8")
 assert f"\"CFBundleShortVersionString\": \"{pyproject_ver}\"" not in build_sh_src and f"\"{pyproject_ver}\"" not in build_sh_src, "build_menubar_app.sh must not hardcode CFBundleShortVersionString"
 assert "pyproject.toml" in build_sh_src and "CFBundleIconFile" in build_sh_src, "build_menubar_app.sh must derive version from pyproject.toml and set CFBundleIconFile"
@@ -155,7 +157,7 @@ print("  Domain architecture verified: 7 step specs, 16 tool codecs, sidebar inv
 '
 PYTHONPATH=src python3 scripts/check_architecture.py
 
-echo "[4/5] Scanning repo files for hardcoded home paths, legacy naming, CLI subcommand contract, and CSRF token leaks..."
+echo "[4/6] Scanning repo files for hardcoded home paths, legacy naming, CLI subcommand contract, and CSRF token leaks..."
 PYTHONPATH=src python3 - <<'PY'
 import argparse
 import json
@@ -214,6 +216,7 @@ for p in repo.rglob("*"):
     )
     if (
         rel.parts[0] in (".git", "out")
+        or (len(rel.parts) >= 2 and rel.parts[0] == "rust" and rel.parts[1] == "target")
         or is_untracked_build_artifact
         or ".build" in rel.parts
         or ".swiftpm" in rel.parts
@@ -298,6 +301,16 @@ for swift_file in swift_files:
         if "handoff" in low_inner or "hand off" in low_inner or "接力" in inner or "交接" in inner:
             line_no = swift_src.count("\n", 0, match.start()) + 1
             bad.append(f"{swift_file}:{line_no}: forbidden handoff Swift literal {inner!r}")
+    for line_no, line in enumerate(swift_src.splitlines(), start=1):
+        low_swift_line = line.lower()
+        for legacy_py_tok in (
+            "pip install",
+            ".whl",
+            "supports_break_system_packages",
+            "userpythonbindirectories",
+        ):
+            if legacy_py_tok in low_swift_line:
+                bad.append(f"{swift_file}:{line_no}: forbidden Python/pip update glue {legacy_py_tok!r}")
 
 swift_test_files = sorted(pathlib.Path("macos/Tests").rglob("*.swift"))
 if not swift_test_files:
@@ -333,10 +346,10 @@ if bad:
 print("  Hygiene, naming unification, test UserDefaults sandbox & credential isolation check passed.")
 PY
 
-echo "[5/5] Running behavioral test suite..."
+echo "[5/6] Running behavioral test suite..."
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 if [[ "$(uname -s)" == "Darwin" ]] && command -v swift >/dev/null 2>&1; then
-    echo "[5b/5] Running Swift macOS menubar tests..."
+    echo "[5b/6] Running Swift macOS menubar tests..."
     python3 - <<'PY'
 import pathlib, plistlib, shutil, subprocess, sys, time
 
@@ -423,4 +436,18 @@ if errors:
     sys.exit(1)
 PY
 fi
+
+echo "[6/6] Running Rust workspace checks (fmt/clippy/test) and Python<->Rust parity harness..."
+if ! command -v cargo >/dev/null 2>&1 && [[ -x "$HOME/.cargo/bin/cargo" ]]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+fi
+command -v cargo >/dev/null 2>&1 || {
+    echo "ERROR: cargo toolchain not found in PATH." >&2
+    exit 1
+}
+CARGO_TARGET_DIR="$REPO_ROOT/out/rust-target" cargo fmt --manifest-path "$REPO_ROOT/rust/Cargo.toml" --all -- --check
+CARGO_TARGET_DIR="$REPO_ROOT/out/rust-target" cargo clippy --manifest-path "$REPO_ROOT/rust/Cargo.toml" --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR="$REPO_ROOT/out/rust-target" cargo test --manifest-path "$REPO_ROOT/rust/Cargo.toml" --workspace
+python3 scripts/verify_rust_parity.py
+
 echo "All checks passed."

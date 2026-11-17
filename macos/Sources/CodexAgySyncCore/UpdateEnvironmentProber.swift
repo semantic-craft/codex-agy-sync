@@ -48,17 +48,14 @@ actor UpdateEnvironmentProber {
     func probeCLIAndRepo(
         environment: [String: String],
         customCLIPath: String?,
-        localRepoPathForSync: String?
+        localRepoPathForSync: String?,
+        bundleURL: URL = Bundle.main.bundleURL
     ) -> ProbedEnvironmentContext {
-        let pyBins = SubprocessCLIClient.userPythonBinDirectories()
-        let childEnv = SubprocessCLIClient.mergedEnvironment(
-            from: environment,
-            pythonBinDirectories: pyBins
-        )
+        let childEnv = SubprocessCLIClient.mergedEnvironment(from: environment)
         let resolved = SubprocessCLIClient.resolveExecutableWithSource(
             environment: environment,
             customCLIPath: customCLIPath,
-            pythonBinDirectories: pyBins
+            bundleURL: bundleURL
         )
         let validatedCustom = localRepoPathForSync.map { validateCustomRepo($0) }
         let discovered = LocalRepoEnvironment.discoverCandidateRepo(

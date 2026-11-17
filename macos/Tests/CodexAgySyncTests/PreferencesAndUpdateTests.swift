@@ -416,37 +416,32 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
         let fakeCLI = tempRoot.appendingPathComponent("codex-agy-sync")
-        try "#!/usr/bin/env python3\n".write(to: fakeCLI, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: fakeCLI, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
 
         let cliVersionBox = NSLock()
         nonisolated(unsafe) var reportedCLIVersion = "0.2.9"
 
-        let wheelBytes = Data("mock-wheel-binary-v0.4.0".utf8)
         let zipBytes = Data("mock-macos-zip-v0.4.0".utf8)
-        let wheelSHA = SHA256Verifier.sha256Hex(of: wheelBytes)
         let zipSHA = SHA256Verifier.sha256Hex(of: zipBytes)
 
         let apiURL = URL(string: "http://127.0.0.1:19999/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:19999/download/SHA256SUMS")!
-        let wheelURL = URL(string: "http://127.0.0.1:19999/download/codex_agy_sync-0.4.0-py3-none-any.whl")!
         let zipURL = URL(string: "http://127.0.0.1:19999/download/CodexAgySync-macos.zip")!
 
         let releaseJSON = """
         {
           "tag_name": "v0.4.0",
           "html_url": "https://github.com/semantic-craft/codex-agy-sync/releases/tag/v0.4.0",
-          "body": "## Highlights\\n- Unified Settings window and dual sync update",
+          "body": "## Highlights\\n- Unified Settings window and bundled Rust engine",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
-            {"name": "codex_agy_sync-0.4.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
             {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
         """
 
         let validSums = """
-        \(wheelSHA)  codex_agy_sync-0.4.0-py3-none-any.whl
         \(zipSHA)  CodexAgySync-macos.zip
         """
 
@@ -455,17 +450,10 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 let ver = cliVersionBox.withLock { reportedCLIVersion }
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(ver)\n".utf8), stderr: Data())
             }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
-            }
-            if args.prefix(3) == ["-m", "pip", "install"] {
-                cliVersionBox.withLock { reportedCLIVersion = "0.4.0" }
-                return CommandExecutionResult(exitCode: 0, stdout: Data("installed\n".utf8), stderr: Data())
-            }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
                 let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+                cliVersionBox.withLock { reportedCLIVersion = "0.4.0" }
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
             if exe.path == "/usr/bin/codesign" {
@@ -475,13 +463,11 @@ final class PreferencesAndUpdateTests: XCTestCase {
         }
 
         let badSums = """
-        \(String(repeating: "0", count: 64))  codex_agy_sync-0.4.0-py3-none-any.whl
-        \(zipSHA)  CodexAgySync-macos.zip
+        \(String(repeating: "0", count: 64))  CodexAgySync-macos.zip
         """
         let badFetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data(badSums.utf8), 200),
-            wheelURL: (wheelBytes, 200),
             zipURL: (zipBytes, 200),
         ])
 
@@ -511,8 +497,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             .releaseAvailable(
                 latestTag: "v0.4.0",
                 notesSummary: "Highlights",
-                hasAppAsset: true,
-                hasWheelAsset: true
+                hasAppAsset: true
             )
         )
 
@@ -522,12 +507,11 @@ final class PreferencesAndUpdateTests: XCTestCase {
         } else {
             XCTFail("Expected checksum mismatch failure, got \(vmBad.availability)")
         }
-        XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
+        XCTAssertFalse(runner.invocations.contains { $0.executablePath == "/usr/bin/ditto" })
 
         let goodFetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data(validSums.utf8), 200),
-            wheelURL: (wheelBytes, 200),
             zipURL: (zipBytes, 200),
         ])
         let vmGood = UpdateViewModel(
@@ -576,16 +560,12 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: buildScript.path)
 
         let cliBin = binDir.appendingPathComponent("codex-agy-sync")
-        try "#!/usr/bin/env python3\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
         let runner = StubCommandRunner { exe, args in
             if args == ["--version"] {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.3.0\n".utf8), stderr: Data())
-            }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":true,"repo_path":null}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
             }
             if exe.lastPathComponent == "build_menubar_app.sh",
                let outIdx = args.firstIndex(of: "--output-dir"),
@@ -620,7 +600,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         await vm.syncFromLocalRepo()
         XCTAssertEqual(vm.availability, .upToDate(currentVersion: "0.3.0"))
         XCTAssertTrue(vm.canRelaunchApp)
-        XCTAssertTrue(runner.invocations.contains { $0.arguments.contains("-e") })
         XCTAssertTrue(runner.invocations.contains { $0.executablePath.hasSuffix("build_menubar_app.sh") })
     }
 
@@ -631,11 +610,11 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
-        let sanitized = try UpdatePathGuard.stagedAssetFileURL(for: "../../evil.whl", in: stagingDir)
-        XCTAssertEqual(sanitized.lastPathComponent, "evil.whl")
+        let sanitized = try UpdatePathGuard.stagedAssetFileURL(for: "../../evil.zip", in: stagingDir)
+        XCTAssertEqual(sanitized.lastPathComponent, "evil.zip")
         XCTAssertEqual(sanitized.deletingLastPathComponent(), stagingDir.standardizedFileURL)
 
-        for invalid in ["", "   ", ".", "..", "/", "bad\0name.whl"] {
+        for invalid in ["", "   ", ".", "..", "/", "bad\0name.zip"] {
             XCTAssertThrowsError(try UpdatePathGuard.stagedAssetFileURL(for: invalid, in: stagingDir)) { error in
                 guard case UpdateServiceError.invalidAssetName = error else {
                     return XCTFail("Expected invalidAssetName for \(invalid.debugDescription), got \(error)")
@@ -663,15 +642,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "assets": [
             {"name": "SHA256SUMS.asc", "browser_download_url": "https://example.com/SHA256SUMS.asc", "size": 64},
             {"name": "CodexAgySync-macos.zip.sha256", "browser_download_url": "https://example.com/app.sha256", "size": 96},
-            {"name": "other_pkg-0.4.2-py3-none-any.whl", "browser_download_url": "https://example.com/other.whl", "size": 64},
-            {"name": "codex_agy_sync-0.4.2-py3-none-any.whl.sig", "browser_download_url": "https://example.com/wheel.sig", "size": 64},
-            {"name": "codex_agy_sync-0.4.2-py3-none-any.whl", "browser_download_url": "https://example.com/wheel.whl", "size": 128}
+            {"name": "CodexAgySync-macos.zip.sig", "browser_download_url": "https://example.com/app.sig", "size": 64},
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "https://example.com/app.zip", "size": 128}
           ]
         }
         """
         let decoded = try GitHubReleaseInfo.decode(from: Data(releaseJSON.utf8))
         XCTAssertEqual(decoded.checksumsAsset?.name, "CodexAgySync-macos.zip.sha256")
-        XCTAssertEqual(decoded.wheelAsset?.name, "codex_agy_sync-0.4.2-py3-none-any.whl")
+        XCTAssertEqual(decoded.appZipAsset?.name, "CodexAgySync-macos.zip")
     }
 
     @MainActor
@@ -715,7 +693,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
     }
 
     @MainActor
-    func testTargetBundleWritabilityCheckedBeforePipMutation() async throws {
+    func testTargetBundleWritabilityCheckedBeforeBundleMutation() async throws {
         let isolated = makeIsolatedDefaults()
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
@@ -740,7 +718,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let buildScript = scriptsDir.appendingPathComponent("build_menubar_app.sh")
         try "#!/bin/sh\nexit 0\n".write(to: buildScript, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: buildScript.path)
-        try "#!/usr/bin/env python3\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
         let runner = StubCommandRunner { _, args in
@@ -769,7 +747,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             XCTFail("Expected targetBundleNotWritable when currentAppBundleURL is nil")
         }
         XCTAssertFalse(vmNilBundle.canRelaunchApp)
-        XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
+        XCTAssertFalse(runner.invocations.contains { $0.executablePath.hasSuffix("build_menubar_app.sh") })
 
         if geteuid() != 0 {
             try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: readOnlyParent.path)
@@ -789,12 +767,12 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 XCTFail("Expected targetBundleNotWritable for chmod 0555 parent dir")
             }
             XCTAssertFalse(vmReadOnly.canRelaunchApp)
-            XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
+            XCTAssertFalse(runner.invocations.contains { $0.executablePath.hasSuffix("build_menubar_app.sh") })
         }
     }
 
     @MainActor
-    func testFailedCodesignAbortsBeforePipInstallInReleaseAndLocalSync() async throws {
+    func testFailedCodesignAbortsBeforeBundleReplacementInReleaseAndLocalSync() async throws {
         let isolated = makeIsolatedDefaults()
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
@@ -804,7 +782,10 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
+        let installedApp = tempRoot.appendingPathComponent("CodexAgySync.app", isDirectory: true)
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
+        try "v0.3.0".write(to: installedApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
         try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.4.0\"\n"
@@ -812,18 +793,15 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let buildScript = scriptsDir.appendingPathComponent("build_menubar_app.sh")
         try "#!/bin/sh\nexit 0\n".write(to: buildScript, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: buildScript.path)
-        try "#!/usr/bin/env python3\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
-        let wheelBytes = Data("wheel-v0.4.0".utf8)
         let zipBytes = Data("zip-v0.4.0".utf8)
         let sums = """
-        \(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.4.0-py3-none-any.whl
         \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip
         """
         let apiURL = URL(string: "http://127.0.0.1:29999/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:29999/SHA256SUMS")!
-        let wheelURL = URL(string: "http://127.0.0.1:29999/codex_agy_sync-0.4.0-py3-none-any.whl")!
         let zipURL = URL(string: "http://127.0.0.1:29999/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
@@ -831,7 +809,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "body": "Codesign gate test",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
-            {"name": "codex_agy_sync-0.4.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
             {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
@@ -841,13 +818,10 @@ final class PreferencesAndUpdateTests: XCTestCase {
             if args == ["--version"] {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.3.0\n".utf8), stderr: Data())
             }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null,"supports_break_system_packages":false}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
-            }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
                 let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+                try "v0.4.0".write(to: appDir.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
             if exe.lastPathComponent == "build_menubar_app.sh",
@@ -856,6 +830,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             {
                 let outApp = URL(fileURLWithPath: args[outIdx + 1]).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: outApp, withIntermediateDirectories: true)
+                try "v0.4.0".write(to: outApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
             if exe.path == "/usr/bin/codesign" {
@@ -867,7 +842,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let fetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data(sums.utf8), 200),
-            wheelURL: (wheelBytes, 200),
             zipURL: (zipBytes, 200),
         ])
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
@@ -880,6 +854,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let vmRelease = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.3.0",
+            currentAppBundleURL: installedApp,
             environment: env,
             commandRunner: runner,
             httpFetcher: fetcher,
@@ -892,12 +867,13 @@ final class PreferencesAndUpdateTests: XCTestCase {
         } else {
             XCTFail("Expected codesign failure in release sync")
         }
-        XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
+        XCTAssertEqual(try String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8), "v0.3.0")
 
         prefs.setLocalRepoPathForSync(repoDir.path)
         let vmLocal = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.3.0",
+            currentAppBundleURL: installedApp,
             environment: env,
             commandRunner: runner,
             httpFetcher: fetcher,
@@ -909,7 +885,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         } else {
             XCTFail("Expected codesign failure in local repo sync")
         }
-        XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
+        XCTAssertEqual(try String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8), "v0.3.0")
     }
 
     @MainActor
@@ -923,21 +899,18 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
         try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
-        try "#!/usr/bin/env python3\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
         let verLock = NSLock()
         nonisolated(unsafe) var cliVer = "0.3.0"
 
-        let wheelBytes = Data("wheel-040".utf8)
         let zipBytes = Data("zip-040".utf8)
         let sums = """
-        \(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.4.0-py3-none-any.whl
         \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip
         """
         let apiURL = URL(string: "http://127.0.0.1:30001/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:30001/SHA256SUMS")!
-        let wheelURL = URL(string: "http://127.0.0.1:30001/codex_agy_sync-0.4.0-py3-none-any.whl")!
         let zipURL = URL(string: "http://127.0.0.1:30001/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
@@ -945,7 +918,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "body": "Upgrade test",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
-            {"name": "codex_agy_sync-0.4.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
             {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
@@ -956,16 +928,9 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 let v = verLock.withLock { cliVer }
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(v)\n".utf8), stderr: Data())
             }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null,"supports_break_system_packages":false}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
-            }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
                 let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
-                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
-            }
-            if args.prefix(3) == ["-m", "pip", "install"] {
                 verLock.withLock { cliVer = "0.4.0" }
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
@@ -974,7 +939,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let fetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data(sums.utf8), 200),
-            wheelURL: (wheelBytes, 200),
             zipURL: (zipBytes, 200),
         ])
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
@@ -1017,116 +981,79 @@ final class PreferencesAndUpdateTests: XCTestCase {
         if case .upToDate = vmMissingCLI.availability {
             XCTFail("checkForUpdates must never report .upToDate when CLI is unavailable")
         }
-        if case .releaseAvailable(let tag, _, _, let hasWheel) = vmMissingCLI.availability {
+        if case .releaseAvailable(let tag, _, let hasApp) = vmMissingCLI.availability {
             XCTAssertEqual(tag, "v0.4.0")
-            XCTAssertTrue(hasWheel)
+            XCTAssertTrue(hasApp)
         } else {
             XCTFail("Expected .releaseAvailable to install missing CLI, got \(vmMissingCLI.availability)")
         }
     }
 
     @MainActor
-    func testPipBreakSystemPackagesConditionalAndShebangPythonResolution() async throws {
+    func testBundledHelperBinaryResolutionAndRustTargetRepoDiscovery() async throws {
         let isolated = makeIsolatedDefaults()
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
         let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-shebang-\(UUID().uuidString)", isDirectory: true)
-        let spacedVenvBin = tempRoot.appendingPathComponent("pipx venvs/codex sync/bin", isDirectory: true)
-        let envPathBin = tempRoot.appendingPathComponent("env-path-bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: spacedVenvBin, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: envPathBin, withIntermediateDirectories: true)
+            .appendingPathComponent("codex-agy-bundled-\(UUID().uuidString)", isDirectory: true)
+        let appBundle = tempRoot.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        let helpersDir = appBundle.appendingPathComponent("Contents/Helpers", isDirectory: true)
+        let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
+        let rustReleaseDir = repoDir.appendingPathComponent("out/rust-target/release", isDirectory: true)
+        let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
+        try FileManager.default.createDirectory(at: helpersDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: rustReleaseDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
-        let spacedPython = spacedVenvBin.appendingPathComponent("python")
-        try "#!/bin/sh\nexit 0\n".write(to: spacedPython, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: spacedPython.path)
+        let bundledCLI = helpersDir.appendingPathComponent("codex-agy-sync")
+        try "#!/bin/sh\nexit 0\n".write(to: bundledCLI, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledCLI.path)
 
-        let pipxWrapper = tempRoot.appendingPathComponent("codex-agy-sync-pipx")
-        let pipxScript = """
-        #!/bin/sh
-        '''exec' '\(spacedPython.path)' "$0" "$@"
-        ' '''
-        import sys
-        """
-        try pipxScript.write(to: pipxWrapper, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pipxWrapper.path)
+        try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.4.3\"\n"
+            .write(to: repoDir.appendingPathComponent("pyproject.toml"), atomically: true, encoding: .utf8)
+        let buildScript = scriptsDir.appendingPathComponent("build_menubar_app.sh")
+        try "#!/bin/sh\nexit 0\n".write(to: buildScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: buildScript.path)
+        let rustReleaseCLI = rustReleaseDir.appendingPathComponent("codex-agy-sync")
+        try "#!/bin/sh\nexit 0\n".write(to: rustReleaseCLI, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: rustReleaseCLI.path)
 
-        let resolvedPipxPython = UpdateViewModel.findPythonExecutable(
-            for: pipxWrapper,
-            childEnv: ["PATH": "/usr/bin:/bin"]
-        )
-        XCTAssertEqual(resolvedPipxPython?.path, spacedPython.path)
-
-        let customEnvPython3 = envPathBin.appendingPathComponent("python3")
-        try "#!/bin/sh\nexit 0\n".write(to: customEnvPython3, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: customEnvPython3.path)
-
-        let envShebangCLI = tempRoot.appendingPathComponent("codex-agy-sync-env")
-        try "#!/usr/bin/env python3\nimport sys\n".write(to: envShebangCLI, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: envShebangCLI.path)
-
-        let resolvedEnvPython = UpdateViewModel.findPythonExecutable(
-            for: envShebangCLI,
-            childEnv: ["PATH": "\(envPathBin.path):/usr/bin"]
-        )
-        XCTAssertEqual(resolvedEnvPython?.path, customEnvPython3.path)
-
-        let wheelBytes = Data("wheel-bsp".utf8)
-        let sums = "\(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.4.0-py3-none-any.whl\n"
-        let apiURL = URL(string: "http://127.0.0.1:30002/releases/latest")!
-        let sumsURL = URL(string: "http://127.0.0.1:30002/SHA256SUMS")!
-        let wheelURL = URL(string: "http://127.0.0.1:30002/codex_agy_sync-0.4.0-py3-none-any.whl")!
-        let releaseJSON = """
-        {
-          "tag_name": "v0.4.0",
-          "body": "Pip flag test",
-          "assets": [
-            {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 64},
-            {"name": "codex_agy_sync-0.4.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)}
-          ]
+        let runner = StubCommandRunner { _, args in
+            if args == ["--version"] {
+                return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.4.3\n".utf8), stderr: Data())
+            }
+            return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
-        """
-        let fetcher = StubHTTPFetcher(routes: [
-            apiURL: (Data(releaseJSON.utf8), 200),
-            sumsURL: (Data(sums.utf8), 200),
-            wheelURL: (wheelBytes, 200),
-        ])
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
 
-        for supportsBSP in [false, true] {
-            let runner = StubCommandRunner { _, args in
-                if args == ["--version"] {
-                    return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.3.0\n".utf8), stderr: Data())
-                }
-                if args.first == "-c" {
-                    let pyOut = """
-                    {"executable":"\(customEnvPython3.path)","in_venv":false,"editable":false,"repo_path":null,"supports_break_system_packages":\(supportsBSP)}
-                    """
-                    return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
-                }
-                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
-            }
-            let vm = UpdateViewModel(
-                preferencesStore: prefs,
-                appVersion: "0.3.0",
-                environment: [
-                    "CODEX_AGY_SYNC_BIN": envShebangCLI.path,
-                    "PATH": "\(envPathBin.path):/usr/bin",
-                    UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
-                    UpdateViewModel.skipSelfReplaceEnvKey: "1",
-                ],
-                commandRunner: runner,
-                httpFetcher: fetcher,
-                stagingRootOverride: tempRoot.appendingPathComponent("staging-bsp-\(supportsBSP)", isDirectory: true)
-            )
-            await vm.checkForUpdates()
-            await vm.syncUpdateNow()
-            let pipCall = try XCTUnwrap(runner.invocations.first { $0.arguments.prefix(3) == ["-m", "pip", "install"] })
-            XCTAssertTrue(pipCall.arguments.contains("--user"))
-            XCTAssertEqual(pipCall.arguments.contains("--break-system-packages"), supportsBSP)
-        }
+        let vmBundled = UpdateViewModel(
+            preferencesStore: prefs,
+            appVersion: "0.4.3",
+            currentAppBundleURL: appBundle,
+            environment: ["PATH": "/nonexistent"],
+            commandRunner: runner,
+            httpFetcher: StubHTTPFetcher(routes: [:])
+        )
+        await vmBundled.probeEnvironment()
+        XCTAssertEqual(vmBundled.cliSource, .bundled)
+        XCTAssertEqual(vmBundled.resolvedCLIPath, bundledCLI.path)
+        XCTAssertEqual(vmBundled.alignment, .aligned(version: "0.4.3"))
+        XCTAssertNil(vmBundled.detectedRepoPath)
+
+        let vmRustRepo = UpdateViewModel(
+            preferencesStore: prefs,
+            appVersion: "0.4.3",
+            currentAppBundleURL: appBundle,
+            environment: ["CODEX_AGY_SYNC_BIN": rustReleaseCLI.path],
+            commandRunner: runner,
+            httpFetcher: StubHTTPFetcher(routes: [:])
+        )
+        await vmRustRepo.probeEnvironment()
+        XCTAssertEqual(vmRustRepo.cliSource, .envOverride)
+        XCTAssertEqual(vmRustRepo.detectedRepoPath, repoDir.resolvingSymlinksInPath().path)
+        XCTAssertEqual(vmRustRepo.detectedRepoVersion, "0.4.3")
     }
 
     @MainActor
@@ -1287,13 +1214,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
 
         let apiURL = URL(string: "http://127.0.0.1:30011/releases/latest")!
+        let zipBytes = Data("cooldown-zip-050".utf8)
         let releaseJSON = """
         {
           "tag_name": "v0.5.0",
           "body": "Cooldown and backoff test",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "http://127.0.0.1:30011/SHA256SUMS", "size": 32},
-            {"name": "codex_agy_sync-0.5.0-py3-none-any.whl", "browser_download_url": "http://127.0.0.1:30011/pkg.whl", "size": 32}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "http://127.0.0.1:30011/CodexAgySync-macos.zip", "size": \(zipBytes.count)}
           ]
         }
         """
@@ -1402,18 +1330,15 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let buildScript = scriptsDir.appendingPathComponent("build_menubar_app.sh")
         try "#!/bin/sh\nexit 0\n".write(to: buildScript, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: buildScript.path)
-        try "#!/usr/bin/env python3\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
-        let wheelBytes = Data("staged-wheel-050".utf8)
         let zipBytes = Data("staged-zip-050".utf8)
         let sums = """
-        \(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.5.0-py3-none-any.whl
         \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip
         """
         let apiURL = URL(string: "http://127.0.0.1:30012/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:30012/SHA256SUMS")!
-        let wheelURL = URL(string: "http://127.0.0.1:30012/codex_agy_sync-0.5.0-py3-none-any.whl")!
         let zipURL = URL(string: "http://127.0.0.1:30012/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
@@ -1421,7 +1346,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "body": "Auto-stage test",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
-            {"name": "codex_agy_sync-0.5.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
             {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
@@ -1430,10 +1354,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let runner = StubCommandRunner { exe, args in
             if args == ["--version"] {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.4.1\n".utf8), stderr: Data())
-            }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null,"supports_break_system_packages":false}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
             }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
                 let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
@@ -1446,7 +1366,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let fetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data(sums.utf8), 200),
-            wheelURL: (wheelBytes, 200),
             zipURL: (zipBytes, 200),
         ])
 
@@ -1469,7 +1388,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         await vmLocal.performOpportunisticCheckIfNeeded(trigger: .appLaunched)
         XCTAssertNil(vmLocal.stagedManifest)
         XCTAssertEqual(fetcher.requestedURLs, [apiURL])
-        XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
 
         prefs.setLocalRepoPathForSync(nil)
         defaults.removeObject(forKey: UpdateViewModel.checkpointDefaultsKey)
@@ -1499,7 +1417,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertNotNil(vmStage.stagedManifest)
         XCTAssertEqual(vmStage.stagedManifest?.version, "0.5.0")
         XCTAssertEqual(vmStage.popoverNotice?.action, .installStagedAndRelaunch(tag: "v0.5.0"))
-        XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
         XCTAssertFalse(FileManager.default.fileExists(atPath: legacyStale.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: existingStagedOld.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: updatesRoot.appendingPathComponent("staged/0.5.0/stage-manifest.json").path))
@@ -1537,18 +1454,15 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try "v0.4.1".write(to: installedApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
-        try "#!/usr/bin/env python3\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
-        let wheelBytes = Data("staged-wheel-050".utf8)
         let zipBytes = Data("staged-zip-050".utf8)
         let sums = """
-        \(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.5.0-py3-none-any.whl
         \(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip
         """
         let apiURL = URL(string: "http://127.0.0.1:30013/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:30013/SHA256SUMS")!
-        let wheelURL = URL(string: "http://127.0.0.1:30013/codex_agy_sync-0.5.0-py3-none-any.whl")!
         let zipURL = URL(string: "http://127.0.0.1:30013/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
@@ -1556,21 +1470,16 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "body": "Install staged test",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 128},
-            {"name": "codex_agy_sync-0.5.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)},
             {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
         """
 
-        let cliVerLock = NSLock()
-        nonisolated(unsafe) var cliVer = "0.4.1"
         let runner = StubCommandRunner { exe, args in
             if args == ["--version"] {
-                return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(cliVerLock.withLock { cliVer })\n".utf8), stderr: Data())
-            }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null,"supports_break_system_packages":false}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
+                let rawVersion = (try? String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8)) ?? "v0.4.1"
+                let ver = rawVersion.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "v", with: "")
+                return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(ver)\n".utf8), stderr: Data())
             }
             if exe.path == "/usr/bin/ditto", let destPath = args.last {
                 let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
@@ -1578,16 +1487,11 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 try "v0.5.0".write(to: appDir.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
-            if args.prefix(3) == ["-m", "pip", "install"] {
-                cliVerLock.withLock { cliVer = "0.5.0" }
-                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
-            }
             return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
         let fetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data(sums.utf8), 200),
-            wheelURL: (wheelBytes, 200),
             zipURL: (zipBytes, 200),
         ])
 
@@ -1623,10 +1527,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
         await vm.performOpportunisticCheckIfNeeded(trigger: .appLaunched)
         XCTAssertNotNil(vm.stagedManifest)
         let fetchCountAfterStage = fetcher.requestedURLs.count
+        let codesignCountBeforeInstall = runner.invocations.filter { $0.executablePath == "/usr/bin/codesign" }.count
 
         await vm.installStagedAndRelaunch()
         XCTAssertEqual(vm.statusMessage, AppCopy.text(.updatesErrSyncInProgress, in: .zhHans))
-        XCTAssertFalse(runner.invocations.contains { $0.arguments.prefix(2) == ["-m", "pip"] })
+        XCTAssertEqual(
+            runner.invocations.filter { $0.executablePath == "/usr/bin/codesign" }.count,
+            codesignCountBeforeInstall
+        )
         XCTAssertTrue(hookState.events.isEmpty)
         XCTAssertEqual(try String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8), "v0.4.1")
 
@@ -1639,7 +1547,10 @@ final class PreferencesAndUpdateTests: XCTestCase {
         hookState.allowMutate = true
         await vm.installStagedAndRelaunch()
         XCTAssertEqual(fetcher.requestedURLs.count, fetchCountAfterStage)
-        XCTAssertTrue(runner.invocations.contains { $0.arguments.prefix(3) == ["-m", "pip", "install"] })
+        XCTAssertEqual(
+            runner.invocations.filter { $0.executablePath == "/usr/bin/codesign" }.count,
+            codesignCountBeforeInstall + 1
+        )
         XCTAssertEqual(try String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8), "v0.5.0")
         XCTAssertEqual(hookState.events, ["prepare", "relaunch"])
         XCTAssertEqual(relaunchMock.relaunchedURLs, [installedApp])
@@ -1730,32 +1641,37 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
-        let wheelBytes = Data("wheel-backoff-050".utf8)
-        let sums = "\(SHA256Verifier.sha256Hex(of: wheelBytes))  codex_agy_sync-0.5.0-py3-none-any.whl\n"
+        let zipBytes = Data("zip-backoff-050".utf8)
+        let sums = "\(SHA256Verifier.sha256Hex(of: zipBytes))  CodexAgySync-macos.zip\n"
         let apiURL = URL(string: "http://127.0.0.1:30101/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:30101/SHA256SUMS")!
-        let wheelURL = URL(string: "http://127.0.0.1:30101/codex_agy_sync-0.5.0-py3-none-any.whl")!
+        let zipURL = URL(string: "http://127.0.0.1:30101/CodexAgySync-macos.zip")!
         let releaseJSON = """
         {
           "tag_name": "v0.5.0",
           "body": "",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 64},
-            {"name": "codex_agy_sync-0.5.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheelBytes.count)}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zipBytes.count)}
           ]
         }
         """
 
-        let runner = StubCommandRunner { _, args in
+        let runner = StubCommandRunner { exe, args in
             if args == ["--version"] {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.4.1\n".utf8), stderr: Data())
+            }
+            if exe.path == "/usr/bin/ditto", let destPath = args.last {
+                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
+                try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
             return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
         let fetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data("unavailable".utf8), 503),
-            wheelURL: (wheelBytes, 200),
+            zipURL: (zipBytes, 200),
         ])
 
         let clockLock = NSLock()
@@ -1769,6 +1685,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             environment: [
                 "CODEX_AGY_SYNC_BIN": cliBin.path,
                 UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
+                UpdateViewModel.skipSelfReplaceEnvKey: "1",
             ],
             commandRunner: runner,
             httpFetcher: fetcher,
@@ -1792,7 +1709,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         fetcher.setRoutes([
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data(sums.utf8), 200),
-            wheelURL: (wheelBytes, 200),
+            zipURL: (zipBytes, 200),
         ])
         clockLock.withLock { epoch += 3_001 }
         await vm.performOpportunisticCheckIfNeeded(trigger: .panelOpened)
@@ -1804,8 +1721,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 tagName: "v0.5.0",
                 version: "0.5.0",
                 notesSummary: AppCopy.text(.updatesDefaultNotesSummary, in: .zhHans),
-                hasAppAsset: false,
-                hasWheelAsset: true
+                hasAppAsset: true
             )
         )
         prefs.setLanguage(.en)
@@ -1815,8 +1731,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 tagName: "v0.5.0",
                 version: "0.5.0",
                 notesSummary: AppCopy.text(.updatesDefaultNotesSummary, in: .en),
-                hasAppAsset: false,
-                hasWheelAsset: true
+                hasAppAsset: true
             )
         )
 
@@ -1824,7 +1739,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let policyFetcher = StubHTTPFetcher(routes: [
             apiURL: (Data(releaseJSON.utf8), 200),
             sumsURL: (Data("unavailable".utf8), 503),
-            wheelURL: (wheelBytes, 200),
+            zipURL: (zipBytes, 200),
         ])
         let vmPolicyFail = UpdateViewModel(
             preferencesStore: prefs,
@@ -1832,6 +1747,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             environment: [
                 "CODEX_AGY_SYNC_BIN": cliBin.path,
                 UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
+                UpdateViewModel.skipSelfReplaceEnvKey: "1",
             ],
             commandRunner: runner,
             httpFetcher: policyFetcher,
@@ -1876,19 +1792,23 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
-        let wheelBytes = Data("wheel-reconcile-050".utf8)
-        let wheelName = "codex_agy_sync-0.5.0-py3-none-any.whl"
-        try wheelBytes.write(to: staged050.appendingPathComponent(wheelName))
-        let legacyManifest = StagedUpdateManifest(
+        let appsDir = tempRoot.appendingPathComponent("Apps", isDirectory: true)
+        let installedApp = appsDir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedApp.path)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: appsDir.path)
+        }
+        let stagedApp = staged050.appendingPathComponent("extracted/CodexAgySync.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagedApp, withIntermediateDirectories: true)
+        let stagedManifest = StagedUpdateManifest(
             tagName: "v0.5.0",
             version: "0.5.0",
             notesSummary: AppCopy.text(.updatesDefaultNotesSummary, in: .zhHans),
-            wheelFileName: wheelName,
-            wheelSHA256: SHA256Verifier.sha256Hex(of: wheelBytes),
-            appBundleName: nil,
+            appBundleName: "CodexAgySync.app",
             stagedAtEpoch: 1_795_000_000
         )
-        try JSONEncoder().encode(legacyManifest).write(to: staged050.appendingPathComponent("stage-manifest.json"))
+        try JSONEncoder().encode(stagedManifest).write(to: staged050.appendingPathComponent("stage-manifest.json"))
 
         let apiURL = URL(string: "http://127.0.0.1:30102/releases/latest")!
         let release060JSON = """
@@ -1897,23 +1817,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "body": "Newer v0.6.0 release",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "http://127.0.0.1:30102/SHA256SUMS", "size": 64},
-            {"name": "codex_agy_sync-0.6.0-py3-none-any.whl", "browser_download_url": "http://127.0.0.1:30102/pkg.whl", "size": 64}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "http://127.0.0.1:30102/CodexAgySync-macos.zip", "size": 64}
           ]
         }
         """
 
-        let pipFailLock = NSLock()
-        nonisolated(unsafe) var shouldFailPip = true
         let runner = StubCommandRunner { _, args in
             if args == ["--version"] {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.4.1\n".utf8), stderr: Data())
-            }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
-            }
-            if args.prefix(3) == ["-m", "pip", "install"], pipFailLock.withLock({ shouldFailPip }) {
-                return CommandExecutionResult(exitCode: 1, stdout: Data(), stderr: Data("pip transient failure".utf8))
             }
             return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
@@ -1924,6 +1835,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let vm = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.4.1",
+            currentAppBundleURL: installedApp,
             environment: [
                 "CODEX_AGY_SYNC_BIN": cliBin.path,
                 UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
@@ -1941,8 +1853,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 tagName: "v0.5.0",
                 version: "0.5.0",
                 notesSummary: AppCopy.text(.updatesDefaultNotesSummary, in: .en),
-                hasAppAsset: false,
-                hasWheelAsset: true
+                hasAppAsset: true
             )
         )
 
@@ -1953,14 +1864,13 @@ final class PreferencesAndUpdateTests: XCTestCase {
             .releaseAvailable(
                 latestTag: "v0.6.0",
                 notesSummary: "Newer v0.6.0 release",
-                hasAppAsset: false,
-                hasWheelAsset: true
+                hasAppAsset: true
             )
         )
 
         await vm.probeEnvironment()
         XCTAssertNil(vm.stagedManifest)
-        if case .releaseAvailable(let latestTag, _, _, _) = vm.availability {
+        if case .releaseAvailable(let latestTag, _, _) = vm.availability {
             XCTAssertEqual(latestTag, "v0.6.0")
         } else {
             XCTFail("Expected .releaseAvailable(v0.6.0) not to downgrade to staged 0.5.0, got \(vm.availability)")
@@ -1969,6 +1879,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let vmRecover = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.4.1",
+            currentAppBundleURL: installedApp,
             environment: [
                 "CODEX_AGY_SYNC_BIN": cliBin.path,
                 UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
@@ -1989,9 +1900,11 @@ final class PreferencesAndUpdateTests: XCTestCase {
         await vmRecover.probeEnvironment()
         XCTAssertEqual(vmRecover.stagedManifest?.version, "0.5.0")
 
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: installedApp.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: appsDir.path)
         await vmRecover.installStagedAndRelaunch()
         guard case .failed = vmRecover.availability else {
-            return XCTFail("Expected .failed after pip failure, got \(vmRecover.availability)")
+            return XCTFail("Expected .failed after target writability failure, got \(vmRecover.availability)")
         }
         await vmRecover.probeEnvironment(recoverStagedFromFailure: false)
         guard case .failed = vmRecover.availability else {
@@ -2000,11 +1913,12 @@ final class PreferencesAndUpdateTests: XCTestCase {
         await vmRecover.probeEnvironment(recoverStagedFromFailure: true)
         XCTAssertEqual(vmRecover.stagedManifest?.version, "0.5.0")
 
-        pipFailLock.withLock { shouldFailPip = false }
-        try Data("corrupted-wheel".utf8).write(to: staged050.appendingPathComponent(wheelName))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: appsDir.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedApp.path)
+        try FileManager.default.removeItem(at: stagedApp)
         await vmRecover.installStagedAndRelaunch()
         guard case .failed = vmRecover.availability else {
-            return XCTFail("Expected .failed for invalid staged wheel")
+            return XCTFail("Expected .failed for missing staged app bundle")
         }
         await vmRecover.probeEnvironment(recoverStagedFromFailure: true)
         XCTAssertNil(vmRecover.stagedManifest)
@@ -2160,10 +2074,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
             if args == ["--version"], exe.path == cli2.path {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.4.1\n".utf8), stderr: Data())
             }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
-            }
             return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
 
@@ -2187,32 +2097,35 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertEqual(vmProbe.alignment, .aligned(version: "0.4.1"))
         XCTAssertEqual(vmProbe.resolvedCLIPath, cli2.path)
 
-        let wheel050 = Data("wheel-050".utf8)
-        let wheel050Name = "codex_agy_sync-0.5.0-py3-none-any.whl"
+        let installedApp = tempRoot.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
+        try "v0.4.1".write(to: installedApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+
+        let zip050 = Data("zip-050".utf8)
+        let zip050Name = "CodexAgySync-macos.zip"
         let staged050Dir = updatesRoot.appendingPathComponent("staged/0.5.0", isDirectory: true)
-        try FileManager.default.createDirectory(at: staged050Dir, withIntermediateDirectories: true)
-        try wheel050.write(to: staged050Dir.appendingPathComponent(wheel050Name))
+        let staged050App = staged050Dir.appendingPathComponent("extracted/CodexAgySync.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: staged050App, withIntermediateDirectories: true)
+        try "v0.5.0".write(to: staged050App.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
         let manifest050 = StagedUpdateManifest(
             tagName: "v0.5.0",
             version: "0.5.0",
             notesSummary: "",
-            wheelFileName: wheel050Name,
-            wheelSHA256: SHA256Verifier.sha256Hex(of: wheel050),
-            appBundleName: nil,
+            appBundleName: "CodexAgySync.app",
             stagedAtEpoch: 1_795_000_000
         )
         try JSONEncoder().encode(manifest050).write(to: staged050Dir.appendingPathComponent("stage-manifest.json"))
 
         let apiURL = URL(string: "http://127.0.0.1:30103/releases/latest")!
         let sumsURL = URL(string: "http://127.0.0.1:30103/SHA256SUMS")!
-        let wheelURL = URL(string: "http://127.0.0.1:30103/codex_agy_sync-0.5.0-py3-none-any.whl")!
+        let zipURL = URL(string: "http://127.0.0.1:30103/CodexAgySync-macos.zip")!
         let release060JSON = """
         {
           "tag_name": "v0.6.0",
           "body": "Supersede test",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 64},
-            {"name": "codex_agy_sync-0.6.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": 32}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": 32}
           ]
         }
         """
@@ -2222,44 +2135,45 @@ final class PreferencesAndUpdateTests: XCTestCase {
           "body": "Mid-flight abort test",
           "assets": [
             {"name": "SHA256SUMS", "browser_download_url": "\(sumsURL.absoluteString)", "size": 64},
-            {"name": "codex_agy_sync-0.5.0-py3-none-any.whl", "browser_download_url": "\(wheelURL.absoluteString)", "size": \(wheel050.count)}
+            {"name": "CodexAgySync-macos.zip", "browser_download_url": "\(zipURL.absoluteString)", "size": \(zip050.count)}
           ]
         }
         """
-        let sums050 = "\(SHA256Verifier.sha256Hex(of: wheel050))  \(wheel050Name)\n"
+        let sums050 = "\(SHA256Verifier.sha256Hex(of: zip050))  \(zip050Name)\n"
 
         let gatedFetcher = GatedHTTPFetcher(routes: [
             apiURL: (Data(release060JSON.utf8), 200),
             sumsURL: (Data(sums050.utf8), 200),
-            wheelURL: (wheel050, 200),
+            zipURL: (zip050, 200),
         ])
-        let cliVerLock = NSLock()
-        nonisolated(unsafe) var cliVer = "0.4.1"
-        let simpleRunner = StubCommandRunner { _, args in
+        let simpleRunner = StubCommandRunner { exe, args in
             if args == ["--version"] {
-                return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(cliVerLock.withLock { cliVer })\n".utf8), stderr: Data())
+                let rawVersion = (try? String(contentsOf: installedApp.appendingPathComponent("version.txt"), encoding: .utf8)) ?? "v0.4.1"
+                let ver = rawVersion.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "v", with: "")
+                return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(ver)\n".utf8), stderr: Data())
             }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
-            }
-            if args.prefix(3) == ["-m", "pip", "install"] {
-                cliVerLock.withLock { cliVer = "0.5.0" }
+            if exe.path == "/usr/bin/ditto", let destPath = args.last {
+                let appDir = URL(fileURLWithPath: destPath).appendingPathComponent("CodexAgySync.app", isDirectory: true)
+                try FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+                try "v0.5.0".write(to: appDir.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
             return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
 
+        let relaunchMock = StubRelaunchExecutor()
         prefs.setAutoUpdatePolicy(.checkOnly)
         let vmManualCheck = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.4.1",
+            currentAppBundleURL: installedApp,
             environment: [
                 "CODEX_AGY_SYNC_BIN": cli2.path,
                 UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
             ],
             commandRunner: simpleRunner,
             httpFetcher: gatedFetcher,
+            relaunchExecutor: relaunchMock,
             stagingRootOverride: updatesRoot
         )
         await vmManualCheck.probeEnvironment()
@@ -2270,7 +2184,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         await gatedFetcher.waitForGatedRequest()
 
         await vmManualCheck.checkForUpdates()
-        if case .releaseAvailable(let tag, _, _, _) = vmManualCheck.availability {
+        if case .releaseAvailable(let tag, _, _) = vmManualCheck.availability {
             XCTAssertEqual(tag, "v0.6.0")
         } else {
             XCTFail("Expected manual checkForUpdates during in-flight opportunistic check to succeed")
@@ -2278,7 +2192,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
 
         gatedFetcher.resumeGatedRequest(with: (Data(), 503))
         await oppCheckTask.value
-        if case .releaseAvailable(let tag, _, _, _) = vmManualCheck.availability {
+        if case .releaseAvailable(let tag, _, _) = vmManualCheck.availability {
             XCTAssertEqual(tag, "v0.6.0")
         } else {
             XCTFail("Superseded opportunistic failure overwrote manual check result: \(vmManualCheck.availability)")
@@ -2288,12 +2202,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let vmManualInstall = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.4.1",
+            currentAppBundleURL: installedApp,
             environment: [
                 "CODEX_AGY_SYNC_BIN": cli2.path,
                 UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
             ],
             commandRunner: simpleRunner,
             httpFetcher: gatedFetcher,
+            relaunchExecutor: relaunchMock,
             stagingRootOverride: updatesRoot
         )
         await vmManualInstall.probeEnvironment()
@@ -2310,15 +2226,16 @@ final class PreferencesAndUpdateTests: XCTestCase {
         await oppInstallTask.value
         XCTAssertEqual(vmManualInstall.availability, .upToDate(currentVersion: "0.5.0"))
 
-        cliVerLock.withLock { cliVer = "0.4.1" }
-        try FileManager.default.createDirectory(at: staged050Dir, withIntermediateDirectories: true)
-        try wheel050.write(to: staged050Dir.appendingPathComponent(wheel050Name))
+        try "v0.4.1".write(to: installedApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: staged050App, withIntermediateDirectories: true)
+        try "v0.5.0".write(to: staged050App.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
         try JSONEncoder().encode(manifest050).write(to: staged050Dir.appendingPathComponent("stage-manifest.json"))
         defaults.removeObject(forKey: UpdateViewModel.checkpointDefaultsKey)
 
         let vmDeletedStaged = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.4.1",
+            currentAppBundleURL: installedApp,
             environment: [
                 "CODEX_AGY_SYNC_BIN": cli2.path,
                 UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
@@ -2341,13 +2258,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
         gatedFetcher.setRoutes([
             apiURL: (Data(release050JSON.utf8), 200),
             sumsURL: (Data(sums050.utf8), 200),
-            wheelURL: (wheel050, 200),
+            zipURL: (zip050, 200),
         ])
-        gatedFetcher.gateNextRequest(matchingSuffix: wheel050Name)
+        gatedFetcher.gateNextRequest(matchingSuffix: zip050Name)
 
         let vmAbortStage = UpdateViewModel(
             preferencesStore: prefs,
             appVersion: "0.4.1",
+            currentAppBundleURL: installedApp,
             environment: [
                 "CODEX_AGY_SYNC_BIN": cli2.path,
                 UpdateViewModel.releaseAPIEnvKey: apiURL.absoluteString,
@@ -2360,14 +2278,14 @@ final class PreferencesAndUpdateTests: XCTestCase {
         await gatedFetcher.waitForGatedRequest()
         XCTAssertFalse(vmAbortStage.isInstallingUpdate)
         prefs.setAutoUpdatePolicy(.checkOnly)
-        gatedFetcher.resumeGatedRequest(with: (wheel050, 200))
+        gatedFetcher.resumeGatedRequest(with: (zip050, 200))
         await abortTask.value
 
         XCTAssertNil(vmAbortStage.stagedManifest)
         XCTAssertFalse(FileManager.default.fileExists(atPath: staged050Dir.path))
         let tmpChildren = (try? FileManager.default.contentsOfDirectory(atPath: updatesRoot.appendingPathComponent("tmp").path)) ?? []
         XCTAssertTrue(tmpChildren.isEmpty)
-        if case .releaseAvailable(let tag, _, _, _) = vmAbortStage.availability {
+        if case .releaseAvailable(let tag, _, _) = vmAbortStage.availability {
             XCTAssertEqual(tag, "v0.5.0")
         } else {
             XCTFail("Expected .releaseAvailable after mid-flight policy downgrade, got \(vmAbortStage.availability)")
@@ -2375,11 +2293,11 @@ final class PreferencesAndUpdateTests: XCTestCase {
 
         defaults.removeObject(forKey: UpdateViewModel.checkpointDefaultsKey)
         prefs.setAutoUpdatePolicy(.autoStage)
-        gatedFetcher.gateNextRequest(matchingSuffix: wheel050Name)
+        gatedFetcher.gateNextRequest(matchingSuffix: zip050Name)
         let cancelTask = Task { await vmAbortStage.performOpportunisticCheckIfNeeded(trigger: .panelOpened) }
         await gatedFetcher.waitForGatedRequest()
         cancelTask.cancel()
-        gatedFetcher.resumeGatedRequest(with: (wheel050, 200))
+        gatedFetcher.resumeGatedRequest(with: (zip050, 200))
         await cancelTask.value
         XCTAssertNil(vmAbortStage.stagedManifest)
         XCTAssertFalse(FileManager.default.fileExists(atPath: staged050Dir.path))
@@ -2413,21 +2331,13 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try FileManager.default.createDirectory(at: extractedApp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempRoot) }
 
-        let shebangPython = tempRoot.appendingPathComponent("python3")
-        try "#!/bin/sh\nexit 0\n".write(to: shebangPython, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shebangPython.path)
-        try "#!\(shebangPython.path)\n".write(to: cliBin, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
-        let wheelBytes = Data("wheel-skipreplace".utf8)
-        let wheelName = "codex_agy_sync-0.5.0-py3-none-any.whl"
-        try wheelBytes.write(to: staged050.appendingPathComponent(wheelName))
         let manifest = StagedUpdateManifest(
             tagName: "v0.5.0",
             version: "0.5.0",
             notesSummary: "",
-            wheelFileName: wheelName,
-            wheelSHA256: SHA256Verifier.sha256Hex(of: wheelBytes),
             appBundleName: "CodexAgySync.app",
             stagedAtEpoch: 1_795_000_000
         )
@@ -2436,12 +2346,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let runner = StubCommandRunner { _, args in
             if args == ["--version"] {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync 0.5.0\n".utf8), stderr: Data())
-            }
-            if args.first == "-c" {
-                let pyOut = """
-                {"executable":"\(shebangPython.path)","in_venv":true,"editable":false,"repo_path":null}
-                """
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
             }
             return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
         }
@@ -2467,7 +2371,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertTrue(relaunchMock.relaunchedURLs.isEmpty)
         XCTAssertTrue(vm.canRelaunchApp)
         XCTAssertEqual(vm.pendingRelaunchVersion, "0.5.0")
-        XCTAssertTrue(runner.invocations.contains { $0.executablePath == shebangPython.path && $0.arguments.first == "-c" })
 
         var relaunchFailedCalls = 0
         let vmFailRelaunch = UpdateViewModel(
@@ -2603,8 +2506,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
             tagName: "v0.5.0",
             version: "0.5.0",
             notesSummary: "",
-            wheelFileName: nil,
-            wheelSHA256: nil,
             appBundleName: "CodexAgySync.app",
             stagedAtEpoch: 1_795_000_000
         )
@@ -2633,10 +2534,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
             if args == ["--version"] {
                 return CommandExecutionResult(exitCode: 0, stdout: Data("codex-agy-sync \(cliVerLock.withLock { cliVer })\n".utf8), stderr: Data())
             }
-            if args.first == "-c" {
-                let pyOut = #"{"executable":"/usr/bin/python3","in_venv":true,"editable":true,"repo_path":null}"#
-                return CommandExecutionResult(exitCode: 0, stdout: Data(pyOut.utf8), stderr: Data())
-            }
             if exe.lastPathComponent == "build_menubar_app.sh",
                let outIdx = args.firstIndex(of: "--output-dir"),
                outIdx + 1 < args.count
@@ -2644,9 +2541,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 let outApp = URL(fileURLWithPath: args[outIdx + 1]).appendingPathComponent("CodexAgySync.app", isDirectory: true)
                 try FileManager.default.createDirectory(at: outApp, withIntermediateDirectories: true)
                 try "v0.4.2".write(to: outApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
-                return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
-            }
-            if args.prefix(3) == ["-m", "pip", "install"] {
                 cliVerLock.withLock { cliVer = "0.4.2" }
                 return CommandExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
             }
@@ -2880,7 +2774,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
                 }
                 return CommandExecutionResult(
                     exitCode: 0,
-                    stdout: Data(#"{"executable":"/usr/bin/python3","in_venv":true,"editable":false,"repo_path":null}"#.utf8),
+                    stdout: Data(),
                     stderr: Data()
                 )
             }

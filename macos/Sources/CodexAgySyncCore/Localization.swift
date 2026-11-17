@@ -185,6 +185,7 @@ public enum AppCopyKey: CaseIterable, Sendable {
 
     case cliSourceEnv
     case cliSourceCustom
+    case cliSourceBundled
     case cliSourceAuto
     case cliSourceMissing
     case cliMissingError
@@ -277,17 +278,14 @@ public enum AppCopyKey: CaseIterable, Sendable {
     case updatesDefaultNotesSummary
 
     case updatesStepBuildingLocal
-    case updatesStepUpgradingLocalCLI
     case updatesStepDownloadingChecksums
     case updatesStepVerifyingApp
-    case updatesStepInstallingCLI
     case updatesNoticeRelaunchAction
     case updatesNoticeInstallStagedAction
     case updatesNoticeOpenSettingsAction
 
     case updatesErrMissingChecksums
     case updatesErrMissingAssets
-    case updatesErrPythonMissing
     case updatesErrSyncInProgress
     case updatesErrInstallationInProgress
     case updatesErrBundlePathMissing
@@ -343,6 +341,8 @@ public enum AppCopy {
             return BilingualText(zhHans: "环境变量", en: "Environment")
         case .cliSourceCustom:
             return BilingualText(zhHans: "手动指定", en: "Custom Path")
+        case .cliSourceBundled:
+            return BilingualText(zhHans: "内置引擎", en: "Bundled")
         case .cliSourceAuto:
             return BilingualText(zhHans: "自动发现", en: "Auto-Discovered")
         case .cliSourceMissing:
@@ -543,14 +543,10 @@ public enum AppCopy {
 
         case .updatesStepBuildingLocal:
             return BilingualText(zhHans: "正在从源码仓构建并签名 CodexAgySync.app…", en: "Building and signing CodexAgySync.app from local repo…")
-        case .updatesStepUpgradingLocalCLI:
-            return BilingualText(zhHans: "正在升级 Python CLI 环境…", en: "Upgrading Python CLI environment…")
         case .updatesStepDownloadingChecksums:
             return BilingualText(zhHans: "正在下载并校验 SHA256SUMS…", en: "Downloading and verifying SHA256SUMS…")
         case .updatesStepVerifyingApp:
             return BilingualText(zhHans: "正在解包并校验应用签名…", en: "Extracting and verifying app code signature…")
-        case .updatesStepInstallingCLI:
-            return BilingualText(zhHans: "正在升级 codex-agy-sync CLI…", en: "Upgrading codex-agy-sync CLI…")
         case .updatesNoticeRelaunchAction:
             return BilingualText(zhHans: "立即重启", en: "Restart")
         case .updatesNoticeInstallStagedAction:
@@ -565,13 +561,8 @@ public enum AppCopy {
             )
         case .updatesErrMissingAssets:
             return BilingualText(
-                zhHans: "远端 Release 未包含可用的安装包资产（.whl 或 CodexAgySync-macos.zip）。",
-                en: "Remote release has no installable assets (.whl or CodexAgySync-macos.zip)."
-            )
-        case .updatesErrPythonMissing:
-            return BilingualText(
-                zhHans: "未找到可用的 Python 3 解释器以更新 CLI。",
-                en: "No Python 3 interpreter found to update the CLI."
+                zhHans: "远端 Release 未包含可用的应用安装包（CodexAgySync-macos.zip）。",
+                en: "Remote release has no installable app archive (CodexAgySync-macos.zip)."
             )
         case .updatesErrSyncInProgress:
             return BilingualText(
@@ -892,15 +883,6 @@ public enum AppCopy {
         }
     }
 
-    public static func stepDownloadingWheel(_ name: String, in language: ResolvedLanguage) -> String {
-        switch language {
-        case .zhHans:
-            return "正在下载并校验 CLI 安装包（\(name)）…"
-        case .en:
-            return "Downloading and verifying CLI wheel (\(name))…"
-        }
-    }
-
     public static func stepDownloadingApp(_ name: String, in language: ResolvedLanguage) -> String {
         switch language {
         case .zhHans:
@@ -1071,18 +1053,18 @@ public enum AppCopy {
     public static func updateFailureCliUnavailableMissingAsset(tag: String, in language: ResolvedLanguage) -> String {
         switch language {
         case .zhHans:
-            return "CLI 尚未就绪，且远端 Release（\(tag)）未包含 CLI 安装包。"
+            return "CLI 尚未就绪，且远端 Release（\(tag)）未包含可用的应用安装包。"
         case .en:
-            return "CLI is not ready, and release \(tag) has no CLI wheel asset."
+            return "CLI is not ready, and release \(tag) has no macOS app archive."
         }
     }
 
     public static func updateFailureMismatchMissingAsset(tag: String, in language: ResolvedLanguage) -> String {
         switch language {
         case .zhHans:
-            return "双端版本未对齐，且远端 Release（\(tag)）未包含对齐所需安装包。"
+            return "双端版本未对齐，且远端 Release（\(tag)）未包含可用的应用安装包。"
         case .en:
-            return "App and CLI versions differ, and release \(tag) has no installable assets."
+            return "App and CLI versions differ, and release \(tag) has no macOS app archive."
         }
     }
 
@@ -1128,15 +1110,6 @@ public enum AppCopy {
             return "已同步升级至 \(tag)，点击“立即重启应用”加载新应用壳层。"
         case .en:
             return "Updated to \(tag). Click \"Restart App\" to apply."
-        }
-    }
-
-    public static func updatesStatusReleaseSyncedCLIOnly(tag: String, in language: ResolvedLanguage) -> String {
-        switch language {
-        case .zhHans:
-            return "已校验并升级 CLI 至 \(tag)（该 Release 未附带 .app 压缩包）。"
-        case .en:
-            return "Verified and updated CLI to \(tag) (release did not include a macOS .app archive)."
         }
     }
 

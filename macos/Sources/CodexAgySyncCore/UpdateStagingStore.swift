@@ -124,25 +124,16 @@ struct UpdateStagingStore: Sendable {
             return false
         }
         let manifestURL = validatedDir.appendingPathComponent(Self.stagedManifestFileName, isDirectory: false)
-        guard fm.fileExists(atPath: manifestURL.path) else {
+        guard fm.fileExists(atPath: manifestURL.path),
+              let appBundleName = manifest.appBundleName
+        else {
             return false
         }
-        if let appBundleName = manifest.appBundleName {
-            let extractedRoot = validatedDir.appendingPathComponent("extracted", isDirectory: true)
-            guard let appURL = try? UpdatePathGuard.stagedAssetFileURL(for: appBundleName, in: extractedRoot),
-                  Self.isRealAppBundleDirectory(appURL, inside: extractedRoot, fileManager: fm)
-            else {
-                return false
-            }
-        }
-        if let wheelName = manifest.wheelFileName {
-            guard let wheelURL = try? UpdatePathGuard.stagedAssetFileURL(for: wheelName, in: validatedDir),
-                  let expectedSHA = manifest.wheelSHA256?.lowercased(),
-                  let actualSHA = try? SHA256Verifier.sha256Hex(fileURL: wheelURL),
-                  actualSHA == expectedSHA
-            else {
-                return false
-            }
+        let extractedRoot = validatedDir.appendingPathComponent("extracted", isDirectory: true)
+        guard let appURL = try? UpdatePathGuard.stagedAssetFileURL(for: appBundleName, in: extractedRoot),
+              Self.isRealAppBundleDirectory(appURL, inside: extractedRoot, fileManager: fm)
+        else {
+            return false
         }
         return true
     }
@@ -152,18 +143,11 @@ struct UpdateStagingStore: Sendable {
         effectiveAppVersion: String,
         alignment: VersionAlignmentState
     ) -> Bool {
+        guard manifest.appBundleName != nil else {
+            return false
+        }
         let stagedSem = SemanticVersion.parse(manifest.version)
         let appSem = SemanticVersion.parse(effectiveAppVersion)
-        let cliSem: SemanticVersion? = {
-            switch alignment {
-            case .aligned(let ver):
-                return SemanticVersion.parse(ver)
-            case .mismatched(_, let cliVer):
-                return SemanticVersion.parse(cliVer)
-            case .cliUnavailable:
-                return nil
-            }
-        }()
 
         let isNewerThanApp = (stagedSem != nil && appSem != nil)
             ? (stagedSem! > appSem!)
@@ -174,16 +158,15 @@ struct UpdateStagingStore: Sendable {
         let appMatchesOrOlder = (stagedSem != nil && appSem != nil)
             ? (stagedSem! >= appSem!)
             : (manifest.version == effectiveAppVersion)
-        guard appMatchesOrOlder, manifest.wheelFileName != nil else {
+        guard appMatchesOrOlder else {
             return false
         }
-        guard let cliSem else {
+        switch alignment {
+        case .aligned:
+            return false
+        case .cliUnavailable, .mismatched:
             return true
         }
-        if let stagedSem {
-            return stagedSem > cliSem
-        }
-        return manifest.version != cliSem.description
     }
 
     func bestPersistedStagedCandidate(
@@ -249,58 +232,42 @@ struct UpdateStagingStore: Sendable {
         skipSelfReplace: Bool,
         childEnv: [String: String],
         language: ResolvedLanguage
-    ) async throws -> (stagedAppURL: URL?, verifiedWheelURL: URL?) {
+    ) async throws -> URL {
         let validatedStageDir = try UpdatePathGuard.validateNonTemporaryURL(stagedDir)
         let manifestURL = validatedStageDir.appendingPathComponent(Self.stagedManifestFileName, isDirectory: false)
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
             throw UpdateFailureReasonError(.stagedArtifactInvalid("missing manifest"))
         }
 
-        var stagedAppURL: URL?
-        if let appBundleName = manifest.appBundleName {
-            try Self.validateReplacementTargetIfNeeded(
-                targetBundleURL: targetBundleURL,
-                skipSelfReplace: skipSelfReplace,
+        guard let appBundleName = manifest.appBundleName else {
+            throw UpdateFailureReasonError(.stagedArtifactInvalid("missing app bundle"))
+        }
+        try Self.validateReplacementTargetIfNeeded(
+            targetBundleURL: targetBundleURL,
+            skipSelfReplace: skipSelfReplace,
+            language: language
+        )
+        let extractedRoot = validatedStageDir.appendingPathComponent("extracted", isDirectory: true)
+        let candidateApp: URL
+        do {
+            candidateApp = try UpdatePathGuard.stagedAssetFileURL(for: appBundleName, in: extractedRoot)
+        } catch {
+            throw UpdateFailureReasonError(.stagedArtifactInvalid(error.localizedDescription))
+        }
+        guard Self.isRealAppBundleDirectory(candidateApp, inside: extractedRoot) else {
+            throw UpdateFailureReasonError(.stagedArtifactInvalid("invalid app bundle directory \(appBundleName)"))
+        }
+        do {
+            try await verifyCodesign(
+                of: candidateApp,
+                inside: extractedRoot,
+                childEnv: childEnv,
                 language: language
             )
-            let extractedRoot = validatedStageDir.appendingPathComponent("extracted", isDirectory: true)
-            let candidateApp: URL
-            do {
-                candidateApp = try UpdatePathGuard.stagedAssetFileURL(for: appBundleName, in: extractedRoot)
-            } catch {
-                throw UpdateFailureReasonError(.stagedArtifactInvalid(error.localizedDescription))
-            }
-            guard Self.isRealAppBundleDirectory(candidateApp, inside: extractedRoot) else {
-                throw UpdateFailureReasonError(.stagedArtifactInvalid("invalid app bundle directory \(appBundleName)"))
-            }
-            do {
-                try await verifyCodesign(
-                    of: candidateApp,
-                    inside: extractedRoot,
-                    childEnv: childEnv,
-                    language: language
-                )
-            } catch {
-                throw UpdateFailureReasonError(.stagedArtifactInvalid(error.localizedDescription))
-            }
-            stagedAppURL = candidateApp
+        } catch {
+            throw UpdateFailureReasonError(.stagedArtifactInvalid(error.localizedDescription))
         }
-
-        var verifiedWheelURL: URL?
-        if let wheelFileName = manifest.wheelFileName {
-            let candidateWheel = try UpdatePathGuard.stagedAssetFileURL(for: wheelFileName, in: validatedStageDir)
-            guard FileManager.default.fileExists(atPath: candidateWheel.path) else {
-                throw UpdateFailureReasonError(.stagedArtifactInvalid("missing wheel \(wheelFileName)"))
-            }
-            guard let expectedSHA = manifest.wheelSHA256?.lowercased(),
-                  (try? SHA256Verifier.sha256Hex(fileURL: candidateWheel)) == expectedSHA
-            else {
-                throw UpdateFailureReasonError(.stagedArtifactInvalid("SHA-256 mismatch for \(wheelFileName)"))
-            }
-            verifiedWheelURL = candidateWheel
-        }
-
-        return (stagedAppURL, verifiedWheelURL)
+        return candidateApp
     }
 
     func verifyCodesign(

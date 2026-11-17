@@ -112,7 +112,7 @@ open "$HOME/Applications/CodexAgySync.app"
 - Tier 3 桥接编排（`bridge/`，含 `paths_and_locks.py`、`store_catalog.py`、`registry.py`、`project_rpc.py`、`state_machine.py`、`rpc.py`、`native_codex.py`、`transport.py`、`rescue_and_fork.py`、`sync.py`、`handoff_store.py`、`handoff.py`、`handoff_resolve.py`、`handoff_reconcile.py`、`__init__.py`）实现双端配对诊断、在线项目注册 RPC、锁守卫与备份回滚、`HostTransportPort` 与纯状态机、`A2` 在线回环 RPC、多存储目录扫描与落盘、按需 `sync` 接力链、滞留收据核对及门面 `SyncBridge`。
 - Tier 4 读端聚合与本地工作台（`workbench/`，含 `menubar_feed.py`、`models.py`、`discovery.py`、`catalog.py`、`lease.py`、`indexer.py`、`service.py`、`handler.py`、`server.py`、`ui/index.html`、`__init__.py`）提供零写盘 `menubar-feed` 有界快速候选扫描与 Stage 1 工作台只读发现、分层水合索引、`0o600` 租约管理及回环 HTTP 服务。
 - Tier 5 公共入口（`cli.py`、`__init__.py`、`__main__.py` 与 `bin/codex-agy-sync`）暴露命令行与公开 API。
-- 原生 macOS 菜单栏包（`macos/Package.swift`，Swift 6 / macOS 14+，`CodexAgySyncCore` + `CodexAgySync` + `CodexAgySyncTests`）与构建安装脚本 `scripts/build_menubar_app.sh`。
+- 原生 macOS 菜单栏应用与 Rust CLI 核心（`macos/` Swift 6 / macOS 14+ 承载 `CodexAgySyncCore` + `CodexAgySync` + `CodexAgySyncTests`；`rust/` 承载 `cas-core` / `cas-codecs` / `cas-host` / `cas-cli`）：构建脚本 `scripts/build_menubar_app.sh`（及签名公证入口 `scripts/release_macos.sh`）默认将 Rust `codex-agy-sync` 编译并由内而外签名打入 `CodexAgySync.app/Contents/Helpers/codex-agy-sync`，Swift 默认优先调用内嵌 Rust 二进制（Rust `serve` 透传回 Python CLI，独立 `./bin/codex-agy-sync` 控制台入口保留，App 升级统一走 `CodexAgySync-macos.zip` 整包 SHA-256 + `codesign` 替换）。
 
 ## 契约提取与验证入口
 
@@ -120,4 +120,4 @@ open "$HOME/Applications/CodexAgySync.app"
 - `python3 scripts/verify_session_mapping.py` 以 `SQLITE_OPEN_READONLY`（`?mode=ro` + `PRAGMA query_only=ON`）只读解码本机真实 Antigravity `.db` 会话与 Codex `rollout-*.jsonl`，校验 `unknown_wire_fields_count == 0` 且宿主数据库零变动。
 - `python3 skills/verify-codex-agy-sync/scripts/menubar_verify.py doctor` 与 `suite` 在隔离沙盒、双端回环 RPC 桩与本地 Release HTTP 桩下通过 `cua-driver` 端到端验收 `CodexAgySync.app` 搜索筛选、一键继续对话、独立设置面板、实时状态栏图标切换持久化、版本同频看板与更新检查及宿主库零污染。
 - `python3 skills/verify-codex-agy-sync/scripts/workbench_verify.py doctor` 与 `suite`（可选传 `--prototype <path>` 覆盖内置 UI）在隔离沙盒 + 回环 AGY RPC 桩下通过 `agent-browser` 端到端验收 `serve` 启停、安全门禁、跨端检索与一键交接。
-- `./scripts/check`（含 `scripts/check_architecture.py`）一键运行描述符完整性校验、真实会话只读无损解码、6 层 DAG 与边界 AST 门禁、路径与 `csrfToken` 卫生扫描、Python 回归测试以及 `[5b/5]` macOS Swift XCTest（`swift test --package-path macos --scratch-path out/swift-test-check`）。
+- `./scripts/check`（含 `scripts/check_architecture.py`）一键运行描述符完整性校验、真实会话只读无损解码、6 层 DAG 与边界 AST 门禁、路径/`csrfToken`/Swift Python 胶水卫生扫描、Python 回归测试、`[5b/6]` macOS Swift XCTest（`swift test --package-path macos --scratch-path out/swift-test-check`）以及 `[6/6]` Rust `cargo fmt/clippy/test` 与 `scripts/verify_rust_parity.py` 差分门禁。

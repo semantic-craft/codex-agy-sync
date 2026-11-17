@@ -16,17 +16,13 @@ enum UpToDateMessage: Equatable, Sendable {
     case alignedWithRemote(tag: String)
     case localRepoSynced(version: String)
     case releaseSyncedWithApp(tag: String)
-    case releaseSyncedCLIOnly(tag: String)
 }
 
 enum UpdateProgressStep: Equatable, Sendable {
     case buildingLocalApp
-    case upgradingLocalCLI
     case downloadingChecksums
-    case downloadingWheel(fileName: String)
     case downloadingAppArchive(fileName: String)
     case verifyingAppArchive
-    case installingCLI
     case stagingRelease(tagName: String)
     case applyingStagedUpdate(tagName: String)
 
@@ -34,18 +30,12 @@ enum UpdateProgressStep: Equatable, Sendable {
         switch self {
         case .buildingLocalApp:
             return AppCopy.text(.updatesStepBuildingLocal, in: language)
-        case .upgradingLocalCLI:
-            return AppCopy.text(.updatesStepUpgradingLocalCLI, in: language)
         case .downloadingChecksums:
             return AppCopy.text(.updatesStepDownloadingChecksums, in: language)
-        case .downloadingWheel(let fileName):
-            return AppCopy.stepDownloadingWheel(fileName, in: language)
         case .downloadingAppArchive(let fileName):
             return AppCopy.stepDownloadingApp(fileName, in: language)
         case .verifyingAppArchive:
             return AppCopy.text(.updatesStepVerifyingApp, in: language)
-        case .installingCLI:
-            return AppCopy.text(.updatesStepInstallingCLI, in: language)
         case .stagingRelease(let tagName):
             return AppCopy.stepStagingRelease(tagName, in: language)
         case .applyingStagedUpdate(let tagName):
@@ -175,14 +165,11 @@ enum UpdateStateProjector {
                 statusMessage = AppCopy.updatesStatusLocalRepoSynced(version: version, in: lang)
             case .releaseSyncedWithApp(let tag):
                 statusMessage = AppCopy.updatesStatusReleaseSyncedWithApp(tag: tag, in: lang)
-            case .releaseSyncedCLIOnly(let tag):
-                statusMessage = AppCopy.updatesStatusReleaseSyncedCLIOnly(tag: tag, in: lang)
             }
 
         case .releaseAvailable(let release, let reason):
             stagedManifest = nil
             let hasApp = release.appZipAsset != nil
-            let hasWheel = release.wheelAsset != nil
             let summary: String
             switch reason {
             case .newerVersion:
@@ -198,8 +185,7 @@ enum UpdateStateProjector {
             availability = .releaseAvailable(
                 latestTag: release.tagName,
                 notesSummary: summary,
-                hasAppAsset: hasApp,
-                hasWheelAsset: hasWheel
+                hasAppAsset: hasApp
             )
 
         case .stagedReady(let manifest, _):
@@ -212,8 +198,7 @@ enum UpdateStateProjector {
                 tagName: manifest.tagName,
                 version: manifest.version,
                 notesSummary: notes,
-                hasAppAsset: manifest.appBundleName != nil,
-                hasWheelAsset: manifest.wheelFileName != nil
+                hasAppAsset: manifest.appBundleName != nil
             )
             statusMessage = AppCopy.updatesStatusStagedReady(tag: manifest.tagName, in: lang)
 

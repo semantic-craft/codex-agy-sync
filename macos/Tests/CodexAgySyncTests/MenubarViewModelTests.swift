@@ -1020,19 +1020,20 @@ final class MenubarViewModelTests: XCTestCase {
         XCTAssertEqual(inflightVM.banner, StatusBanner(kind: .success, text: "已在 Codex 打开对话 · Fresh interrupted turn"))
     }
 
-    func testNormalizedModifierFlagsAndUserPythonBinDiscovery() throws {
+    func testNormalizedModifierFlagsAndBundledCLIDiscovery() throws {
         let noisyFlags: NSEvent.ModifierFlags = [.command, .capsLock, .numericPad, .function]
         XCTAssertEqual(HotKeyShortcut.normalizedEventFlags(noisyFlags), .command)
 
         let fakeHome = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appendingPathComponent("codex-agy-home-\(UUID().uuidString)", isDirectory: true)
-        let py39Bin = fakeHome.appendingPathComponent("Library/Python/3.9/bin", isDirectory: true)
-        let py312Bin = fakeHome.appendingPathComponent("Library/Python/3.12/bin", isDirectory: true)
+        let localBin = fakeHome.appendingPathComponent(".local/bin", isDirectory: true)
         let pathDir = fakeHome.appendingPathComponent("path-bin", isDirectory: true)
         let customDir = fakeHome.appendingPathComponent("custom-bin", isDirectory: true)
         let envDir = fakeHome.appendingPathComponent("env-bin", isDirectory: true)
-        for dir in [py39Bin, py312Bin, pathDir, customDir, envDir] {
+        let fakeApp = fakeHome.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        let helpersDir = fakeApp.appendingPathComponent("Contents/Helpers", isDirectory: true)
+        for dir in [localBin, pathDir, customDir, envDir, helpersDir] {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         defer { try? FileManager.default.removeItem(at: fakeHome) }
@@ -1044,18 +1045,11 @@ final class MenubarViewModelTests: XCTestCase {
             return file
         }
 
-        _ = try makeExec(in: py39Bin)
-        let py312CLI = try makeExec(in: py312Bin)
+        let localCLI = try makeExec(in: localBin)
 
         let isolated = makeIsolatedTestDefaultsSuite(label: "cli")
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
-
-        let pyBins = SubprocessCLIClient.userPythonBinDirectories(homeDirectory: fakeHome)
-        XCTAssertEqual(
-            pyBins.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
-            [py312Bin.resolvingSymlinksInPath().path, py39Bin.resolvingSymlinksInPath().path]
-        )
 
         let autoResolved = SubprocessCLIClient.resolveExecutableWithSource(
             environment: ["PATH": "/nonexistent"],
@@ -1064,18 +1058,32 @@ final class MenubarViewModelTests: XCTestCase {
         )
         XCTAssertEqual(
             autoResolved.url?.resolvingSymlinksInPath().path,
-            py312CLI.resolvingSymlinksInPath().path
+            localCLI.resolvingSymlinksInPath().path
         )
         XCTAssertEqual(autoResolved.source, .autoDiscovered)
 
         _ = try makeExec(in: pathDir)
+        let bundledCLI = try makeExec(in: helpersDir)
+        let bundledResolved = SubprocessCLIClient.resolveExecutableWithSource(
+            environment: ["PATH": pathDir.path],
+            defaults: defaults,
+            homeDirectory: fakeHome,
+            bundleURL: fakeApp
+        )
+        XCTAssertEqual(
+            bundledResolved.url?.resolvingSymlinksInPath().path,
+            bundledCLI.resolvingSymlinksInPath().path
+        )
+        XCTAssertEqual(bundledResolved.source, .bundled)
+
         let customCLI = try makeExec(in: customDir)
         defaults.set(customCLI.path, forKey: SubprocessCLIClient.cliExecutableDefaultsKey)
 
         let customResolved = SubprocessCLIClient.resolveExecutableWithSource(
             environment: ["PATH": pathDir.path],
             defaults: defaults,
-            homeDirectory: fakeHome
+            homeDirectory: fakeHome,
+            bundleURL: fakeApp
         )
         XCTAssertEqual(customResolved.url?.path, customCLI.path)
         XCTAssertEqual(customResolved.source, .customPath)
@@ -1087,7 +1095,8 @@ final class MenubarViewModelTests: XCTestCase {
                 "PATH": pathDir.path,
             ],
             defaults: defaults,
-            homeDirectory: fakeHome
+            homeDirectory: fakeHome,
+            bundleURL: fakeApp
         )
         XCTAssertEqual(envResolved.url?.path, envCLI.path)
         XCTAssertEqual(envResolved.source, .envOverride)
@@ -1159,47 +1168,27 @@ final class MenubarViewModelTests: XCTestCase {
         }
     }
 
-    func testRunAndDecodeSingleScanPythonBinParityAndLargeFeed() async throws {
+    func testRunAndDecodeBundledBinaryAndLargeFeed() async throws {
         let dir = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appendingPathComponent("codex-agy-parity-\(UUID().uuidString)", isDirectory: true)
-        let py311Bin = dir.appendingPathComponent("Library/Python/3.11/bin", isDirectory: true)
+        let fakeApp = dir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
+        let helpersBin = fakeApp.appendingPathComponent("Contents/Helpers", isDirectory: true)
         let pathBin = dir.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: py311Bin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: helpersBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: pathBin, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let isolated = makeIsolatedTestDefaultsSuite(label: "parity")
         defer { isolated.cleanup() }
-        let defaults = isolated.defaults
 
-        let pyBins = SubprocessCLIClient.userPythonBinDirectories(homeDirectory: dir)
         let env: [String: String] = ["PATH": pathBin.path]
 
-        let resolvedDefault = SubprocessCLIClient.resolveExecutableWithSource(
-            environment: env,
-            defaults: defaults,
-            homeDirectory: dir
-        )
-        let resolvedPrecomputed = SubprocessCLIClient.resolveExecutableWithSource(
-            environment: env,
-            defaults: defaults,
-            homeDirectory: dir,
-            pythonBinDirectories: pyBins
-        )
-        XCTAssertEqual(resolvedDefault.url, resolvedPrecomputed.url)
-        XCTAssertEqual(resolvedDefault.source, resolvedPrecomputed.source)
-        XCTAssertEqual(resolvedDefault.searched, resolvedPrecomputed.searched)
+        let pathStub = pathBin.appendingPathComponent("codex-agy-sync")
+        try "#!/bin/sh\necho 'should-not-pick-path' >&2\nexit 9\n".write(to: pathStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pathStub.path)
 
-        let mergedDefault = SubprocessCLIClient.mergedEnvironment(from: env, homeDirectory: dir)
-        let mergedPrecomputed = SubprocessCLIClient.mergedEnvironment(
-            from: env,
-            homeDirectory: dir,
-            pythonBinDirectories: pyBins
-        )
-        XCTAssertEqual(mergedDefault, mergedPrecomputed)
-
-        let scriptURL = pathBin.appendingPathComponent("codex-agy-sync")
+        let bundledScriptURL = helpersBin.appendingPathComponent("codex-agy-sync")
         let paddedTitle = String(repeating: "x", count: 140_000)
         let jsonBody = """
         {"generated_at_iso":"2026-11-16T00:00:00Z","agy_daemon_active":true,"codex_daemon_active":false,"hero":null,"recent":[{"host":"codex","target_host":"antigravity","direction":"codex_to_agy","session_id":"tid-large","title":"\(paddedTitle)","workspace_path":"/repos/large","workspace_name":"large","paired":true,"state":"completed_ready","updated_at_iso":"2026-11-16T00:00:00Z","sort_epoch":1794730000.0,"turn_count":2,"has_inflight_turn":false,"handed_target_id":null,"pending_error":null,"chain_depth":0}]}
@@ -1210,10 +1199,14 @@ final class MenubarViewModelTests: XCTestCase {
         #!/bin/sh
         cat "\(feedFile.path)"
         """
-        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        try script.write(to: bundledScriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledScriptURL.path)
 
-        let client = SubprocessCLIClient(environment: env, defaultsSuiteName: isolated.suiteName)
+        let client = SubprocessCLIClient(
+            environment: env,
+            defaultsSuiteName: isolated.suiteName,
+            bundleURL: fakeApp
+        )
         let snap = try await client.fetchFeed(limit: 5)
         XCTAssertEqual(snap.recent.count, 1)
         XCTAssertEqual(snap.recent.first?.title.count, 140_000)
