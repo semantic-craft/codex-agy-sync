@@ -1,0 +1,5 @@
+{"timestamp":"2026-11-17T08:10:00Z","type":"session_meta","payload":{"id":"01950000-0000-7000-8000-000000000103","cwd":"__WORKSPACE__","originator":"codex_cli_rs","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-11-17T08:10:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"raw-z1"}}
+{"timestamp":"2026-11-17T08:10:01Z","type":"event_msg","payload":{"type":"user_message","message":"Compressed zstd rollout parity check"}}
+{"timestamp":"2026-11-17T08:10:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Compressed zstd rollout decoded."}]}}
+{"timestamp":"2026-11-17T08:10:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"raw-z1","last_agent_message":"Compressed zstd rollout decoded."}}

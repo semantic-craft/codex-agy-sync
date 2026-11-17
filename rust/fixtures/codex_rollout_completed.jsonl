@@ -1,0 +1,8 @@
+{"timestamp":"2026-11-17T08:00:00Z","type":"session_meta","payload":{"id":"01950000-0000-7000-8000-000000000101","cwd":"__WORKSPACE__","originator":"codex_cli_rs","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-11-17T08:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"raw-t1"}}
+{"timestamp":"2026-11-17T08:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Inspect parity fixture workspace"}}
+{"timestamp":"2026-11-17T08:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Checking files"}]}}
+{"timestamp":"2026-11-17T08:00:03Z","type":"response_item","payload":{"type":"function_call","call_id":"call_parity_1","name":"exec_command","arguments":"{\"cmd\":\"ls -la\",\"workdir\":\"__WORKSPACE__\"}"}}
+{"timestamp":"2026-11-17T08:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_parity_1","output":"Exit code: 0\nOutput:\nREADME.md"}}
+{"timestamp":"2026-11-17T08:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Workspace inspection completed cleanly."}]}}
+{"timestamp":"2026-11-17T08:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"raw-t1","last_agent_message":"Workspace inspection completed cleanly."}}

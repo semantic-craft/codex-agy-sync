@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "workspace_dirname": "parity-workspace",
+  "agy_project_id": "11111111-1111-4111-8111-111111111101",
+  "codex_project_id": "22222222-2222-4222-8222-222222222201",
+  "codex_legacy_project_id": "33333333-3333-4333-8333-333333333301",
+  "sessions": {
+    "codex_completed_id": "01950000-0000-7000-8000-000000000101",
+    "codex_interrupted_id": "01950000-0000-7000-8000-000000000102",
+    "codex_zstd_id": "01950000-0000-7000-8000-000000000103",
+    "codex_subagent_id": "01950000-0000-7000-8000-000000000104",
+    "agy_completed_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0201",
+    "agy_subagent_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0202",
+    "agy_rpc_live_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0203",
+    "codex_rpc_live_id": "01950000-0000-7000-8000-000000000204",
+    "pending_absent_target_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbb0301"
+  }
+}
