@@ -15,10 +15,12 @@ import time
 from typing import Any, Mapping
 import urllib.parse
 
-from ..bridge.handoff_store import HandoffPendingError
-from ..bridge.paths_and_locks import SyncBusyLockError
-from ..bridge.registry import UnpairedWorkspaceError
-from ..bridge.rpc import OnlineRpcUnavailableError
+from ..bridge import (
+    HandoffPendingError,
+    OnlineRpcUnavailableError,
+    SyncBusyLockError,
+    UnpairedWorkspaceError,
+)
 
 _MAX_BODY_BYTES = 1_048_576
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})

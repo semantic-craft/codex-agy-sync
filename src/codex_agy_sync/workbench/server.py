@@ -14,7 +14,7 @@ import time
 from typing import Any, Callable
 import webbrowser
 
-from ..bridge.paths_and_locks import HostEnvironmentPaths, now_iso
+from ..bridge import HostEnvironmentPaths, now_iso
 from .handler import (
     WorkbenchRequestHandler,
     inject_html_metas,

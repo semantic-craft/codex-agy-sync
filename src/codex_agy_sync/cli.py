@@ -7,9 +7,9 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
-from .bridge.paths_and_locks import HostEnvironmentPaths, SyncBusyLockError, TransportMode
+from .bridge import HostEnvironmentPaths, SyncBusyLockError, TransportMode
 from .workspace import AgyGuiSafeSource, CascadeId, CodexThreadId, PACKAGE_VERSION, normalize_workspace_spec
 
 if TYPE_CHECKING:
@@ -124,6 +124,46 @@ def _add_sync_common_args(sub_p: argparse.ArgumentParser) -> None:
     )
 
 
+def _register_mainline_subparsers(subparsers: Any) -> None:
+    pair_p = subparsers.add_parser("pair", help="Ensure bidirectional project bindings for a workspace.")
+    pair_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
+
+    status_p = subparsers.add_parser("status", help="Show workspace project bindings and discovered sessions.")
+    status_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
+    status_p.add_argument("--include-subagents", action="store_true", help="Include spawned subagent sessions in the workspace status listing.")
+
+    inspect_p = subparsers.add_parser("inspect", help="Decode and summarize a session ledger without mutating state.")
+    inspect_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
+    inspect_p.add_argument("--cascade-id", type=str, default=None, help="Antigravity cascade UUID to inspect.")
+    inspect_p.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID to inspect.")
+    inspect_p.add_argument("--mode", choices=[m.value for m in TransportMode], default=TransportMode.AUTO.value, help="Transport mode.")
+
+    _add_sync_subparser(subparsers)
+    _add_menubar_feed_subparser(subparsers)
+
+
+def _register_frozen_maintenance_subparsers(subparsers: Any) -> None:
+    sync_s = subparsers.add_parser(
+        "sync-session",
+        help="[Advanced/Offline] Synchronize one paired or unpaired session.",
+        description="[Advanced/Offline] Synchronize one paired or unpaired session via offline/dual-mode reconciliation.",
+    )
+    _add_sync_common_args(sync_s)
+    sync_s.add_argument("--cascade-id", type=str, default=None, help="Antigravity cascade UUID.")
+    sync_s.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID.")
+    sync_s.add_argument("--source-tag", choices=[s.name.lower() for s in AgyGuiSafeSource], default="cascade_client", help="Antigravity GUI-safe trajectory source tag.")
+
+    sync_w = subparsers.add_parser(
+        "sync-workspace",
+        help="[Advanced/Offline] Synchronize all sessions in a workspace.",
+        description="[Advanced/Offline] Synchronize all sessions in a workspace via offline/dual-mode reconciliation.",
+    )
+    _add_sync_common_args(sync_w)
+    sync_w.add_argument("--include-subagents", action="store_true", help="Synchronize spawned subagent sessions in addition to top-level sessions.")
+
+    _add_serve_subparser(subparsers)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-agy-sync",
@@ -142,42 +182,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sync-state-dir", type=Path, default=None, help="Override sync cursor and backup state directory.")
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
-
-    pair_p = subparsers.add_parser("pair", help="Ensure bidirectional project bindings for a workspace.")
-    pair_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
-
-    status_p = subparsers.add_parser("status", help="Show workspace project bindings and discovered sessions.")
-    status_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
-    status_p.add_argument("--include-subagents", action="store_true", help="Include spawned subagent sessions in the workspace status listing.")
-
-    inspect_p = subparsers.add_parser("inspect", help="Decode and summarize a session ledger without mutating state.")
-    inspect_p.add_argument("--workspace", "-w", type=str, default=None, help="Workspace path or file:// URI.")
-    inspect_p.add_argument("--cascade-id", type=str, default=None, help="Antigravity cascade UUID to inspect.")
-    inspect_p.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID to inspect.")
-    inspect_p.add_argument("--mode", choices=[m.value for m in TransportMode], default=TransportMode.AUTO.value, help="Transport mode.")
-
-    sync_s = subparsers.add_parser(
-        "sync-session",
-        help="[Advanced/Offline] Synchronize one paired or unpaired session.",
-        description="[Advanced/Offline] Synchronize one paired or unpaired session via offline/dual-mode reconciliation.",
-    )
-    _add_sync_common_args(sync_s)
-    sync_s.add_argument("--cascade-id", type=str, default=None, help="Antigravity cascade UUID.")
-    sync_s.add_argument("--codex-thread-id", type=str, default=None, help="Codex thread UUID.")
-    sync_s.add_argument("--source-tag", choices=[s.name.lower() for s in AgyGuiSafeSource], default="cascade_client", help="Antigravity GUI-safe trajectory source tag.")
-
-    _add_sync_subparser(subparsers)
-
-    sync_w = subparsers.add_parser(
-        "sync-workspace",
-        help="[Advanced/Offline] Synchronize all sessions in a workspace.",
-        description="[Advanced/Offline] Synchronize all sessions in a workspace via offline/dual-mode reconciliation.",
-    )
-    _add_sync_common_args(sync_w)
-    sync_w.add_argument("--include-subagents", action="store_true", help="Synchronize spawned subagent sessions in addition to top-level sessions.")
-
-    _add_serve_subparser(subparsers)
-    _add_menubar_feed_subparser(subparsers)
+    _register_mainline_subparsers(subparsers)
+    _register_frozen_maintenance_subparsers(subparsers)
     return parser
 
 
@@ -237,12 +243,24 @@ def _resolve_paths(args: argparse.Namespace, env: Mapping[str, str] | None = Non
     )
 
 
-def _run_status_cmd(bridge: SyncBridge, workspace_arg: str, include_subagents: bool) -> dict[str, Any]:
-    binding = bridge.registry.resolve_readonly_binding(workspace_arg)
-    sessions = bridge.registry.list_workspace_sessions(binding, include_subagents=include_subagents)
+def _resolve_workspace_arg(args: argparse.Namespace) -> str:
+    return normalize_workspace_spec(args.workspace) if args.workspace is not None else os.getcwd()
+
+
+def _run_pair_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
+    bridge: SyncBridge = _load_attr(".bridge", "SyncBridge")(paths=paths)
+    binding = bridge.pair_workspace(_resolve_workspace_arg(args))
+    print(json.dumps(_binding_to_dict(binding), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run_status_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
+    bridge: SyncBridge = _load_attr(".bridge", "SyncBridge")(paths=paths)
+    binding = bridge.registry.resolve_readonly_binding(_resolve_workspace_arg(args))
+    sessions = bridge.registry.list_workspace_sessions(binding, include_subagents=bool(args.include_subagents))
     diag = _load_attr(".bridge", "diagnose_workspace_binding")(bridge.paths, binding.workspace_path)
     handoff_summary = _load_attr(".bridge", "summarize_workspace_handoffs")(bridge.paths, binding.workspace_path)
-    return {
+    payload = {
         "workspace": _binding_to_dict(binding),
         "sessions": [
             {
@@ -275,9 +293,12 @@ def _run_status_cmd(bridge: SyncBridge, workspace_arg: str, include_subagents: b
         "handoff_chains": handoff_summary["handoff_chains"],
         "pending_handoffs": handoff_summary["pending_handoffs"],
     }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
 
 
-def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> dict[str, Any]:
+def _run_inspect_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
+    bridge: SyncBridge = _load_attr(".bridge", "SyncBridge")(paths=paths)
     ev_mod = importlib.import_module(".events", __package__ or "codex_agy_sync")
     event_counts = (
         ("user_inputs", ev_mod.UserInputEvent),
@@ -288,13 +309,13 @@ def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
         ("checkpoints", ev_mod.CheckpointEvent),
     )
     ledger = bridge.inspect_session_ledger(
-        workspace_arg,
+        _resolve_workspace_arg(args),
         cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
         codex_thread_id=CodexThreadId(args.codex_thread_id) if args.codex_thread_id else None,
         mode=TransportMode(args.mode),
     )
     wm = ledger.latest_watermark()
-    return {
+    payload = {
         "workspace_path": str(ledger.workspace_path),
         "workspace_uri": str(ledger.workspace_uri),
         "canonical_title": ledger.title,
@@ -311,6 +332,8 @@ def _run_inspect_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Name
         if wm is not None
         else None,
     }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -382,10 +405,11 @@ def _run_menubar_feed_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace)
     return 0
 
 
-def _run_sync_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespace) -> int:
+def _run_sync_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
+    workspace_arg = _resolve_workspace_arg(args)
     if args.reconcile:
         result = _load_attr(".bridge", "reconcile_workspace_handoffs")(
-            bridge.paths,
+            paths,
             workspace_arg,
             source_id=args.source_id,
             dry_run=bool(args.dry_run),
@@ -394,7 +418,7 @@ def _run_sync_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespa
         return 0
     sync_direction_cls = _load_attr(".bridge", "SyncDirection")
     receipt, _ = _load_attr(".bridge", "execute_handoff")(
-        bridge.paths,
+        paths,
         workspace_arg,
         direction=sync_direction_cls(args.direction) if args.direction else None,
         source_id=args.source_id,
@@ -407,6 +431,40 @@ def _run_sync_cmd(bridge: SyncBridge, workspace_arg: str, args: argparse.Namespa
         include_interrupted=bool(args.include_interrupted),
     )
     print(json.dumps(dataclasses.asdict(receipt), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run_sync_session_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
+    bridge: SyncBridge = _load_attr(".bridge", "SyncBridge")(paths=paths)
+    sync_direction_cls = _load_attr(".bridge", "SyncDirection")
+    fork_policy_cls = _load_attr(".bridge", "ForkResolutionPolicy")
+    receipt = bridge.sync_session(
+        _resolve_workspace_arg(args),
+        cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
+        codex_thread_id=CodexThreadId(args.codex_thread_id) if args.codex_thread_id else None,
+        direction=sync_direction_cls(args.direction),
+        mode=TransportMode(args.mode),
+        fork_policy=fork_policy_cls(args.fork_policy),
+        source_tag=AgyGuiSafeSource[args.source_tag.upper()],
+        include_interrupted=bool(args.include_interrupted),
+    )
+    print(json.dumps(_receipt_to_dict(receipt), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _run_sync_workspace_cmd(paths: HostEnvironmentPaths, args: argparse.Namespace) -> int:
+    bridge: SyncBridge = _load_attr(".bridge", "SyncBridge")(paths=paths)
+    sync_direction_cls = _load_attr(".bridge", "SyncDirection")
+    fork_policy_cls = _load_attr(".bridge", "ForkResolutionPolicy")
+    receipts = bridge.sync_workspace(
+        _resolve_workspace_arg(args),
+        direction=sync_direction_cls(args.direction),
+        mode=TransportMode(args.mode),
+        fork_policy=fork_policy_cls(args.fork_policy),
+        include_subagents=bool(args.include_subagents),
+        include_interrupted=bool(args.include_interrupted),
+    )
+    print(json.dumps({"synced_count": len(receipts), "receipts": [_receipt_to_dict(r) for r in receipts]}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -447,50 +505,25 @@ def _exception_to_error_payload(exc: Exception, subcommand: str) -> dict[str, An
     return {"error": "runtime_error", "message": str(exc)}
 
 
+_MAINLINE_HANDLERS: dict[str, Callable[[HostEnvironmentPaths, argparse.Namespace], int]] = {
+    "sync": _run_sync_cmd,
+    "menubar-feed": _run_menubar_feed_cmd,
+    "pair": _run_pair_cmd,
+    "status": _run_status_cmd,
+    "inspect": _run_inspect_cmd,
+}
+_FROZEN_MAINTENANCE_HANDLERS: dict[str, Callable[[HostEnvironmentPaths, argparse.Namespace], int]] = {
+    "serve": _run_serve_cmd,
+    "sync-session": _run_sync_session_cmd,
+    "sync-workspace": _run_sync_workspace_cmd,
+}
+
+
 def _dispatch_subcommand(args: argparse.Namespace, paths: HostEnvironmentPaths) -> int:
-    if args.subcommand == "serve":
-        return _run_serve_cmd(paths, args)
-    if args.subcommand == "menubar-feed":
-        return _run_menubar_feed_cmd(paths, args)
-    bridge = _load_attr(".bridge", "SyncBridge")(paths=paths)
-    workspace_arg = normalize_workspace_spec(args.workspace) if args.workspace is not None else os.getcwd()
-    if args.subcommand == "pair":
-        print(json.dumps(_binding_to_dict(bridge.pair_workspace(workspace_arg)), ensure_ascii=False, indent=2))
-        return 0
-    if args.subcommand == "status":
-        print(json.dumps(_run_status_cmd(bridge, workspace_arg, bool(args.include_subagents)), ensure_ascii=False, indent=2))
-        return 0
-    if args.subcommand == "inspect":
-        print(json.dumps(_run_inspect_cmd(bridge, workspace_arg, args), ensure_ascii=False, indent=2))
-        return 0
-    if args.subcommand == "sync":
-        return _run_sync_cmd(bridge, workspace_arg, args)
-    if args.subcommand in ("sync-session", "sync-workspace"):
-        sync_direction_cls = _load_attr(".bridge", "SyncDirection")
-        fork_policy_cls = _load_attr(".bridge", "ForkResolutionPolicy")
-        if args.subcommand == "sync-session":
-            receipt = bridge.sync_session(
-                workspace_arg,
-                cascade_id=CascadeId(args.cascade_id) if args.cascade_id else None,
-                codex_thread_id=CodexThreadId(args.codex_thread_id) if args.codex_thread_id else None,
-                direction=sync_direction_cls(args.direction),
-                mode=TransportMode(args.mode),
-                fork_policy=fork_policy_cls(args.fork_policy),
-                source_tag=AgyGuiSafeSource[args.source_tag.upper()],
-                include_interrupted=bool(args.include_interrupted),
-            )
-            print(json.dumps(_receipt_to_dict(receipt), ensure_ascii=False, indent=2))
-            return 0
-        receipts = bridge.sync_workspace(
-            workspace_arg,
-            direction=sync_direction_cls(args.direction),
-            mode=TransportMode(args.mode),
-            fork_policy=fork_policy_cls(args.fork_policy),
-            include_subagents=bool(args.include_subagents),
-            include_interrupted=bool(args.include_interrupted),
-        )
-        print(json.dumps({"synced_count": len(receipts), "receipts": [_receipt_to_dict(r) for r in receipts]}, ensure_ascii=False, indent=2))
-        return 0
+    if (handler := _MAINLINE_HANDLERS.get(args.subcommand)) is not None:
+        return handler(paths, args)
+    if (handler := _FROZEN_MAINTENANCE_HANDLERS.get(args.subcommand)) is not None:
+        return handler(paths, args)
     return 1
 
 

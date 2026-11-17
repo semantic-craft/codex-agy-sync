@@ -60,6 +60,10 @@ class ArchitectureCoherenceTest(unittest.TestCase):
             ({"workspace.py": "def f(obj):\n    return obj._secret\n"}, r"non-self/cls private attribute access"),
             ({"workspace.py": "from .events import Y\n", "events.py": "Y = 1\n"}, r"upward tier dependency"),
             ({"bridge/a.py": "from .b import B\nA = B\n", "bridge/b.py": "from .a import A\nB = A\n"}, r"Internal import cycle detected"),
+            ({"workbench/bad.py": "from ..bridge.rpc import X\n", "bridge/rpc.py": "X = 1\n"}, r"must import Tier-3 via .*bridge facade"),
+            ({"workbench/bad.py": "from ..bridge import rpc\n", "bridge/rpc.py": "X = 1\n"}, r"must import Tier-3 via .*bridge facade"),
+            ({"workbench/bad.py": "from codex_agy_sync.bridge import rpc\n", "bridge/rpc.py": "X = 1\n"}, r"must import Tier-3 via .*bridge facade"),
+            ({"bridge/__init__.py": "_EXPORT_GROUPS = (('._bad', ('X',)),)\n"}, r"disallowed private module segment"),
         ]
         for idx, (files, pattern) in enumerate(negatives):
             pkg = self._make_pkg(idx, files)

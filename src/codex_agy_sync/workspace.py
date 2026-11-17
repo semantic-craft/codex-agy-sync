@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 import functools
+import importlib
 import os
 from pathlib import Path
 import re
@@ -243,6 +244,47 @@ def is_excluded_for_homes(candidate: Path, homes: Sequence[Path]) -> bool:
     return False
 
 
+def build_lazy_package_exports(
+    pkg_name: str,
+    pkg_globals: dict[str, Any],
+    export_groups: Sequence[tuple[str, Sequence[str]]],
+    lazy_submodules: frozenset[str],
+    *,
+    extra_exports: Sequence[str] = (),
+) -> tuple[list[str], Any, Any]:
+    """Derive `__all__`, `__getattr__`, and `__dir__` from a single lazy-export table."""
+    lazy_exports: dict[str, str] = {}
+    all_names: list[str] = list(extra_exports)
+    seen: set[str] = set(extra_exports)
+    for mod_path, syms in export_groups:
+        for sym in syms:
+            if sym in lazy_submodules:
+                raise ValueError(f"Lazy export {sym!r} in {pkg_name!r} collides with lazy submodule")
+            if sym in lazy_exports:
+                raise ValueError(f"Duplicate lazy export {sym!r} in {pkg_name!r}")
+            lazy_exports[sym] = mod_path
+            if sym not in seen:
+                seen.add(sym)
+                all_names.append(sym)
+    all_names.sort()
+
+    def __getattr__(name: str) -> Any:
+        if name in lazy_submodules:
+            mod = importlib.import_module(f".{name}", pkg_name)
+            pkg_globals[name] = mod
+            return mod
+        if (mod_path := lazy_exports.get(name)) is None:
+            raise AttributeError(f"module {pkg_name!r} has no attribute {name!r}")
+        val = getattr(importlib.import_module(mod_path, pkg_name), name)
+        pkg_globals[name] = val
+        return val
+
+    def __dir__() -> list[str]:
+        return sorted(set(pkg_globals) | set(all_names))
+
+    return all_names, __getattr__, __dir__
+
+
 __all__ = [
     "AgyGuiSafeSource",
     "AgyProjectId",
@@ -263,6 +305,7 @@ __all__ = [
     "TurnId",
     "WorkspacePath",
     "WorkspaceRootUri",
+    "build_lazy_package_exports",
     "candidate_home_dirs",
     "is_excluded_for_homes",
     "is_sensitive_excluded_path",

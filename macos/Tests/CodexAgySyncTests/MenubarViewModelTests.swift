@@ -1140,6 +1140,22 @@ final class MenubarViewModelTests: XCTestCase {
         )
         XCTAssertEqual(cmdResult.exitCode, 0)
         XCTAssertEqual(cmdResult.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines), "runner-ok")
+
+        try SubprocessCLIClient.launchDetachedProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+            arguments: []
+        )
+        do {
+            try SubprocessCLIClient.launchDetachedProcess(
+                executableURL: URL(fileURLWithPath: "/nonexistent/codex-agy-missing-bin"),
+                arguments: []
+            )
+            XCTFail("Expected CLIClientError.launchFailed")
+        } catch let err as CLIClientError {
+            guard case .launchFailed = err else {
+                return XCTFail("Expected launchFailed, got \(err)")
+            }
+        }
     }
 
     func testRunAndDecodeSingleScanPythonBinParityAndLargeFeed() async throws {

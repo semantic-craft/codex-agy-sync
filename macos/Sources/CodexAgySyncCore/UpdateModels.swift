@@ -139,10 +139,10 @@ public final class DefaultRelaunchExecutor: RelaunchExecuting, @unchecked Sendab
 
     @MainActor
     public func relaunch(bundleURL: URL) throws {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        proc.arguments = ["-n", bundleURL.path]
-        try proc.run()
+        try SubprocessCLIClient.launchDetachedProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/open"),
+            arguments: ["-n", bundleURL.path]
+        )
         NSApp.terminate(nil)
     }
 }

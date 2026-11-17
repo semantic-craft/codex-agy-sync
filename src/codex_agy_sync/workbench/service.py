@@ -7,11 +7,14 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
-from ..bridge.handoff_reconcile import reconcile_workspace_handoffs
-from ..bridge.handoff_resolve import execute_handoff, validate_handoff_selector_flags
-from ..bridge.handoff_store import HandoffPendingError
-from ..bridge.paths_and_locks import HostEnvironmentPaths
-from ..bridge.state_machine import SyncDirection
+from ..bridge import (
+    HandoffPendingError,
+    HostEnvironmentPaths,
+    SyncDirection,
+    execute_handoff,
+    reconcile_workspace_handoffs,
+    validate_handoff_selector_flags,
+)
 from ..workspace import (
     HostKind,
     candidate_home_dirs,

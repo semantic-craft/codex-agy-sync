@@ -9,9 +9,10 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Sequence
 
-from ..bridge.paths_and_locks import HostEnvironmentPaths, open_readonly_sqlite
-from ..bridge.store_catalog import (
+from ..bridge import (
+    HostEnvironmentPaths,
     extract_agy_project_folder_uris,
+    open_readonly_sqlite,
     optional_select_columns_sql,
     parse_summary_workspace_uris,
     table_column_names,

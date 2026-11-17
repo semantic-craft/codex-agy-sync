@@ -14,7 +14,7 @@ import time
 from typing import Any
 import urllib.request
 
-from ..bridge.paths_and_locks import HostEnvironmentPaths, atomic_write_text, is_pid_alive
+from ..bridge import HostEnvironmentPaths, atomic_write_text, is_pid_alive
 
 
 def default_workbench_ui_path() -> Path:

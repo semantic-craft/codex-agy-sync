@@ -10,16 +10,15 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Mapping, Sequence
 
-from ..bridge.handoff_store import HandoffReceipt, load_handoff_receipt, parse_ts_epoch_iso, receipt_matches_workspace
-from ..bridge.paths_and_locks import HostEnvironmentPaths, PresenceWalGuard, deterministic_uuid, open_readonly_sqlite, validated_child_path
-from ..bridge.registry import WorkspaceBindingDiagnosis, WorkspaceProjectBinding, build_workspace_binding_diagnosis
-from ..bridge.state_machine import SyncDirection
-from ..bridge.store_catalog import (
-    build_combined_lineage, compute_codex_nesting_depth, discover_agy_subagent_sidecars,
-    extract_agy_project_folder_uris, extract_rollout_filename_uuid, parse_codex_thread_source_lineage,
-    parse_summary_workspace_uris, safe_valid_session_id,
+from ..bridge import (
+    DefaultHostTransport, HandoffReceipt, HostEnvironmentPaths, PresenceWalGuard, SyncDirection,
+    WorkspaceBindingDiagnosis, WorkspaceProjectBinding, build_combined_lineage,
+    build_workspace_binding_diagnosis, compute_codex_nesting_depth, deterministic_uuid,
+    discover_agy_subagent_sidecars, extract_agy_project_folder_uris, extract_rollout_filename_uuid,
+    load_handoff_receipt, open_readonly_sqlite, parse_codex_thread_source_lineage,
+    parse_summary_workspace_uris, parse_ts_epoch_iso, receipt_matches_workspace,
+    safe_valid_session_id, validated_child_path,
 )
-from ..bridge.transport import DefaultHostTransport
 from ..codecs import decode_cascade_summary_proto, decode_trajectory_metadata_proto, iter_codex_rollout_lines, parse_annotation_pbtxt_title
 from ..payloads import safe_json_dict
 from ..workspace import (

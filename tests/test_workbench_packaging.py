@@ -210,9 +210,51 @@ print(codex_agy_sync.__version__)
 
         for pkg in (codex_agy_sync, bridge_pkg, workbench_pkg):
             for name in pkg.__all__:
+                if name != "__version__":
+                    self.assertFalse(name.startswith("_"), f"Private symbol in {pkg.__name__}.__all__: {name}")
                 with self.subTest(pkg=pkg.__name__, symbol=name):
                     self.assertIsNotNone(getattr(pkg, name))
             self.assertTrue(set(pkg.__all__).issubset(set(dir(pkg))))
+
+        from codex_agy_sync.workspace import build_lazy_package_exports
+        with self.assertRaisesRegex(ValueError, "Duplicate lazy export"):
+            build_lazy_package_exports("codex_agy_sync", {}, ((".a", ("Dup",)), (".b", ("Dup",))), frozenset())
+        with self.assertRaisesRegex(ValueError, "collides with lazy submodule"):
+            build_lazy_package_exports("codex_agy_sync", {}, ((".a", ("sub",)),), frozenset({"sub"}))
+
+        artifacts = Path.home() / "Projects" / "_artifacts" / "codex-agy-sync"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="cli-sync-lazy-", dir=artifacts) as tmpdir:
+            root = Path(tmpdir)
+            ws = root / "ws"
+            ws.mkdir()
+            out_buf = io.StringIO()
+            with mock.patch("codex_agy_sync.bridge.sync.SyncBridge", side_effect=AssertionError("sync must not instantiate SyncBridge")), \
+                    contextlib.redirect_stdout(out_buf):
+                rc = cli_main([
+                    "--gemini-config-dir", str(root / "cfg"),
+                    "--agy-data-dir", str(root / "agy"),
+                    "--codex-home-dir", str(root / "codex"),
+                    "--sync-state-dir", str(root / "state"),
+                    "sync", "-w", str(ws), "--reconcile", "--dry-run",
+                ])
+            self.assertEqual(rc, 0)
+            out_buf2 = io.StringIO()
+            fake_receipt = mock.MagicMock()
+            fake_receipt.status = "ready"
+            with mock.patch("codex_agy_sync.bridge.sync.SyncBridge", side_effect=AssertionError("sync must not instantiate SyncBridge")), \
+                    mock.patch("codex_agy_sync.bridge.execute_handoff", return_value=(fake_receipt, True)) as handoff_mock, \
+                    mock.patch("dataclasses.asdict", return_value={"status": "ready"}), \
+                    contextlib.redirect_stdout(out_buf2):
+                rc2 = cli_main([
+                    "--gemini-config-dir", str(root / "cfg"),
+                    "--agy-data-dir", str(root / "agy"),
+                    "--codex-home-dir", str(root / "codex"),
+                    "--sync-state-dir", str(root / "state"),
+                    "sync", "-w", str(ws), "--latest",
+                ])
+            self.assertEqual(rc2, 0)
+            self.assertEqual(handoff_mock.call_count, 1)
 
         self.assertEqual(cli_mod._SYNC_DIRECTION_CHOICES, tuple(d.value for d in SyncDirection))
         self.assertEqual(cli_mod._FORK_POLICY_CHOICES, tuple(p.value for p in ForkResolutionPolicy))

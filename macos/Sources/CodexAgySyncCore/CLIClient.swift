@@ -126,12 +126,14 @@ private final class AsyncProcessCoordinator: @unchecked Sendable {
         self.arguments = arguments
         self.timeoutSeconds = timeoutSeconds
         self.drainGraceSeconds = drainGraceSeconds
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.environment = environment
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        SubprocessCLIClient.configureProcess(
+            process,
+            executableURL: executableURL,
+            arguments: arguments,
+            environment: environment,
+            standardOutput: stdoutPipe,
+            standardError: stderrPipe
+        )
     }
 
     func start(
@@ -531,6 +533,44 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         }
     }
 
+    static func configureProcess(
+        _ process: Process,
+        executableURL: URL,
+        arguments: [String],
+        environment: [String: String]? = nil,
+        standardInput: Any? = FileHandle.nullDevice,
+        standardOutput: Any? = FileHandle.nullDevice,
+        standardError: Any? = FileHandle.nullDevice
+    ) {
+        process.executableURL = executableURL
+        process.arguments = arguments
+        if let environment {
+            process.environment = environment
+        }
+        process.standardInput = standardInput
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+    }
+
+    public static func launchDetachedProcess(
+        executableURL: URL,
+        arguments: [String],
+        environment: [String: String]? = nil
+    ) throws {
+        let process = Process()
+        configureProcess(
+            process,
+            executableURL: executableURL,
+            arguments: arguments,
+            environment: environment
+        )
+        do {
+            try process.run()
+        } catch {
+            throw CLIClientError.launchFailed(error.localizedDescription)
+        }
+    }
+
     public static func runProcessAsync(
         executableURL: URL,
         arguments: [String],
@@ -557,15 +597,16 @@ public final class SubprocessCLIClient: CLIRunnerProtocol, @unchecked Sendable {
         timeoutSeconds: TimeInterval
     ) throws -> (exitCode: Int32, stdout: Data, stderr: Data) {
         let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.environment = environment
-        process.standardInput = FileHandle.nullDevice
-
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        configureProcess(
+            process,
+            executableURL: executableURL,
+            arguments: arguments,
+            environment: environment,
+            standardOutput: stdoutPipe,
+            standardError: stderrPipe
+        )
 
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in

@@ -78,9 +78,6 @@ private struct SettingsWindowAccessor: NSViewRepresentable {
         }
 
         func notifyWindowIfNeeded() {
-            if let window, window.identifier == nil {
-                window.identifier = SettingsWindowIdentity.identifier
-            }
             onWindowResolve?(window)
         }
     }

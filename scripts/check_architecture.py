@@ -51,10 +51,13 @@ def _check_all_exports(tree: ast.Module, rel: str) -> None:
             targets, val = [node.target], node.value
         else:
             continue
-        if any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets) and isinstance(val, (ast.List, ast.Tuple)):
-            for elt in val.elts:
+        if any(isinstance(t, ast.Name) and t.id in ("__all__", "_EXPORT_GROUPS") for t in targets):
+            for elt in ast.walk(val) if val is not None else ():
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                    if elt.value.startswith("_") and elt.value != "__version__":
+                    if elt.value.startswith("."):
+                        if mod_seg := elt.value.lstrip("."):
+                            _validate_module_segments(mod_seg, rel, node.lineno)
+                    elif elt.value.startswith("_") and elt.value != "__version__":
                         raise AssertionError(f"{rel}:{node.lineno}: private symbol {elt.value!r} in __all__")
 
 
@@ -120,12 +123,10 @@ def _resolve_import_targets(
             base = ".".join([*base_parts, *node.module.split(".")]) if node.module else ".".join(base_parts)
         for al in node.names:
             cand = f"{base}.{al.name}"
-            if node.module is None and cand in known_mods:
+            if cand in known_mods:
                 targets.add(cand)
             elif base in known_mods:
                 targets.add(base)
-            elif cand in known_mods:
-                targets.add(cand)
             else:
                 raise AssertionError(f"{rel}:{node.lineno}: unresolved internal import {base}.{al.name}")
     return targets
@@ -155,11 +156,12 @@ def _find_cycles(graph: dict[str, set[str]]) -> list[list[str]]:
 
 
 def check_package_architecture(pkg_root: Path, pkg_name: str = "codex_agy_sync") -> dict[str, int]:
-    """Enforce zero private leaks, strict 6-tier downward DAG, and zero import cycles."""
+    """Enforce zero private leaks, Tier-4->Tier-3 facade boundary, strict 6-tier DAG, and zero cycles."""
     files = sorted(pkg_root.rglob("*.py"))
     file_to_mod = {p: _module_info(p, pkg_root, pkg_name) for p in files}
     known_mods = {mod for mod, _ in file_to_mod.values()}
     graph: dict[str, set[str]] = {mod: set() for mod in known_mods}
+    bridge_facade = f"{pkg_name}.bridge"
 
     for path, (cur_mod, cur_pkg) in file_to_mod.items():
         rel = str(path.relative_to(pkg_root))
@@ -175,6 +177,10 @@ def check_package_architecture(pkg_root: Path, pkg_name: str = "codex_agy_sync")
                     tgt_tier = tier_for_module(tgt, pkg_name)
                     if src_tier < tgt_tier:
                         raise AssertionError(f"{rel}: upward tier dependency {cur_mod} (T{src_tier}) -> {tgt} (T{tgt_tier})")
+                    if src_tier == 4 and tgt_tier == 3 and tgt != bridge_facade:
+                        raise AssertionError(
+                            f"{rel}: Tier-4 module {cur_mod} must import Tier-3 via {bridge_facade} facade, not {tgt}"
+                        )
 
     cycles = _find_cycles(graph)
     if cycles:
