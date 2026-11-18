@@ -386,10 +386,8 @@ final class PreferencesAndUpdateTests: XCTestCase {
             UpdateServiceError.missingUpdateAssets.localizedMessage(in: .en).contains("CodexAgySync-macos.zip")
         )
 
-        let extractTemp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-extract-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: extractTemp, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: extractTemp) }
+        let extractTemp = try makeIsolatedTestAppSandbox(label: "extract")
+        defer { cleanupIsolatedTestAppSandbox(extractTemp) }
         let singleFallback = extractTemp.appendingPathComponent("CustomRenamed.app", isDirectory: true)
         try FileManager.default.createDirectory(at: singleFallback, withIntermediateDirectories: true)
         XCTAssertEqual(
@@ -410,10 +408,8 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-update-test-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "update-test")
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         let fakeCLI = tempRoot.appendingPathComponent("codex-agy-sync")
         try "#!/bin/sh\nexit 0\n".write(to: fakeCLI, atomically: true, encoding: .utf8)
@@ -544,14 +540,13 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-localrepo-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "localrepo")
         let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let binDir = repoDir.appendingPathComponent("bin", isDirectory: true)
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.3.0\"\n"
             .write(to: repoDir.appendingPathComponent("pyproject.toml"), atomically: true, encoding: .utf8)
@@ -698,8 +693,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-writable-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "writable")
         let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
@@ -710,7 +704,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try FileManager.default.createDirectory(at: appInReadOnly, withIntermediateDirectories: true)
         defer {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: readOnlyParent.path)
-            try? FileManager.default.removeItem(at: tempRoot)
+            cleanupIsolatedTestAppSandbox(tempRoot)
         }
 
         try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.3.1\"\n"
@@ -777,8 +771,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-codesign-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "codesign")
         let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
@@ -786,7 +779,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
         try "v0.3.0".write(to: installedApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.4.0\"\n"
             .write(to: repoDir.appendingPathComponent("pyproject.toml"), atomically: true, encoding: .utf8)
@@ -894,11 +887,9 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-relaunch-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "relaunch")
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
-        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
         try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
 
@@ -995,8 +986,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-bundled-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "bundled")
         let appBundle = tempRoot.appendingPathComponent("CodexAgySync.app", isDirectory: true)
         let helpersDir = appBundle.appendingPathComponent("Contents/Helpers", isDirectory: true)
         let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
@@ -1005,7 +995,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         try FileManager.default.createDirectory(at: helpersDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: rustReleaseDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         let bundledCLI = helpersDir.appendingPathComponent("codex-agy-sync")
         try "#!/bin/sh\nexit 0\n".write(to: bundledCLI, atomically: true, encoding: .utf8)
@@ -1316,14 +1306,13 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-autostage-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "autostage")
         let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
         let updatesRoot = tempRoot.appendingPathComponent("updates", isDirectory: true)
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.4.1\"\n"
             .write(to: repoDir.appendingPathComponent("pyproject.toml"), atomically: true, encoding: .utf8)
@@ -1445,14 +1434,13 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-install-staged-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "install-staged")
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
         let updatesRoot = tempRoot.appendingPathComponent("updates", isDirectory: true)
         let installedApp = tempRoot.appendingPathComponent("CodexAgySync.app", isDirectory: true)
         try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
         try "v0.4.1".write(to: installedApp.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
@@ -1632,11 +1620,9 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-autostage-backoff-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "autostage-backoff")
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
-        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
@@ -1773,8 +1759,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-reconcile-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "reconcile")
         let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
@@ -1782,7 +1767,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let staged050 = updatesRoot.appendingPathComponent("staged/0.5.0", isDirectory: true)
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: staged050, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         try "[project]\nname = \"codex-agy-sync\"\nversion = \"0.4.1\"\n"
             .write(to: repoDir.appendingPathComponent("pyproject.toml"), atomically: true, encoding: .utf8)
@@ -2052,8 +2037,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-concurrency-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "concurrency")
         let cli1 = tempRoot.appendingPathComponent("cli1/codex-agy-sync")
         let cli2 = tempRoot.appendingPathComponent("cli2/codex-agy-sync")
         let updatesRoot = tempRoot.appendingPathComponent("updates", isDirectory: true)
@@ -2062,7 +2046,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
             try "#!/bin/sh\nexit 0\n".write(to: cli, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
         }
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         let prefs = PreferencesStore(defaults: defaults, loginItemManager: NoOpLoginItemManager())
         prefs.setCustomCLIPath(cli1.path)
@@ -2320,8 +2304,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-skipreplace-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "skipreplace")
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
         let installedApp = tempRoot.appendingPathComponent("CodexAgySync.app", isDirectory: true)
         let updatesRoot = tempRoot.appendingPathComponent("updates", isDirectory: true)
@@ -2329,7 +2312,7 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let extractedApp = staged050.appendingPathComponent("extracted/CodexAgySync.app", isDirectory: true)
         try FileManager.default.createDirectory(at: installedApp, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: extractedApp, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot) }
 
         try "#!/bin/sh\nexit 0\n".write(to: cliBin, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cliBin.path)
@@ -2461,14 +2444,15 @@ final class PreferencesAndUpdateTests: XCTestCase {
         defer { isolated.cleanup() }
         let defaults = isolated.defaults
 
-        let tempRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("codex-agy-hardening-\(UUID().uuidString)", isDirectory: true)
+        let tempRoot = try makeIsolatedTestAppSandbox(label: "hardening")
         let extractDir = tempRoot.appendingPathComponent("extract", isDirectory: true)
         let outsideDir = tempRoot.appendingPathComponent("outside", isDirectory: true)
         let outsideApp = outsideDir.appendingPathComponent("OutsideReal.app", isDirectory: true)
+        let installDir = tempRoot.appendingPathComponent("apps", isDirectory: true)
+        let legacyAppURL = installDir.appendingPathComponent(PreferencesStore.legacyAppName + ".app", isDirectory: true)
         try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: outsideApp, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        defer { cleanupIsolatedTestAppSandbox(tempRoot, extraUnregisterPaths: [legacyAppURL]) }
 
         let fakeFileApp = extractDir.appendingPathComponent("Fake.app", isDirectory: false)
         try Data("not-a-directory".utf8).write(to: fakeFileApp)
@@ -2514,9 +2498,6 @@ final class PreferencesAndUpdateTests: XCTestCase {
         let repoDir = tempRoot.appendingPathComponent("repo", isDirectory: true)
         let scriptsDir = repoDir.appendingPathComponent("scripts", isDirectory: true)
         let cliBin = tempRoot.appendingPathComponent("codex-agy-sync")
-        let installDir = tempRoot.appendingPathComponent("apps", isDirectory: true)
-        let legacyBundleName = PreferencesStore.legacyAppName + ".app"
-        let legacyAppURL = installDir.appendingPathComponent(legacyBundleName, isDirectory: true)
         try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: legacyAppURL, withIntermediateDirectories: true)
         try "v0.4.1".write(to: legacyAppURL.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)

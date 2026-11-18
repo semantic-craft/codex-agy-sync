@@ -166,3 +166,14 @@
 - 正确做法（Done right）：测试与沙盒 QA 的 `UserDefaults(suiteName:)` 一律传每用例独立嵌套沙盒文件路径并在 `defer` 中删除整个容器目录；清理真实 `~/Library/Preferences/` 退役域时先用 `CFPreferencesCopyKeyList` 判空，无键文件只做 `FileManager.removeItem` / `unlink`，有键域清空后须覆盖 `cfprefsd` 7 秒刷盘窗口。
 - 验证点：运行 `./scripts/check`（含 `[4/5]` 静态门禁与 `[5b/5]` 7.5 秒延迟窗口核验），确认 `testCleanupIsolatedTestDefaultsRemovesPlistFileFromDisk`、`testCleanupLegacyUpdateResidueRemovesLegacyDirsAndPlistsWhilePreservingCurrent` 与 `testUnisolatedPreferencesStoreInTestsSkipsHostPersistence` 全部通过。
 - 复发记录：Seen 2x (2026-11-16)，首轮仅做同步 `CFPreferencesSynchronize` + `removeItem` 后在 `7.000s` 延迟窗口复查中捕获 `cfprefsd` 异步重刷，改用嵌套沙盒路径与无键直删根治。
+
+### macOS 构建、QA 与工作区扫描必须防止 TCC 重复授权条目与 LaunchServices 幽灵残留
+
+**安装构建严禁静默回退 ad-hoc 签名，QA 构建须使用独立 `CFBundleDisplayName` 并在注销/删包前调用 `tccutil reset`，测试 `.app` 沙盒须在仓库外且销毁前注销 LaunchServices，且 Python/Rust 工作区排除必须先词法过滤 `.Trash` 与 `~/Library/*` TCC 受保护目录再做 `stat`/`resolve`。**
+
+- 标签：#macOS原生 #TCC #LaunchServices #测试隔离
+- 起因与后果：系统设置「完全磁盘访问权限」出现 7 条已退役 `CodexAgyHandoff` 灰格占位条目，且本机 LaunchServices 残留 67 条旧版与测试 `.app` 登记（含 `tests/test_macos_notarization.py` `--install` 写入、`scripts/build_menubar_app.sh` `bundle-stage.*` 中间包，以及 `PreferencesAndUpdateTests.swift` 在系统 `temporaryDirectory` 创建 `*.app` 夹具）。原因在于历史构建曾漏掉 `CFBundleIdentifier`（致 TCC 退化为 `client_type=1` 路径建行）与长期使用 `--sign -`（致每次重编变更 `cdhash`）、QA 与旧包销毁前未按「先 `tccutil reset` → 再 `lsregister -u` → 最后删 `.app`」执行（触发 `OSStatus -10814`），以及 `workspace.py` / `cas-host/src/paths.rs` 先调 `resolve` 且未排除 `.Trash` 与 TCC 受保护 `~/Library/*` 子树。
+- 修复与证据：`scripts/build_menubar_app.sh` 新增 `--display-name`、`--skip-lsregister`、禁止 `--install` 静默回退 `--sign -`、在 `cleanup_stage` 注销 `STAGE_APP` 并在清理旧包前执行 `tccutil reset`；`menubar_verify.py` 传入 `--display-name "CodexAgySync QA"` 并在 `lsregister -u` 前执行 `tccutil reset All`；`TestDefaultsHelper.swift`（`makeIsolatedTestAppSandbox` 置于 `$HOME/Projects/_artifacts/codex-agy-sync/test-app-sandboxes/` 以避开真实仓父目录探测）与 `scripts/check` `[5b/6]` 强制校验零 LaunchServices 残留；`src/codex_agy_sync/workspace.py`、`rust/crates/cas-host/src/paths.rs` 与 `menubar_feed.rs` 先词法排除 `.Trash` 与 TCC 受保护目录。
+- 正确做法（Done right）：所有 `.app` 写入稳定 `CFBundleIdentifier`（跨仓由 `agent-home/tools/notary-check/check_notary_policy.py` `NTP005` 守卫）；`--install`/发版使用 Developer ID 签名；QA 与测试销毁严格按 `tccutil reset` → `lsregister -u` → 删除目录；扫描路径先词法过滤 TCC 受保护目录再 `stat`/`resolve`。
+- 验证点：运行 `./scripts/check` 全量 6 步通过且 `lsregister -dump` 只剩 `$HOME/Applications/CodexAgySync.app`；运行 `python3 ~/Projects/agent-home/tools/notary-check/check_notary_policy.py --scan-projects ~/Projects` 退出码 0。
+- 复发记录：Seen 1x (2026-11-18)，在实机排查「完全磁盘访问权限」7 条重复 `CodexAgyHandoff` 条目与 67 条 LaunchServices 残留时发现并根治。

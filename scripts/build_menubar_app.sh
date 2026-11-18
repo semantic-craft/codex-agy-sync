@@ -6,12 +6,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 APP_NAME="CodexAgySync"
 BUNDLE_ID="dev.semanticcraft.codex-agy-sync"
+DISPLAY_NAME=""
 OUTPUT_DIR=""
 ARCHIVE_ZIP=""
 INSTALL=0
 ADHOC=0
 NOTARIZE=0
 RELEASE=0
+SKIP_LSREGISTER="${CODEX_AGY_SKIP_LSREGISTER:-0}"
 SIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
 SIGN_IDENTITY_CLI_SET=0
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
@@ -23,8 +25,10 @@ Usage: build_menubar_app.sh [options]
 Options:
   --output-dir <dir>        Target directory for CodexAgySync.app (default: $REPO_ROOT/out/app)
   --bundle-id <id>          CFBundleIdentifier (default: dev.semanticcraft.codex-agy-sync)
+  --display-name <name>     CFBundleDisplayName / CFBundleName (default: CodexAgySync)
   --archive-zip <path>      Package signed .app into <path> via ditto and write <path>.sha256
   --install                 Output to $HOME/Applications and register with LaunchServices
+  --skip-lsregister         Skip LaunchServices registration (for isolated build/package tests)
   --adhoc                   Force ad-hoc signing (--sign -) for local dev/QA builds
   --sign-identity <id>      Explicit Developer ID Application signing identity (or CODESIGN_IDENTITY env)
   --notarize                Sign with Developer ID + hardened runtime + timestamp and notarize
@@ -46,6 +50,11 @@ while [[ $# -gt 0 ]]; do
             BUNDLE_ID="$2"
             shift 2
             ;;
+        --display-name)
+            [[ $# -ge 2 ]] || { echo "Error: --display-name requires an argument" >&2; exit 1; }
+            DISPLAY_NAME="$2"
+            shift 2
+            ;;
         --archive-zip)
             [[ $# -ge 2 ]] || { echo "Error: --archive-zip requires an argument" >&2; exit 1; }
             ARCHIVE_ZIP="$2"
@@ -53,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install)
             INSTALL=1
+            shift
+            ;;
+        --skip-lsregister)
+            SKIP_LSREGISTER=1
             shift
             ;;
         --adhoc)
@@ -279,8 +292,8 @@ else
     SIGN_IDENTITY="$(discover_developer_id_identity || true)"
     if [[ -n "$SIGN_IDENTITY" ]]; then
         SIGN_MODE="developer_id"
-    elif [[ "$NOTARIZE" -eq 1 ]]; then
-        echo "Error: No 'Developer ID Application:' codesigning identity found (set CODESIGN_IDENTITY or install a Developer ID certificate)." >&2
+    elif [[ "$NOTARIZE" -eq 1 || "$INSTALL" -eq 1 ]]; then
+        echo "Error: No 'Developer ID Application:' codesigning identity found (set CODESIGN_IDENTITY, install a Developer ID certificate, or pass --adhoc explicitly for local dev)." >&2
         exit 1
     else
         SIGN_MODE="adhoc"
@@ -344,15 +357,20 @@ if [[ ! -x "$RUST_CLI_PATH" ]]; then
     exit 1
 fi
 
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 STAGE_DIR="$(mktemp -d "$SCRATCH_PATH/bundle-stage.XXXXXX")"
 DEST_STAGE="$OUTPUT_DIR/.${APP_NAME}.app.stage.$$"
+STAGE_APP="$STAGE_DIR/$APP_NAME.app"
 cleanup_stage() {
+    if [[ "$SKIP_LSREGISTER" != "1" && -x "$LSREGISTER" && -d "$STAGE_APP" ]]; then
+        "$LSREGISTER" -u "$STAGE_APP" >/dev/null 2>&1 || true
+    fi
     rm -rf "$STAGE_DIR" "$DEST_STAGE"
 }
 trap cleanup_stage EXIT
 
-STAGE_APP="$STAGE_DIR/$APP_NAME.app"
+EFFECTIVE_DISPLAY_NAME="${DISPLAY_NAME:-$APP_NAME}"
 CONTENTS_DIR="$STAGE_APP/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 HELPERS_DIR="$CONTENTS_DIR/Helpers"
@@ -368,21 +386,21 @@ chmod 755 "$HELPERS_DIR/codex-agy-sync"
 
 swift "$REPO_ROOT/scripts/generate_app_icon.swift" "$ICNS_PATH" "$ICON_SCRATCH_PATH"
 
-python3 - "$PLIST_PATH" "$BUNDLE_ID" "$APP_NAME" "$APP_VERSION" <<'PY'
+python3 - "$PLIST_PATH" "$BUNDLE_ID" "$APP_NAME" "$EFFECTIVE_DISPLAY_NAME" "$APP_VERSION" <<'PY'
 import plistlib
 import sys
 
-plist_path, bundle_id, app_name, app_version = sys.argv[1:5]
+plist_path, bundle_id, app_name, display_name, app_version = sys.argv[1:6]
 payload = {
     "CFBundleDevelopmentRegion": "zh_CN",
-    "CFBundleDisplayName": app_name,
+    "CFBundleDisplayName": display_name,
     "CFBundleExecutable": app_name,
     "CFBundleIconFile": "AppIcon",
     "CFBundleIconName": "AppIcon",
     "CFBundleIdentifier": bundle_id,
     "CFBundleInfoDictionaryVersion": "6.0",
     "CFBundleLocalizations": ["zh-Hans", "en"],
-    "CFBundleName": app_name,
+    "CFBundleName": display_name,
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": app_version,
     "CFBundleVersion": app_version,
@@ -442,14 +460,17 @@ if [[ -n "$ARCHIVE_ZIP" ]]; then
 fi
 
 if [[ "$INSTALL" -eq 1 ]]; then
-    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
     LEGACY_NAME="CodexAgy""Handoff"
     LEGACY_BUNDLE_ID="dev.semanticcraft.codex-agy-""handoff"
     LEGACY_BUNDLE="$OUTPUT_DIR/$LEGACY_NAME.app"
     if [[ -d "$LEGACY_BUNDLE" ]]; then
         pkill -f "$LEGACY_BUNDLE/Contents/MacOS/$LEGACY_NAME" >/dev/null 2>&1 || true
-        if [[ -x "$LSREGISTER" ]]; then
-            "$LSREGISTER" -u "$LEGACY_BUNDLE" >/dev/null 2>&1 || true
+        if [[ "$SKIP_LSREGISTER" != "1" ]]; then
+            # Reset TCC entries while the legacy bundle is still registered in LaunchServices (-10814 otherwise).
+            tccutil reset All "$LEGACY_BUNDLE_ID" >/dev/null 2>&1 || true
+            if [[ -x "$LSREGISTER" ]]; then
+                "$LSREGISTER" -u "$LEGACY_BUNDLE" >/dev/null 2>&1 || true
+            fi
         fi
         rm -rf "$LEGACY_BUNDLE"
     fi
@@ -458,7 +479,7 @@ if [[ "$INSTALL" -eq 1 ]]; then
         rm -rf "$HOME/Library/Caches/$LEGACY_BUNDLE_ID"
         rm -rf "$HOME/Library/Caches/$LEGACY_NAME"
     fi
-    if [[ -x "$LSREGISTER" ]]; then
+    if [[ "$SKIP_LSREGISTER" != "1" && -x "$LSREGISTER" ]]; then
         "$LSREGISTER" -f "$APP_BUNDLE" >/dev/null 2>&1 || true
     fi
 fi

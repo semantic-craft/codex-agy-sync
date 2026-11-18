@@ -169,6 +169,7 @@ if tool == "spctl":
             "HOME": str(self.home_dir),
             "PATH": f"{self.bin_dir}:/usr/bin:/bin",
             "CARGO_TARGET_DIR": str(self.rust_target_dir),
+            "CODEX_AGY_SKIP_LSREGISTER": "1",
         }
         if extra:
             env.update(extra)
@@ -388,6 +389,39 @@ if tool == "spctl":
         inv2 = self._invocations()
         sign2 = [c for c in inv2 if c["tool"] == "codesign" and "--sign" in c["args"]][0]["args"]
         self.assertIn("-", sign2)
+
+        install_noid = subprocess.run(
+            [str(BUILD_SCRIPT), "--install"],
+            env=self._env(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(install_noid.returncode, 0)
+        self.assertIn("Developer ID Application", install_noid.stderr)
+
+        qa_dir = self.root / "dev-qa-display"
+        p3 = subprocess.run(
+            [
+                str(BUILD_SCRIPT),
+                "--adhoc",
+                "--output-dir",
+                str(qa_dir),
+                "--bundle-id",
+                "dev.semanticcraft.codex-agy-sync.qa",
+                "--display-name",
+                "CodexAgySync QA",
+            ],
+            env=self._env(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(p3.returncode, 0, msg=p3.stderr)
+        qa_plist = plistlib.loads((qa_dir / "CodexAgySync.app" / "Contents" / "Info.plist").read_bytes())
+        self.assertEqual(qa_plist["CFBundleIdentifier"], "dev.semanticcraft.codex-agy-sync.qa")
+        self.assertEqual(qa_plist["CFBundleDisplayName"], "CodexAgySync QA")
+        self.assertEqual(qa_plist["CFBundleExecutable"], "CodexAgySync")
 
         tmp_bad = subprocess.run(
             [str(BUILD_SCRIPT), "--output-dir", "/tmp/forbidden-codex-agy-sync-out"],

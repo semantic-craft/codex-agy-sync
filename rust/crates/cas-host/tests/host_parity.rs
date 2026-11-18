@@ -564,3 +564,38 @@ fn loopback_agy_http_and_codex_unix_ws_rpc_clients_work() {
     let _ = ws_srv.join();
     let _ = fs::remove_file(&sock_path);
 }
+
+#[test]
+fn is_excluded_for_homes_blocks_tcc_and_trash_paths_lexically() {
+    let tmp = make_sandbox();
+    let home = tmp.path();
+    let homes = vec![home.to_path_buf()];
+    assert!(cas_host::is_excluded_for_homes(
+        &home.join(".Trash/old-proj"),
+        &homes
+    ));
+    assert!(cas_host::is_excluded_for_homes(
+        &home.join("Library/Mail/V10"),
+        &homes
+    ));
+    assert!(cas_host::is_excluded_for_homes(
+        &home.join("Library/Safari"),
+        &homes
+    ));
+    assert!(cas_host::is_excluded_for_homes(
+        &home.join("Library/Application Support/com.apple.TCC"),
+        &homes
+    ));
+    assert!(cas_host::is_excluded_for_homes(
+        Path::new("/Library/Application Support/com.apple.TCC"),
+        &homes
+    ));
+    assert!(!cas_host::is_excluded_for_homes(
+        &home.join("Library/Application Support/glaux-book"),
+        &homes
+    ));
+    assert!(!cas_host::is_excluded_for_homes(
+        &home.join("Projects/demo"),
+        &homes
+    ));
+}

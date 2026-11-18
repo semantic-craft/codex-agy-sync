@@ -324,30 +324,97 @@ pub fn candidate_home_dirs(paths: &HostEnvironmentPaths) -> Vec<PathBuf> {
     homes
 }
 
-/// Return `true` if `path` resides under `~/Archive` or `~/.private_keys` (or matches `.Trash`/root-only guards).
-#[must_use]
-pub fn is_excluded_for_homes(path: &Path, homes: &[PathBuf]) -> bool {
-    let lex = lexical_abs_path(path);
-    let res = resolve_strict_false(path);
-    for h in homes {
-        for forbidden_rel in ["Archive", ".private_keys"] {
-            let f = h.join(forbidden_rel);
-            if lex.starts_with(&f) || res.starts_with(&f) {
+const EXCLUDED_HOME_SUBDIRS: &[&str] = &[
+    "Archive",
+    ".private_keys",
+    ".Trash",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "Library/Cookies",
+    "Library/HomeKit",
+    "Library/IdentityServices",
+    "Library/Suggestions",
+    "Library/Calendars",
+    "Library/Reminders",
+    "Library/PersonalizationPortrait",
+    "Library/Metadata/CoreSpotlight",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/Application Support/AddressBook",
+    "Library/Application Support/CallHistoryDB",
+    "Library/Application Support/MobileSync",
+    "Library/Application Support/com.apple.TCC",
+];
+
+fn path_starts_with_ci(cand: &Path, root: &Path) -> bool {
+    if cand.starts_with(root) {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        let cand_parts: Vec<String> = cand
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect();
+        let root_parts: Vec<String> = root
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect();
+        return cand_parts.len() >= root_parts.len()
+            && cand_parts[..root_parts.len()] == root_parts[..];
+    }
+    false
+}
+
+fn is_path_variant_excluded(cand: &Path, homes: &[PathBuf]) -> bool {
+    for comp in cand.components() {
+        if let Component::Normal(os_s) = comp
+            && let Some(s) = os_s.to_str()
+        {
+            let matched = if cfg!(target_os = "macos") {
+                matches!(
+                    s.to_lowercase().as_str(),
+                    ".private_keys" | ".trash" | ".trashes"
+                )
+            } else {
+                matches!(s, ".private_keys" | ".Trash" | ".Trashes")
+            };
+            if matched {
                 return true;
             }
         }
     }
-    for cand in [&lex, &res] {
-        for comp in cand.components() {
-            if let Component::Normal(os_s) = comp
-                && let Some(s) = os_s.to_str()
-                && s == ".private_keys"
-            {
-                return true;
+    if path_starts_with_ci(
+        cand,
+        Path::new("/Library/Application Support/com.apple.TCC"),
+    ) {
+        return true;
+    }
+    for h in homes {
+        let h_lex = lexical_abs_path(h);
+        for base in [h.as_path(), h_lex.as_path()] {
+            for forbidden_rel in EXCLUDED_HOME_SUBDIRS {
+                if path_starts_with_ci(cand, &base.join(forbidden_rel)) {
+                    return true;
+                }
             }
         }
     }
     false
+}
+
+/// Return `true` if `path` resides under `~/Archive`, `~/.private_keys`, `.Trash`, or macOS TCC-protected directories.
+#[must_use]
+pub fn is_excluded_for_homes(path: &Path, homes: &[PathBuf]) -> bool {
+    if homes.is_empty() {
+        return false;
+    }
+    let lex = lexical_abs_path(path);
+    if is_path_variant_excluded(&lex, homes) {
+        return true;
+    }
+    let res = resolve_strict_false(path);
+    res != lex && is_path_variant_excluded(&res, homes)
 }
 
 /// Helper matching `parse_workspace_identity` cleanly inside `cas-host`.

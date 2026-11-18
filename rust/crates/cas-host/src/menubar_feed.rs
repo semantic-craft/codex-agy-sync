@@ -109,10 +109,14 @@ struct ReceiptIdx {
 
 fn norm_ws_cached<'a>(
     raw: &str,
+    homes: &[PathBuf],
     cache: &'a mut HashMap<String, Option<(WorkspacePath, WorkspaceRootUri)>>,
 ) -> Option<&'a (WorkspacePath, WorkspaceRootUri)> {
     if !cache.contains_key(raw) {
-        let parsed = parse_ws_ident(raw).ok();
+        let parsed = match cas_core::raw_spec_to_candidate_path(raw) {
+            Some(cand) if !is_excluded_for_homes(&cand, homes) => parse_ws_ident(raw).ok(),
+            _ => None,
+        };
         cache.insert(raw.to_owned(), parsed);
     }
     cache.get(raw).and_then(Option::as_ref)
@@ -128,7 +132,7 @@ fn load_receipt_index(
     let mut ready_by_source_map: HashMap<(String, String, String), Vec<SyncReceipt>> =
         HashMap::new();
     for (_, rec, _) in loaded {
-        let Some((ws_path, _)) = norm_ws_cached(&rec.workspace, norm_cache).cloned() else {
+        let Some((ws_path, _)) = norm_ws_cached(&rec.workspace, homes, norm_cache).cloned() else {
             continue;
         };
         if is_excluded_for_homes(ws_path.as_path(), homes) {
@@ -176,7 +180,7 @@ impl WorkspaceLookup {
         homes: &[PathBuf],
         cache: &mut HashMap<String, Option<(WorkspacePath, WorkspaceRootUri)>>,
     ) -> Option<WorkspaceRecord> {
-        let (ws_path, ws_uri) = norm_ws_cached(raw, cache)?.clone();
+        let (ws_path, ws_uri) = norm_ws_cached(raw, homes, cache)?.clone();
         if is_excluded_for_homes(ws_path.as_path(), homes) {
             return None;
         }
@@ -237,7 +241,7 @@ fn build_workspace_lookup(
             continue;
         }
         for raw_u in uris {
-            if let Some((_, wu)) = norm_ws_cached(raw_u, norm_cache) {
+            if let Some((_, wu)) = norm_ws_cached(raw_u, homes, norm_cache) {
                 agy_by_uri
                     .entry(wu.as_str().to_owned())
                     .or_insert_with(|| pid.clone());
@@ -251,7 +255,7 @@ fn build_workspace_lookup(
         }
         if let Ok(pid) = AgyProjectId::parse(pid_str) {
             for raw_u in &row.parsed_uris {
-                if let Some((_, wu)) = norm_ws_cached(raw_u, norm_cache) {
+                if let Some((_, wu)) = norm_ws_cached(raw_u, homes, norm_cache) {
                     agy_by_uri
                         .entry(wu.as_str().to_owned())
                         .or_insert_with(|| pid.clone());
@@ -264,7 +268,7 @@ fn build_workspace_lookup(
     for proj in &preloaded.codex_projects {
         if let Ok(cpid) = CodexProjectId::parse(&proj.id) {
             for r in &proj.roots {
-                if let Some((wp, _)) = norm_ws_cached(r, norm_cache) {
+                if let Some((wp, _)) = norm_ws_cached(r, homes, norm_cache) {
                     codex_by_path
                         .entry(wp.to_string())
                         .or_insert_with(|| cpid.clone());
@@ -312,7 +316,7 @@ fn build_workspace_lookup(
     let mut by_uri = HashMap::new();
 
     for spec in candidate_raw_specs {
-        let Some((wp, wu)) = norm_ws_cached(&spec, norm_cache).cloned() else {
+        let Some((wp, wu)) = norm_ws_cached(&spec, homes, norm_cache).cloned() else {
             continue;
         };
         if is_excluded_for_homes(wp.as_path(), homes) {

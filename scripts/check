@@ -355,7 +355,9 @@ import pathlib, plistlib, shutil, subprocess, sys, time
 
 prefs_dir = pathlib.Path.home() / "Library" / "Preferences"
 sandbox_prefs_root = pathlib.Path("out/test-prefs-sandboxes")
+sandbox_app_root = pathlib.Path.home() / "Projects" / "_artifacts" / "codex-agy-sync" / "test-app-sandboxes"
 shutil.rmtree(sandbox_prefs_root, ignore_errors=True)
+shutil.rmtree(sandbox_app_root, ignore_errors=True)
 
 patterns = (
     "dev.semanticcraft.codex-agy-sync*.plist",
@@ -402,6 +404,31 @@ if sandbox_prefs_root.exists():
         )
         for p in leftover_sandboxes:
             errors.append(f"  {p}")
+
+if sandbox_app_root.exists():
+    leftover_app_sandboxes = sorted(str(p) for p in sandbox_app_root.iterdir())
+    if leftover_app_sandboxes:
+        errors.append(
+            f"ERROR: Swift tests left {len(leftover_app_sandboxes)} uncleaned app sandbox item(s) in {sandbox_app_root}:"
+        )
+        for p in leftover_app_sandboxes:
+            errors.append(f"  {p}")
+
+lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if pathlib.Path(lsregister).is_file():
+    ls_dump = subprocess.run([lsregister, "-dump"], capture_output=True, text=True, check=False).stdout
+    repo_out_marker = str(pathlib.Path.cwd() / "out") + "/"
+    app_sandbox_marker = str(sandbox_app_root) + "/"
+    leaked_ls = []
+    for line in ls_dump.splitlines():
+        if line.lstrip().startswith("path:") and (
+            repo_out_marker in line or app_sandbox_marker in line or "/T/codex-agy-" in line
+        ):
+            leaked_ls.append(line.strip())
+    if leaked_ls:
+        errors.append(f"ERROR: Test run leaked {len(leaked_ls)} LaunchServices registration(s):")
+        for item in leaked_ls[:10]:
+            errors.append(f"  {item}")
 
 leaked = sorted(str(p) for p in (after_plists - before_plists))
 if leaked:

@@ -1024,9 +1024,7 @@ final class MenubarViewModelTests: XCTestCase {
         let noisyFlags: NSEvent.ModifierFlags = [.command, .capsLock, .numericPad, .function]
         XCTAssertEqual(HotKeyShortcut.normalizedEventFlags(noisyFlags), .command)
 
-        let fakeHome = FileManager.default.temporaryDirectory
-            .resolvingSymlinksInPath()
-            .appendingPathComponent("codex-agy-home-\(UUID().uuidString)", isDirectory: true)
+        let fakeHome = try makeIsolatedTestAppSandbox(label: "cli-home")
         let localBin = fakeHome.appendingPathComponent(".local/bin", isDirectory: true)
         let pathDir = fakeHome.appendingPathComponent("path-bin", isDirectory: true)
         let customDir = fakeHome.appendingPathComponent("custom-bin", isDirectory: true)
@@ -1036,7 +1034,7 @@ final class MenubarViewModelTests: XCTestCase {
         for dir in [localBin, pathDir, customDir, envDir, helpersDir] {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
-        defer { try? FileManager.default.removeItem(at: fakeHome) }
+        defer { cleanupIsolatedTestAppSandbox(fakeHome) }
 
         func makeExec(in dir: URL) throws -> URL {
             let file = dir.appendingPathComponent("codex-agy-sync")
@@ -1169,15 +1167,13 @@ final class MenubarViewModelTests: XCTestCase {
     }
 
     func testRunAndDecodeBundledBinaryAndLargeFeed() async throws {
-        let dir = FileManager.default.temporaryDirectory
-            .resolvingSymlinksInPath()
-            .appendingPathComponent("codex-agy-parity-\(UUID().uuidString)", isDirectory: true)
+        let dir = try makeIsolatedTestAppSandbox(label: "parity")
         let fakeApp = dir.appendingPathComponent("CodexAgySync.app", isDirectory: true)
         let helpersBin = fakeApp.appendingPathComponent("Contents/Helpers", isDirectory: true)
         let pathBin = dir.appendingPathComponent("bin", isDirectory: true)
         try FileManager.default.createDirectory(at: helpersBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: pathBin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        defer { cleanupIsolatedTestAppSandbox(dir) }
 
         let isolated = makeIsolatedTestDefaultsSuite(label: "parity")
         defer { isolated.cleanup() }

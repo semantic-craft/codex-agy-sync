@@ -43,6 +43,7 @@ from codex_agy_sync.events import AssistantTextEvent, CascadeId, EventOriginAnch
 from codex_agy_sync.payloads import RunCommandPayload  # noqa: E402
 
 QA_BUNDLE_ID = "dev.semanticcraft.codex-agy-sync.qa"
+QA_DISPLAY_NAME = "CodexAgySync QA"
 CTA_LABEL = "用 Codex 继续"
 DONE_BANNER = "已在 Codex 打开对话"
 SETTINGS_TITLE = "CodexAgySync 设置"
@@ -149,6 +150,8 @@ def _verify_app_bundle_assets(app_bundle: Path) -> dict[str, Any]:
     info = plistlib.loads(plist_path.read_bytes())
     if info.get("CFBundleIdentifier") != QA_BUNDLE_ID:
         raise AssertionError(f"Expected CFBundleIdentifier={QA_BUNDLE_ID!r}, got {info.get('CFBundleIdentifier')!r}")
+    if info.get("CFBundleDisplayName") != QA_DISPLAY_NAME:
+        raise AssertionError(f"Expected CFBundleDisplayName={QA_DISPLAY_NAME!r}, got {info.get('CFBundleDisplayName')!r}")
     if info.get("CFBundleExecutable") != "CodexAgySync":
         raise AssertionError(f"Expected CFBundleExecutable='CodexAgySync', got {info.get('CFBundleExecutable')!r}")
     if info.get("CFBundleIconFile") != "AppIcon":
@@ -497,6 +500,8 @@ def _teardown_suite(ctx: dict[str, Any]) -> dict[str, Any]:
                         receipt["killed_pids"].append(pid)
             if sig == signal.SIGTERM and receipt["killed_pids"]:
                 time.sleep(0.5)
+        # Reset TCC grants while QA app bundle still exists and is registered (-10814 otherwise).
+        receipt["tcc_reset"] = run_cmd(["tccutil", "reset", "All", QA_BUNDLE_ID], check=False).returncode == 0
         if Path(LSREGISTER).is_file():
             receipt["unregistered"] = run_cmd([LSREGISTER, "-u", str(app_bundle)], check=False).returncode == 0
     prefs_dir = Path.home() / "Library" / "Preferences"
@@ -533,7 +538,19 @@ def cmd_suite(raw_run_dir: str | None) -> int:
     error_text, shots, bundle_checks, settings_checks, receipt_info, rollouts, rpc_methods = None, {}, {}, {}, None, [], []
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))
     try:
-        run_cmd([str(BUILD_SCRIPT), "--output-dir", str(dirs["app_dir"]), "--bundle-id", QA_BUNDLE_ID], check=True, timeout=180.0)
+        run_cmd(
+            [
+                str(BUILD_SCRIPT),
+                "--output-dir",
+                str(dirs["app_dir"]),
+                "--bundle-id",
+                QA_BUNDLE_ID,
+                "--display-name",
+                QA_DISPLAY_NAME,
+            ],
+            check=True,
+            timeout=180.0,
+        )
         bundle_checks = _verify_app_bundle_assets(ctx["app_bundle"])
         before_fp = collect_host_fingerprints()
         paths = HostEnvironmentPaths(dirs["gemini_config"], dirs["agy_data"], dirs["codex_home"], dirs["sync_state"], agy_cli_data_dir=None, codex_app_server_socket=dirs["sock_path"])

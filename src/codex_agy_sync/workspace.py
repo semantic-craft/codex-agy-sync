@@ -130,6 +130,38 @@ def normalize_tool_file_path(raw_path: str) -> str:
     return cleaned
 
 
+_EXCLUDED_HOME_SUBDIRS: tuple[str, ...] = (
+    "Archive",
+    ".private_keys",
+    ".Trash",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "Library/Cookies",
+    "Library/HomeKit",
+    "Library/IdentityServices",
+    "Library/Suggestions",
+    "Library/Calendars",
+    "Library/Reminders",
+    "Library/PersonalizationPortrait",
+    "Library/Metadata/CoreSpotlight",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/Application Support/AddressBook",
+    "Library/Application Support/CallHistoryDB",
+    "Library/Application Support/MobileSync",
+    "Library/Application Support/com.apple.TCC",
+)
+_EXCLUDED_COMPONENT_NAMES_CF: frozenset[str] = frozenset({".private_keys", ".trash", ".trashes"})
+_EXCLUDED_COMPONENT_NAMES: frozenset[str] = frozenset({".private_keys", ".Trash", ".Trashes"})
+_EXCLUDED_GLOBAL_ROOTS: tuple[tuple[Path, tuple[str, ...]], ...] = (
+    (
+        Path("/Library/Application Support/com.apple.TCC"),
+        tuple(p.casefold() for p in Path("/Library/Application Support/com.apple.TCC").parts),
+    ),
+)
+
+
 def _lexical_abs(path: Path) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(path))))
 
@@ -142,13 +174,12 @@ def _excluded_roots_for_home(home_str: str) -> tuple[tuple[Path, tuple[str, ...]
     is_darwin = sys.platform == "darwin"
     roots: list[Path] = []
     seen: set[Path] = set()
-    for sub in ("Archive", ".private_keys"):
-        for base in (home_lex, home_res):
+    for base in (home_lex, home_res):
+        for sub in _EXCLUDED_HOME_SUBDIRS:
             raw_root = base / sub
-            for root in (raw_root, raw_root.resolve(strict=False)):
-                if root not in seen:
-                    seen.add(root)
-                    roots.append(root)
+            if raw_root not in seen:
+                seen.add(raw_root)
+                roots.append(raw_root)
     return tuple((r, tuple(p.casefold() for p in r.parts) if is_darwin else ()) for r in roots)
 
 
@@ -169,12 +200,26 @@ def _is_path_under_precomputed(
     return False
 
 
-def _candidate_variants_for_exclusion(candidate: Path) -> tuple[tuple[Path, tuple[str, ...]], ...]:
-    lex = _lexical_abs(candidate)
-    res = candidate.resolve(strict=False)
-    variants = (lex,) if res == lex else (lex, res)
+def _path_variant_tuple(path: Path) -> tuple[Path, tuple[str, ...]]:
     is_darwin = sys.platform == "darwin"
-    return tuple((p, tuple(part.casefold() for part in p.parts) if is_darwin else ()) for p in variants)
+    return path, tuple(part.casefold() for part in path.parts) if is_darwin else ()
+
+
+def _is_variant_excluded(cand: Path, cand_folded: tuple[str, ...], homes: Sequence[Path]) -> bool:
+    if sys.platform == "darwin":
+        if any(part in _EXCLUDED_COMPONENT_NAMES_CF for part in cand_folded):
+            return True
+    elif any(part in _EXCLUDED_COMPONENT_NAMES for part in cand.parts):
+        return True
+    for root, root_folded in _EXCLUDED_GLOBAL_ROOTS:
+        if _is_path_under_precomputed(cand, cand_folded, root, root_folded):
+            return True
+    for home in homes:
+        home_key = str(home) if home.is_absolute() and "~" not in str(home) else str(_lexical_abs(home))
+        for root, root_folded in _excluded_roots_for_home(home_key):
+            if _is_path_under_precomputed(cand, cand_folded, root, root_folded):
+                return True
+    return False
 
 
 def is_sensitive_excluded_path(candidate: Path, home_dir: Path) -> bool:
@@ -234,13 +279,14 @@ def raw_spec_to_candidate_path(raw: str | Path) -> Path | None:
 def is_excluded_for_homes(candidate: Path, homes: Sequence[Path]) -> bool:
     if not homes:
         return False
-    cand_variants = _candidate_variants_for_exclusion(candidate)
-    for home in homes:
-        home_key = str(home) if home.is_absolute() and "~" not in str(home) else str(_lexical_abs(home))
-        for root, root_folded in _excluded_roots_for_home(home_key):
-            for cand, cand_folded in cand_variants:
-                if _is_path_under_precomputed(cand, cand_folded, root, root_folded):
-                    return True
+    lex, lex_folded = _path_variant_tuple(_lexical_abs(candidate))
+    if _is_variant_excluded(lex, lex_folded, homes):
+        return True
+    res = candidate.resolve(strict=False)
+    if res != lex:
+        res_path, res_folded = _path_variant_tuple(res)
+        if _is_variant_excluded(res_path, res_folded, homes):
+            return True
     return False
 
 
