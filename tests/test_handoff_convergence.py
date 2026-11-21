@@ -178,7 +178,6 @@ class HandoffConvergenceTest(unittest.TestCase):
         self.assertTrue(cli_tx.is_file())
         self.assertEqual(desktop_tx.read_bytes(), cli_tx.read_bytes())
 
-        # Same agy_cli_data_dir == agy_data_dir path must not crash with FileExistsError.
         same_paths = HostEnvironmentPaths(
             gemini_config_dir=self.paths.gemini_config_dir,
             agy_data_dir=self.paths.agy_data_dir,
@@ -236,7 +235,6 @@ class HandoffConvergenceTest(unittest.TestCase):
             ],
             title="AGY Incomplete",
         )
-        # Seed a live Codex session newer than AGY stopped-incomplete session; --latest --include-interrupted must exclude live Codex and select AGY.
         live_tid = self._seed_codex(binding, "01970000-0000-7000-8000-000000000203", _turn_pair(HostKind.CODEX, "lt", "2026-11-15T05:00:00Z", "Live", "Working"), title="Live Codex")
 
         def _selective_codex_rpc(ep: object, qtid: CodexThreadId, **kw: object) -> CodexRpcReadResult:
@@ -253,7 +251,6 @@ class HandoffConvergenceTest(unittest.TestCase):
             sel_rec, _ = execute_handoff(self.paths, self.workspace, latest=True, include_interrupted=True)
         self.assertEqual((sel_rec.source_id, sel_rec.target_id, sel_rec.status), (str(agy_cid), "01970000-0000-7000-8000-000000000299", "ready"))
 
-        # Chain advancement when baton target received a stopped interrupted turn.
         baton_cid = CascadeId(rec["target_id"])
         baton_ledger = self.bridge.inspect_session_ledger(self.workspace, cascade_id=baton_cid)
         b_anc = EventOriginAnchor(HostKind.ANTIGRAVITY, TurnId("bt-inc"), "2026-11-15T06:00:00Z")
@@ -275,7 +272,6 @@ class HandoffConvergenceTest(unittest.TestCase):
     def test_3_reconcile_promotes_clears_preserves_partial_and_guards_paths(self) -> None:
         binding = self.bridge.pair_workspace(self.workspace)
         tid = self._seed_codex(binding, "01970000-0000-7000-8000-000000000301", _turn_pair(HostKind.CODEX, "t1", "2026-11-15T01:00:00Z", "P1", "R1"))
-        # First fail AGY import after files hit agy_data_dir so receipt stays pending with real staged files.
         with mock.patch("codex_agy_sync.bridge.paths_and_locks.PresenceWalGuard.discover_agy_daemon", return_value=object()), \
                 mock.patch("codex_agy_sync.bridge.rpc.fetch_agy_trajectory_via_rpc", side_effect=RuntimeError("rpc timeout")):
             with self.assertRaises(HandoffPendingError) as pend_ctx:
@@ -315,7 +311,6 @@ class HandoffConvergenceTest(unittest.TestCase):
             "title": "Partial AGY", "status": "pending", "staging_path": str(state_dir / "staging" / "partial"), "error": "partial",
         }), encoding="utf-8")
 
-        # Pending Codex receipt with live RPC verifying materialization.
         codex_target_tid = self._seed_codex(binding, "01970000-0000-7000-8000-000000000399", _turn_pair(HostKind.CODEX, "ct1", "2026-11-15T02:00:00Z", "Promoted", "Codex Target"))
         codex_pend_receipt = state_dir / "codex-promoted.json"
         codex_pend_receipt.write_text(json.dumps({
@@ -366,7 +361,6 @@ class HandoffConvergenceTest(unittest.TestCase):
         promoted_codex = json.loads(codex_pend_receipt.read_text(encoding="utf-8"))
         self.assertEqual((promoted_codex["status"], promoted_codex["error"]), ("ready", None))
 
-        # Verify handoff.lock conflict during reconcile raises SyncBusyLockError.
         with (state_dir / "handoff.lock").open("a") as fd:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:

@@ -346,8 +346,6 @@ def _execute_cli(
     child_env["PYTHONDONTWRITEBYTECODE"] = "1"
     child_env.pop("ANTIGRAVITY_CLI_DATA_DIR", None)
     child_env.pop("CODEX_APP_SERVER_SOCKET", None)
-    # BSD/macOS flock is scoped to the open file description; close_fds=True prevents
-    # the child CLI process from inheriting the parent's locked descriptor during hold-lock.
     proc = subprocess.run(
         full_argv,
         cwd=str(REPO_ROOT),

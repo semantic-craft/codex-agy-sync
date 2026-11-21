@@ -52,7 +52,7 @@ from codex_agy_sync.bridge.handoff_store import save_handoff_receipt
 from codex_agy_sync.cli import main as cli_main
 from codex_agy_sync.workspace import AgyProjectId, TurnId
 
-_NOW_EPOCH = 1_794_730_000.0  # 2026-11-15T08:06:40Z
+_NOW_EPOCH = 1_794_730_000.0
 
 
 def _turn_pair(host: HostKind, turn_id: str, ts_iso: str, user_text: str, asst_text: str) -> list:
@@ -186,7 +186,6 @@ class MenubarFeedTest(unittest.TestCase):
         self.assertEqual([it.session_id for it in snap.recent], [cid_completed])
         self.assertEqual(snap.recent[0].state, MenubarCandidateState.COMPLETED_READY)
 
-        # Beyond the 15-minute window, the newer COMPLETED_READY item wins hero.
         stale_snap = build_menubar_feed(self.paths, now_epoch=_NOW_EPOCH + 1000.0)
         assert stale_snap.hero is not None
         self.assertEqual(stale_snap.hero.session_id, cid_completed)

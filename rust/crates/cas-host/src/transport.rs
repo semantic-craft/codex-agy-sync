@@ -298,9 +298,6 @@ impl DefaultHostTransport {
                     if matches!(mode, TransportMode::OnlineRpc) {
                         return Err(e);
                     }
-                    if matches!(e, HostError::FileNotFound(_)) {
-                        // Fall through to disk if local db exists.
-                    }
                 }
             }
         }

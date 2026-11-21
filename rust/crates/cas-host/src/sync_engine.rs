@@ -1494,7 +1494,6 @@ fn resolve_chain_target(
             .unwrap_or_else(|| unreachable!())
     };
 
-    // Walk forward along ready baton chain to tip.
     let mut by_source: HashMap<(String, String), SyncReceipt> = HashMap::new();
     for (r, _) in ready.drain(..) {
         by_source
@@ -1653,7 +1652,6 @@ pub fn resolve_handoff_request(
         ));
     }
 
-    // `--latest`
     let cands = list_handoff_candidates(paths, &binding, direction, include_interrupted);
     let picked = cands
         .iter()

@@ -168,7 +168,6 @@ fn cli_serve_delegates_to_python_cli_and_handles_missing_python_cli() {
     let err_json: Value = serde_json::from_slice(&missing_py.stderr).expect("json error");
     assert_eq!(err_json["error"], "serve_python_unavailable");
 
-    // Empty CODEX_AGY_SYNC_SERVE_DELEGATED must not trigger recursion guard, while non-empty must.
     let empty_guard = Command::new(bin)
         .args(["serve", "--help"])
         .env("HOME", root)
@@ -189,7 +188,6 @@ fn cli_serve_delegates_to_python_cli_and_handles_missing_python_cli() {
     let rec_json: Value = serde_json::from_slice(&recursive_guard.stderr).expect("json error");
     assert_eq!(rec_json["error"], "serve_python_unavailable");
 
-    // Verify 6-level deep bundled .app/Contents/Helpers/codex-agy-sync resolves <repo>/bin/codex-agy-sync under clean PATH/HOME.
     let fake_repo = root.join("repo");
     let fake_repo_bin = fake_repo.join("bin");
     let bundled_helpers = fake_repo

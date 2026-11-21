@@ -1558,8 +1558,6 @@ fn decode_any_finish(
     }
 }
 
-// ---------- TOOL_CODEC_TABLE ----------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexCallKind {
     FunctionCall,

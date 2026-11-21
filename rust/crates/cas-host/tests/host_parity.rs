@@ -183,14 +183,12 @@ fn pair_apply_inspect_handoff_and_reconcile_offline_roundtrip() {
         false,
     )
     .expect("resolve");
-    // Without target daemon, handoff_session requires live target Desktop app (OnlineRpcUnavailable).
     let offline_err = execute_handoff(&paths, &req, false);
     assert!(
         matches!(offline_err, Err(HostError::OnlineRpcUnavailable(_))),
         "expected OnlineRpcUnavailable, got {offline_err:?}"
     );
 
-    // Start live mock Antigravity HTTP Connect-RPC server reading published conversations/<cid>.db.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp");
     let port = listener.local_addr().expect("addr").port();
     let daemon_dir = paths.agy_data_dir.join("daemon");
@@ -277,7 +275,6 @@ fn pair_apply_inspect_handoff_and_reconcile_offline_roundtrip() {
     assert_eq!(receipt.target_host, "antigravity");
     let target_cid = receipt.target_id().expect("target cid").to_owned();
 
-    // Re-running same source must yield idempotent no_op.
     let receipt2 = handoff_session(
         &paths,
         &ws_str,
@@ -294,7 +291,6 @@ fn pair_apply_inspect_handoff_and_reconcile_offline_roundtrip() {
     assert_eq!(receipt2.status_str(), "no_op");
     assert_eq!(receipt2.target_id(), Some(target_cid.as_str()));
 
-    // Menubar feed: source is already_handed, untouched target is suppressed!
     let feed = build_menubar_feed(
         &paths,
         6,
@@ -310,12 +306,10 @@ fn pair_apply_inspect_handoff_and_reconcile_offline_roundtrip() {
         Some(target_cid.as_str())
     );
 
-    // Status summary includes chain.
     let summary = summarize_workspace_handoffs(&paths, &ws_str).expect("summary");
     assert_eq!(summary.handoff_chains.len(), 1);
     assert!(summary.pending_handoffs.is_empty());
 
-    // Simulate a pending receipt whose target absent -> reconcile clears it.
     let pending_path = paths
         .sync_state_dir
         .join("handoffs")
@@ -403,7 +397,6 @@ fn loopback_agy_http_and_codex_unix_ws_rpc_clients_work() {
     let registry = ProjectRegistry::new(paths.clone());
     let binding = registry.resolve_readonly_binding(&ws_str).expect("ro");
 
-    // 1) Mock Antigravity HTTP Connect-RPC server
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp");
     let port = listener.local_addr().expect("addr").port();
     let cid_str = "22222222-2222-4222-8222-222222222222";
@@ -425,15 +418,15 @@ fn loopback_agy_http_and_codex_unix_ws_rpc_clients_work() {
     let step_payload = {
         let mut user_in = encode_string_field(1, "Hello via Agy RPC");
         user_in.extend_from_slice(&encode_string_field(2, "Hello via Agy RPC"));
-        let mut st = encode_varint_field(1, 2); // USER_INPUT = 2
-        st.extend_from_slice(&encode_varint_field(4, 3)); // DONE = 3
+        let mut st = encode_varint_field(1, 2);
+        st.extend_from_slice(&encode_varint_field(4, 3));
         st.extend_from_slice(&encode_bytes_field(8, &user_in));
         st
     };
     let mut traj = encode_string_field(1, "traj-1");
     traj.extend_from_slice(&encode_bytes_field(2, &step_payload));
     let mut get_traj_resp = encode_bytes_field(1, &traj);
-    get_traj_resp.extend_from_slice(&encode_varint_field(2, 1)); // IDLE = 1
+    get_traj_resp.extend_from_slice(&encode_varint_field(2, 1));
 
     let server_handle = thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
@@ -481,7 +474,6 @@ fn loopback_agy_http_and_codex_unix_ws_rpc_clients_work() {
     assert_eq!(agy_ledger.events.len(), 1);
     let _ = server_handle.join();
 
-    // 2) Mock Codex AF_UNIX WebSocket server (keep socket path under macOS 104-byte SUN_LEN)
     let short_sock_dir = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))

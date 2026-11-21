@@ -4,7 +4,7 @@ import Foundation
 
 @MainActor
 private final class HotKeyCallbackBox {
-    nonisolated let signature: OSType = 0x4341_484B // 'CAHK'
+    nonisolated let signature: OSType = 0x4341_484B
     nonisolated let identifier: UInt32 = 1
     nonisolated let onTrigger: @MainActor @Sendable () -> Void
 

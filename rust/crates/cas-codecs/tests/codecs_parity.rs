@@ -340,7 +340,6 @@ fn summaries_pbtxt_and_rpc_thread_splice() {
     assert_eq!(rpc_ledger.completed_turn_watermarks.len(), 1);
     assert!(rpc_ledger.has_inflight_turn);
 
-    // Splice onto a disk ledger with turn-1 completed
     let disk_events = vec![
         CanonicalEvent::UserInput {
             anchor: EventOriginAnchor::new(
