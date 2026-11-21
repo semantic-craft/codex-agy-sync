@@ -108,6 +108,8 @@ The modular 6-tier package layout is enforced by `./scripts/check` (`scripts/che
 - **Stage-1 Local Workbench, Menu Bar App & CLI (Tiers 4-5 & `macos/`):** `workbench/` pairs single-pass catalog scanning (`catalog.py`, `discovery.py`) and tiered search indexing (`indexer.py`) with bounded `menubar_feed.py` snapshots, loopback token auth (`handler.py`, `server.py`, `lease.py`), packaged live UI (`workbench/ui/index.html`), and `cli.py` structured exit-code-2 JSON diagnostics. `macos/` delivers the zero-polling Swift 6 menu bar palette, native Settings window, 4 adaptive status icon styles, and SHA-256 verified dual App+CLI updater.
 - **Verification & hygiene gates:** `./scripts/check` validates schema parity, `?mode=ro` read-only real-host decoding, AST module/tier boundaries, zero hardcoded home paths, zero CSRF leaks, Python regressions, and `[5b/5]` Swift XCTest (`swift test`) alongside isolated sandbox suites (`control_sync_verify.py`, `workbench_verify.py`, and `menubar_verify.py` via `cua-driver`).
 
+Non-obvious operating system, IPC, and concurrency constraints live in [DECISIONS.md](DECISIONS.md), while [.comment-ratchet.json](../.comment-ratchet.json) keeps ordinary source comments at zero.
+
 ## Open questions and risks
 
 1. **Forked session naming (`FORK_NEW_SESSION`).** Resolved by appending ` (Fork)` to forked titles while recording top-level `parent_references` on Antigravity and `attached_thread_parent_id` on Codex with `nesting_depth = 0`.

@@ -157,7 +157,6 @@ class IndexerScalabilityTest(unittest.TestCase):
             ensure_agy_summaries_db_schema(sconn)
             ensure_codex_state_db_schema(cconn)
             for s_idx in range(40):
-                # Put sess-37 at an old timestamp so it is NOT in the top-5 newest works.
                 rank = 1 if s_idx == 37 else (s_idx + 2)
                 dt = base_dt + timedelta(hours=rank)
                 ts_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -362,7 +361,6 @@ class IndexerScalabilityTest(unittest.TestCase):
             ensure_agy_summaries_db_schema(sconn)
             sconn.close()
 
-        # 1) WAL-only updates without touching main .db must invalidate both _agy_meta_cache & _turn_cache
         cid_wal = str(uuid.uuid4())
         conv_wal_db = self.paths.agy_data_dir / "conversations" / f"{cid_wal}.db"
         conv_wal_db.parent.mkdir(parents=True, exist_ok=True)
@@ -432,7 +430,6 @@ class IndexerScalabilityTest(unittest.TestCase):
         finally:
             live_conn.close()
 
-        # 2) Corrupt trajectory_metadata_blob tolerated in both catalog and store_catalog
         cid_bad = str(uuid.uuid4())
         with contextlib.closing(sqlite3.connect(str(sum_db))) as sconn:
             _write_agy_session(self.paths, sconn, ws_main, cid_bad, "Corrupt Blob Conv", "u bad", "a bad", "2026-11-11T01:00:00Z", 1762822800.0)
@@ -447,7 +444,6 @@ class IndexerScalabilityTest(unittest.TestCase):
         discovered_bad = discover_agy_entries(self.paths, DefaultHostTransport(self.paths), ProjectRegistry(self.paths).resolve_readonly_binding(ws_main))
         self.assertIn(cid_bad, {e["session_id"] for e in discovered_bad})
 
-        # 3) Non-canonical cursor workspace_uri trailing slash matches normalized bucket
         cursors_dir = self.paths.sync_state_dir / "cursors"
         cursors_dir.mkdir(parents=True, exist_ok=True)
         (cursors_dir / "slash-cursor.json").write_text(
@@ -455,7 +451,6 @@ class IndexerScalabilityTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-        # 4) Unmapped project_id with empty workspace_uris falls through to conv DB; known Archive pid is skipped unopened
         arch_pid = "known-archive-pid"
         proj_dir = self.paths.gemini_config_dir / "projects"
         proj_dir.mkdir(parents=True, exist_ok=True)
@@ -500,7 +495,6 @@ class IndexerScalabilityTest(unittest.TestCase):
         self.assertEqual(snap0.works[0].turns, ())
         wid = snap0.works[0].work_id
 
-        # Concurrent get_work calls on same unhydrated work must both return hydrated turns (never empty tuple)
         barrier = threading.Barrier(2)
         orig_hydrate = indexer._hydrate_spec_card
 
@@ -520,7 +514,6 @@ class IndexerScalabilityTest(unittest.TestCase):
         self.assertEqual(len(w1.turns), 1)
         self.assertEqual(len(w2.turns), 1)
 
-        # Mid-flight generation bump during hydration must retry and return fresh hydrated turns
         indexer.get_snapshot(refresh=True)
         bumped = False
         orig_hydrate_2 = indexer._hydrate_spec_card

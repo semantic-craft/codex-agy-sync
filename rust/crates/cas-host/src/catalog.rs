@@ -1118,7 +1118,6 @@ pub fn discover_agy_entries(
         }
     }
 
-    // Also inspect `conversations/*.db` for sessions not indexed in `conversation_summaries.db`.
     let conv_dir = paths.agy_data_dir.join("conversations");
     if let Ok(rd) = fs::read_dir(&conv_dir) {
         let mut db_paths: Vec<PathBuf> = rd
@@ -1404,7 +1403,6 @@ pub fn discover_codex_entries(
         );
     }
 
-    // Scan filesystem rollouts not yet listed in `state_5.sqlite` (never archived_sessions).
     for rp in walk_codex_session_rollouts(&paths.codex_home_dir.join("sessions")) {
         let Some((tid_str, cwd, first_title, first_ts)) = read_rollout_session_meta(&rp) else {
             continue;
@@ -1412,7 +1410,6 @@ pub fn discover_codex_entries(
         if by_id.contains_key(&tid_str) {
             continue;
         }
-        // Skip explicitly archived threads in state_5.sqlite.
         if tbls
             .codex_threads
             .get(&tid_str)

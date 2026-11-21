@@ -323,7 +323,6 @@ fn state_machine_initial_append_divergence_and_busy_lock() {
     let codex_ledger =
         TrajectoryLedger::from_events(ws_path, ws_uri.clone(), &codex_events, None, false);
 
-    // Busy lock defers safely
     let busy_locks = HostLockSnapshot {
         agy_presence_locked: true,
         ..HostLockSnapshot::default()
@@ -341,7 +340,6 @@ fn state_machine_initial_append_divergence_and_busy_lock() {
     .unwrap();
     assert!(matches!(tr_busy, CursorTransition::DeferredBusy { .. }));
 
-    // Offline clean lock yields InitialImport
     let clean_locks = HostLockSnapshot::default();
     let tr_init = CursorForkStateMachine::evaluate(
         None,
@@ -363,7 +361,6 @@ fn state_machine_initial_append_divergence_and_busy_lock() {
         }
     ));
 
-    // Seed fingerprint & Receipt JSON parity + DAG chain tip resolution
     let (turns, digest) = ledger_seed_fingerprint(&codex_ledger);
     assert_eq!(turns, 1);
     assert_eq!(digest.len(), 64);
@@ -396,7 +393,6 @@ fn state_machine_initial_append_divergence_and_busy_lock() {
     assert_eq!(roundtrip.source_id, "codex-1");
     assert_eq!(roundtrip.status_str(), "ready");
 
-    // Verify invalid state combination fails TryFrom
     assert!(serde_json::from_str::<SyncReceipt>(
         r#"{"workspace":"w","source_host":"codex","source_id":"s","source_digest":"d","target_host":"antigravity","title":"t","status":"ready","staging_path":"p","target_id":null}"#
     ).is_err());

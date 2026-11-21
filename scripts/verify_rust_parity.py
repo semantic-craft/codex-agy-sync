@@ -262,7 +262,6 @@ def hydrate_sandbox(base_dir: Path, name: str, manifest: dict[str, Any], *, pair
     ws_str = str(ws_path)
     sess = manifest["sessions"]
 
-    # Hydrate Codex rollouts from golden fixtures
     rollout_dir = codex / "sessions" / "2026" / "11" / "17"
     rollout_dir.mkdir(parents=True, exist_ok=True)
 
@@ -330,7 +329,6 @@ def hydrate_sandbox(base_dir: Path, name: str, manifest: dict[str, Any], *, pair
     cconn.commit()
     cconn.close()
 
-    # Deterministic mtime ordering matching updated_at above
     os.utime(c1_path, (now_sec - 1200, now_sec - 1200))
     os.utime(c3_path, (now_sec - 900, now_sec - 900))
     os.utime(c4_path, (now_sec - 1000, now_sec - 1000))
@@ -364,7 +362,6 @@ def hydrate_sandbox(base_dir: Path, name: str, manifest: dict[str, Any], *, pair
             encoding="utf-8",
         )
 
-    # Hydrate Antigravity parent + subagent sessions
     a1_id = sess["agy_completed_id"]
     _create_agy_db_fixture(
         sandbox, manifest, a1_id,
@@ -396,9 +393,9 @@ def start_mock_agy_server(sandbox: dict[str, Path], cid_str: str) -> tuple[socke
         + encode_bytes_field(8, encode_string_field(1, "Live Agy RPC question") + encode_string_field(2, "Live Agy RPC question"))
     )
     traj_bytes = encode_string_field(1, "rpc-traj-1") + encode_bytes_field(2, step_payload)
-    static_get_traj_resp = encode_bytes_field(1, traj_bytes) + encode_varint_field(2, 1)  # IDLE
+    static_get_traj_resp = encode_bytes_field(1, traj_bytes) + encode_varint_field(2, 1)
 
-    summary_bytes = encode_varint_field(5, 3)  # RUNNING=3 for cid_str in GetAllCascadeTrajectories
+    summary_bytes = encode_varint_field(5, 3)
     all_traj_entry = encode_string_field(1, cid_str) + encode_bytes_field(2, summary_bytes)
     all_traj_resp = encode_bytes_field(1, all_traj_entry)
 
@@ -688,9 +685,6 @@ def _strip_dynamic_receipt(r: dict[str, Any]) -> dict[str, Any]:
     out.pop("staging_path", None)
     out.pop("created_at_iso", None)
     out.pop("workspace", None)
-    # Note: source_digest and target_seed_text_digest embed workspace workdir paths when tool payloads
-    # reference `__WORKSPACE__`, so twin sandboxes (`py/` vs `rs/`) differ in path string only;
-    # same-workspace digests are verified separately against Python.
     out.pop("source_digest", None)
     out.pop("target_seed_text_digest", None)
     return out
@@ -713,17 +707,14 @@ def verify_all() -> dict[str, Any]:
         ws_py = str(py_sb["workspace"])
         ws_rs = str(rs_sb["workspace"])
 
-        # 0. Version parity
         py_ver = subprocess.run([str(PYTHON_BIN), "--version"], capture_output=True, text=True, check=True)
         rs_ver = subprocess.run([str(RUST_BIN), "--version"], capture_output=True, text=True, check=True)
         assert_eq("version_exit", py_ver.returncode, rs_ver.returncode)
         assert_eq("version_text", py_ver.stdout.strip(), rs_ver.stdout.strip())
         checks_passed.append("--version")
 
-        # 1. `pair` parity on unpaired twin sandboxes
         py_unp = hydrate_sandbox(artifacts_dir, "py-unpaired", manifest, paired=False)
         rs_unp = hydrate_sandbox(artifacts_dir, "rs-unpaired", manifest, paired=False)
-        # First verify sync without --auto-pair fails with unpaired_workspace (exit 2) on both!
         py_sync_unp = run_cli(PYTHON_BIN, py_unp, ["sync", "-w", str(py_unp["workspace"]), "--latest"])
         rs_sync_unp = run_cli(RUST_BIN, rs_unp, ["sync", "-w", str(rs_unp["workspace"]), "--latest"])
         assert_eq("unpaired_sync_exit", py_sync_unp.returncode, rs_sync_unp.returncode)
@@ -737,7 +728,6 @@ def verify_all() -> dict[str, Any]:
         assert_eq("pair_keys", sorted(py_pair.stdout_json().keys()), sorted(rs_pair.stdout_json().keys()))
         checks_passed.append("pair (+ unpaired_workspace exit 2)")
 
-        # 2. `status` & `status --include-subagents`
         for inc_flag in ([], ["--include-subagents"]):
             py_st = run_cli(PYTHON_BIN, py_sb, ["status", "-w", ws_py, *inc_flag])
             rs_st = run_cli(RUST_BIN, rs_sb, ["status", "-w", ws_rs, *inc_flag])
@@ -755,7 +745,6 @@ def verify_all() -> dict[str, Any]:
             assert_eq(f"status_sessions_{inc_flag}", py_sessions, rs_sessions)
         checks_passed.append("status (default & --include-subagents)")
 
-        # 3. `inspect` parity (Codex jsonl, Codex .jsonl.zst, Codex interrupted, Antigravity DB)
         for label, flag, sid in [
             ("inspect_codex_completed", "--codex-thread-id", sess["codex_completed_id"]),
             ("inspect_codex_zstd", "--codex-thread-id", sess["codex_zstd_id"]),
@@ -775,11 +764,9 @@ def verify_all() -> dict[str, Any]:
                 (pi["latest_watermark"]["turn_id"], pi["latest_watermark"]["last_agy_step_index"], pi["latest_watermark"]["last_codex_line_no"]),
                 (ri["latest_watermark"]["turn_id"], ri["latest_watermark"]["last_agy_step_index"], ri["latest_watermark"]["last_codex_line_no"]),
             )
-            # On identical workspace bytes, canonical SHA-256 boundary_digest must match Python byte-for-byte!
             assert_eq(f"{label}_same_ws_exact_payload", pi, r_same)
         checks_passed.append("inspect (offline_storage: jsonl, zstd, interrupted, agy)")
 
-        # 3b. `inspect --mode online_rpc` against live loopback mock servers (clean up hub_*.json after shutdown!)
         for sb, bin_p, tag in ((py_sb, PYTHON_BIN, "py"), (rs_sb, RUST_BIN, "rs")):
             srv, _, hub_p = start_mock_agy_server(sb, sess["agy_rpc_live_id"])
             try:
@@ -813,7 +800,6 @@ def verify_all() -> dict[str, Any]:
                     sock.unlink()
         checks_passed.append("inspect (online_rpc: HTTP Connect-RPC & AF_UNIX WebSocket)")
 
-        # 4. `menubar-feed` initial parity (hero must be interrupted_stopped!)
         py_mf = run_cli(PYTHON_BIN, py_sb, ["menubar-feed", "-w", ws_py, "--limit", "6"])
         rs_mf = run_cli(RUST_BIN, rs_sb, ["menubar-feed", "-w", ws_rs, "--limit", "6"])
         assert_eq("mf_exit", py_mf.returncode, rs_mf.returncode)
@@ -828,7 +814,6 @@ def verify_all() -> dict[str, Any]:
         )
         checks_passed.append("menubar-feed (initial hero + recent + zstd + subagent filter)")
 
-        # 5. `sync`: offline target daemon check -> online_rpc_unavailable (exit 2), then live mock target daemons!
         py_err_off = run_cli(PYTHON_BIN, py_sb, ["sync", "-w", ws_py, "--source-id", sess["codex_completed_id"]])
         rs_err_off = run_cli(RUST_BIN, rs_sb, ["sync", "-w", ws_rs, "--source-id", sess["codex_completed_id"]])
         assert_eq("sync_offline_target_exit", (2, 2), (py_err_off.returncode, rs_err_off.returncode))
@@ -840,7 +825,6 @@ def verify_all() -> dict[str, Any]:
         assert_eq("sync_int_err_exit", py_err_int.returncode, rs_err_int.returncode)
         assert_eq("sync_int_err_code", py_err_int.stderr_json()["error"], rs_err_int.stderr_json()["error"])
 
-        # Start live mock Agy + Codex servers for both sandboxes during live sync checks
         py_agy_srv, _, py_hub = start_mock_agy_server(py_sb, sess["agy_rpc_live_id"])
         rs_agy_srv, _, rs_hub = start_mock_agy_server(rs_sb, sess["agy_rpc_live_id"])
         py_ws_sock = short_sock_dir / f"spy-{os.getpid()}.sock"
@@ -853,7 +837,6 @@ def verify_all() -> dict[str, Any]:
             assert_eq("sync_int_ok_exit", (0, 0), (py_sync_int.returncode, rs_sync_int.returncode))
             assert_eq("sync_int_receipt", _strip_dynamic_receipt(py_sync_int.stdout_json()), _strip_dynamic_receipt(rs_sync_int.stdout_json()))
 
-            # Re-check menubar-feed after handing off the interrupted hero (disable live daemon probe for deterministic offline feed)
             py_hub.unlink(missing_ok=True)
             rs_hub.unlink(missing_ok=True)
             py_mf2 = run_cli(PYTHON_BIN, py_sb, ["menubar-feed", "-w", ws_py, "--limit", "6"])
@@ -865,7 +848,6 @@ def verify_all() -> dict[str, Any]:
                 [(x["session_id"], x["state"]) for x in rs_mf2.stdout_json()["recent"]],
             )
 
-            # `sync --latest -d agy_to_codex` on Agy completed session (uses live Codex WS mock)
             py_lat = run_cli(PYTHON_BIN, py_sb, ["sync", "-w", ws_py, "-d", "agy_to_codex", "--latest"], extra_env={"CODEX_APP_SERVER_SOCKET": str(py_ws_sock)})
             rs_lat = run_cli(RUST_BIN, rs_sb, ["sync", "-w", ws_rs, "-d", "agy_to_codex", "--latest"], extra_env={"CODEX_APP_SERVER_SOCKET": str(rs_ws_sock)})
             assert_eq("sync_latest_exit", (0, 0), ((py_lat.returncode, py_lat.stderr), (rs_lat.returncode, rs_lat.stderr)) if (py_lat.returncode != 0 or rs_lat.returncode != 0) else (0, 0))
@@ -873,13 +855,11 @@ def verify_all() -> dict[str, Any]:
             py_target_codex_id = py_lat.stdout_json()["target_id"]
             rs_target_codex_id = rs_lat.stdout_json()["target_id"]
 
-            # Idempotent re-run on already-handed source returns `no_op` (for `--source-id`) parity
             py_lat2 = run_cli(PYTHON_BIN, py_sb, ["sync", "-w", ws_py, "--source-id", sess["agy_completed_id"]], extra_env={"CODEX_APP_SERVER_SOCKET": str(py_ws_sock)})
             rs_lat2 = run_cli(RUST_BIN, rs_sb, ["sync", "-w", ws_rs, "--source-id", sess["agy_completed_id"]], extra_env={"CODEX_APP_SERVER_SOCKET": str(rs_ws_sock)})
             assert_eq("sync_noop_exit", (0, 0), (py_lat2.returncode, rs_lat2.returncode))
             assert_eq("sync_noop_status", py_lat2.stdout_json()["status"], rs_lat2.stdout_json()["status"])
 
-            # Advance both target codex rollouts by 1 completed turn, restore Agy mock hub for chain hop back to Agy!
             for sb, tid in ((py_sb, py_target_codex_id), (rs_sb, rs_target_codex_id)):
                 rp = next((sb["codex_home"] / "sessions").rglob(f"*{tid}.jsonl"))
                 extra = [
@@ -914,7 +894,6 @@ def verify_all() -> dict[str, Any]:
             py_ws_sock.unlink(missing_ok=True)
             rs_ws_sock.unlink(missing_ok=True)
 
-        # `--auto-pair` on unpaired sandbox with live Agy mock daemon
         py_ap = hydrate_sandbox(artifacts_dir, "py-autopair", manifest, paired=False)
         rs_ap = hydrate_sandbox(artifacts_dir, "rs-autopair", manifest, paired=False)
         py_ap_srv, _, py_ap_hub = start_mock_agy_server(py_ap, sess["agy_rpc_live_id"])
@@ -932,7 +911,6 @@ def verify_all() -> dict[str, Any]:
             rs_ap_srv.shutdown()
             rs_ap_srv.server_close()
 
-        # `--reconcile --dry-run` & `--reconcile` parity
         for sb in (py_sb, rs_sb):
             pdir = sb["sync_state"] / "handoffs"
             pdir.mkdir(parents=True, exist_ok=True)
@@ -964,7 +942,6 @@ def verify_all() -> dict[str, Any]:
         assert_eq("reconcile_exit", py_rec.returncode, rs_rec.returncode)
         assert_eq("reconcile_after", (py_rec.stdout_json()["total_pending_after"], len(py_rec.stdout_json()["cleared"])), (rs_rec.stdout_json()["total_pending_after"], len(rs_rec.stdout_json()["cleared"])))
 
-        # CLI argument validation error exit codes
         for bad_args in (
             ["sync", "-w", ws_py, "--dry-run"],
             ["sync", "-w", ws_py, "--reconcile", "--latest"],
@@ -980,7 +957,6 @@ def verify_all() -> dict[str, Any]:
 
         checks_passed.append("sync (--source-id, --include-interrupted, --latest, --chain, --auto-pair, --reconcile, exit 2 validation)")
 
-        # Cross-store compatibility: Rust reads target written by Python & Python reads target written by Rust!
         cross_from_py = run_cli(RUST_BIN, py_sb, ["inspect", "-w", ws_py, "--codex-thread-id", py_target_codex_id, "--mode", "offline_storage"])
         cross_from_rs = run_cli(PYTHON_BIN, rs_sb, ["inspect", "-w", ws_rs, "--codex-thread-id", rs_target_codex_id, "--mode", "offline_storage"])
         assert_eq("cross_py_rs_exit", (0, 0), (cross_from_py.returncode, cross_from_rs.returncode))

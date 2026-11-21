@@ -264,7 +264,6 @@ public enum UpdatePathGuard {
                         )
                         _ = CFPreferencesAppSynchronize(domain as CFString)
                         try? fileManager.removeItem(at: plistURL)
-                        // Re-delete after cfprefsd's 7.0s dirty-domain flush window.
                         Task.detached(priority: .utility) {
                             try? await Task.sleep(for: .seconds(8))
                             try? FileManager.default.removeItem(at: plistURL)

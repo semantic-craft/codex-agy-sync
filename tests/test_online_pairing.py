@@ -605,7 +605,6 @@ class TestOnlinePairingRpc(unittest.TestCase):
             proj = _decode_proto_fields(top[1][0][2])
             return proj[2][0][2].decode("utf-8")
 
-        # 1) Pre-existing colliding name skips basename directly and registers disambiguated parent candidate
         ws1 = self.root / "clone-one" / "shared-app"
         ws1.mkdir(parents=True)
         with _MockAgyServer(self.paths, "s-409-1") as srv1:
@@ -614,7 +613,6 @@ class TestOnlinePairingRpc(unittest.TestCase):
         self.assertEqual(_req_name(srv1.captured[0]["body"]), "shared-app (clone-one)")  # type: ignore[arg-type]
         self.assertEqual(json.loads((projects_dir / f"{pid1}.json").read_text(encoding="utf-8"))["name"], "shared-app (clone-one)")
 
-        # 2) HTTP 409 on candidate 1 (lookup None) retries with candidate 2 and returns project_id on 200
         ws2 = self.root / "clone-two" / "dup-repo"
         ws2.mkdir(parents=True)
         with _MockAgyServer(
@@ -625,7 +623,6 @@ class TestOnlinePairingRpc(unittest.TestCase):
         self.assertEqual([_req_name(r["body"]) for r in srv2.captured], ["dup-repo", "dup-repo (clone-two)"])  # type: ignore[arg-type]
         self.assertEqual(json.loads((projects_dir / f"{pid2}.json").read_text(encoding="utf-8"))["id"], pid2)
 
-        # 3) HTTP 409 when concurrent registration wrote the workspace project returns existing ID without extra retries
         ws3 = self.root / "clone-three" / "race-repo"
         ws3.mkdir(parents=True)
         concurrent_pid = str(uuid.uuid4())
@@ -647,7 +644,6 @@ class TestOnlinePairingRpc(unittest.TestCase):
         self.assertEqual(got_pid, concurrent_pid)
         self.assertEqual(len(srv3.captured), 1)
 
-        # 4) Exhausting all candidates with HTTP 409 raises OnlineRpcUnavailableError
         ws4 = self.root / "clone-four" / "always-conflict"
         ws4.mkdir(parents=True)
         with _MockAgyServer(self.paths, "s-409-4", status_code=409) as srv4:

@@ -196,7 +196,6 @@ impl WorkspaceLookup {
         if let Some(rec) = self.by_uri.get(ws_uri.as_str()) {
             return Some(rec.clone());
         }
-        // Fallback deterministic unpaired workspace record for sessions discovered dynamically.
         let agy_pid =
             AgyProjectId::parse(&deterministic_uuid("agy-project", ws_uri.as_str())).ok()?;
         let codex_pid =
@@ -430,7 +429,6 @@ fn collect_agy_candidates(
         );
     }
 
-    // Also include `conversations/*.db` not present in `conversation_summaries.db`.
     let conv_dir = paths.agy_data_dir.join("conversations");
     if let Ok(rd) = fs::read_dir(&conv_dir) {
         let mut dbs: Vec<PathBuf> = rd
@@ -606,7 +604,6 @@ fn collect_codex_candidates(
         );
     }
 
-    // Scan orphan rollout files not listed in `state_5.sqlite`.
     let sessions_root = paths.codex_home_dir.join("sessions");
     if sessions_root.is_dir() {
         let mut stack = vec![sessions_root];

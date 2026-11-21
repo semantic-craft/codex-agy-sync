@@ -500,7 +500,6 @@ def _teardown_suite(ctx: dict[str, Any]) -> dict[str, Any]:
                         receipt["killed_pids"].append(pid)
             if sig == signal.SIGTERM and receipt["killed_pids"]:
                 time.sleep(0.5)
-        # Reset TCC grants while QA app bundle still exists and is registered (-10814 otherwise).
         receipt["tcc_reset"] = run_cmd(["tccutil", "reset", "All", QA_BUNDLE_ID], check=False).returncode == 0
         if Path(LSREGISTER).is_file():
             receipt["unregistered"] = run_cmd([LSREGISTER, "-u", str(app_bundle)], check=False).returncode == 0

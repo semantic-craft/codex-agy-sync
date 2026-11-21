@@ -466,7 +466,6 @@ if [[ "$INSTALL" -eq 1 ]]; then
     if [[ -d "$LEGACY_BUNDLE" ]]; then
         pkill -f "$LEGACY_BUNDLE/Contents/MacOS/$LEGACY_NAME" >/dev/null 2>&1 || true
         if [[ "$SKIP_LSREGISTER" != "1" ]]; then
-            # Reset TCC entries while the legacy bundle is still registered in LaunchServices (-10814 otherwise).
             tccutil reset All "$LEGACY_BUNDLE_ID" >/dev/null 2>&1 || true
             if [[ -x "$LSREGISTER" ]]; then
                 "$LSREGISTER" -u "$LEGACY_BUNDLE" >/dev/null 2>&1 || true

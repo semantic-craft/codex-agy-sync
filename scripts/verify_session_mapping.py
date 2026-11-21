@@ -8,11 +8,14 @@ import sqlite3
 import sys
 import time
 
-_REPO_SRC = pathlib.Path(__file__).resolve().parent.parent / "src"
-if str(_REPO_SRC) not in sys.path:
-    sys.path.insert(0, str(_REPO_SRC))
+_SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
+_REPO_SRC = _SCRIPTS_DIR.parent / "src"
+for _p in (_SCRIPTS_DIR, _REPO_SRC):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from codex_agy_sync._wire import encode_varint_field, iter_wire_fields, read_varint
+from extract_schema import TARGET_DESCRIPTOR_FILES, extract_file_descriptors, resolve_language_server_bin
 
 FORBIDDEN_AGY_PROJECT_BUCKETS = {"", "default-cli-project", "outside-of-project", "null", "none"}
 
@@ -734,7 +737,6 @@ def validate_negative_controls(schema: dict, sidebar_rules: dict, agy_report: di
     decode_protobuf(bad_buf, "exa.cortex_pb.CortexTrajectoryMetadata", schema, unknowns)
     caught_unknown_wire = any("9999" in u for u in unknowns)
 
-    # Control 2: Mutate the real decoded Antigravity session's project_binding to a CLI bucket / source 17 and verify evaluate_agy_sidebar_visibility rejects both
     mutated_agy_bucket = {**agy_report["project_binding"], "project_id": "default-cli-project"}
     mutated_agy_source = {**agy_report["project_binding"], "trajectory_source_enum": 17, "summary_source_col": "CORTEX_TRAJECTORY_SOURCE_CLI"}
     res_bucket = evaluate_agy_sidebar_visibility(mutated_agy_bucket, sidebar_rules)
@@ -746,7 +748,6 @@ def validate_negative_controls(schema: dict, sidebar_rules: dict, agy_report: di
         and res_source["sidebar_visible_predicate_met"] is False
     )
 
-    # Control 3: Mutate the real decoded Codex session's project_binding (empty preview, archived=1, or empty cwd)
     mutated_codex_preview = {**codex_report["project_binding"], "preview_non_empty": False}
     mutated_codex_archived = {**codex_report["project_binding"], "archived": 1}
     mutated_codex_cwd = {**codex_report["project_binding"], "cwd": ""}
@@ -775,6 +776,27 @@ def validate_negative_controls(schema: dict, sidebar_rules: dict, agy_report: di
     }
 
 
+def _overlay_installed_binary_schema(schema: dict) -> dict:
+    try:
+        ls_descriptors = extract_file_descriptors(resolve_language_server_bin().read_bytes(), TARGET_DESCRIPTOR_FILES)
+    except (FileNotFoundError, OSError, RuntimeError):
+        return schema
+    merged_msgs = {k: {**v, "fields": dict(v["fields"])} for k, v in schema["messages"].items()}
+    merged_enums = {k: {**v, "values": dict(v["values"])} for k, v in schema["enums"].items()}
+    for fd in ls_descriptors.values():
+        for mname, md in fd["messages"].items():
+            if mname in merged_msgs:
+                merged_msgs[mname]["fields"].update({k: v for k, v in md["fields"].items() if k not in merged_msgs[mname]["fields"]})
+            else:
+                merged_msgs[mname] = {k: md[k] for k in ("name", "full_name", "is_map_entry", "oneofs", "fields")}
+        for ename, ed in fd["enums"].items():
+            if ename in merged_enums:
+                merged_enums[ename]["values"].update(ed["values"])
+            else:
+                merged_enums[ename] = ed
+    return {**schema, "messages": merged_msgs, "enums": merged_enums}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Read-only verifier for Antigravity 2.30+ and Codex 0.166+ sessions")
     parser.add_argument("--agy-id", default=os.environ.get("AGY_CONVERSATION_ID", ""), help="Antigravity cascade_id")
@@ -797,6 +819,10 @@ def main():
 
     agy_id = args.agy_id or select_default_agy_conversation(agy_root)
     agy_report = decode_antigravity_session(agy_root, config_root, agy_id, schema, sidebar_rules)
+    if agy_report["counts"]["unknown_wire_fields_count"] != 0:
+        live_schema = _overlay_installed_binary_schema(schema)
+        if live_schema is not schema:
+            agy_report = decode_antigravity_session(agy_root, config_root, agy_id, live_schema, sidebar_rules)
 
     preferred_cwd = ""
     uris = agy_report["project_binding"].get("workspace_uris", [])

@@ -629,7 +629,6 @@ const fn hex_val(b: u8) -> Option<u8> {
 }
 
 fn strip_trailing_line_annotation(s: &str) -> &str {
-    // Matches regex `\s+\((?:lines?|L)\b[^)]*\)\s*$` (case-insensitive)
     let trimmed = s.trim_end();
     if !trimmed.ends_with(')') {
         return s;

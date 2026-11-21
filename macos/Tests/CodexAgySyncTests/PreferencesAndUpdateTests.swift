@@ -258,12 +258,9 @@ final class PreferencesAndUpdateTests: XCTestCase {
 
         XCTAssertGreaterThan(opaqueCount, 60, "Forward progress icon rendered too few pixels")
 
-        // NSBitmapImageRep.colorAt(x:y:) uses top-down Y (0 = top, 35 = bottom).
-        // Unflipped point (14.6, 3.4) maps to pixel x ≈ 29, y ≈ 36 - 7 = 29.
         let dotCenterAlpha = dotRep.colorAt(x: 29, y: 29)?.alphaComponent ?? 0
         XCTAssertGreaterThan(dotCenterAlpha, 0.85, "Attention dot missing at bottom-right")
 
-        // Halo at radius ~3.0pt from (14.6, 3.4), e.g. point (11.7, 3.4) -> pixel x = 23, y = 29.
         let haloAlpha = dotRep.colorAt(x: 23, y: 29)?.alphaComponent ?? 1.0
         XCTAssertLessThan(haloAlpha, 0.15, "Clear halo not cut around dot")
     }
