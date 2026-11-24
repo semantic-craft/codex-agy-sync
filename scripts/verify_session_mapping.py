@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -100,7 +101,7 @@ def decode_protobuf(buf: bytes, msg_name: str, schema: dict, unknown_log: list, 
 def open_sqlite_readonly(path: pathlib.Path):
     if not path.is_file():
         raise FileNotFoundError(f"SQLite file not found: {path}")
-    uri = f"file:{path}?mode=ro"
+    uri = f"{path.resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.execute("PRAGMA query_only=ON;")
     return conn
@@ -232,20 +233,22 @@ def select_default_agy_conversation(agy_root: pathlib.Path) -> str:
 def select_default_codex_thread(codex_root: pathlib.Path, preferred_cwd: str = "") -> str:
     state_db = codex_root / "state_5.sqlite"
     conn = open_sqlite_readonly(state_db)
-    rows = conn.execute(
-        """
-        SELECT id, rollout_path, cwd, project_id
-        FROM threads
-        WHERE archived = 0
-          AND preview <> ''
-          AND cwd <> ''
-        ORDER BY CASE WHEN cwd = ? THEN 0 ELSE 1 END,
-                 recency_at_ms DESC
-        LIMIT 120
-        """,
-        (preferred_cwd,),
-    ).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, rollout_path, cwd, project_id
+            FROM threads
+            WHERE archived = 0
+              AND preview <> ''
+              AND cwd <> ''
+            ORDER BY CASE WHEN cwd = ? THEN 0 ELSE 1 END,
+                     recency_at_ms DESC
+            LIMIT 120
+            """,
+            (preferred_cwd,),
+        ).fetchall()
+    finally:
+        conn.close()
     best_tid = None
     best_score = -1
     for tid, rpath, cwd, _ in rows:
@@ -797,11 +800,150 @@ def _overlay_installed_binary_schema(schema: dict) -> dict:
     return {**schema, "messages": merged_msgs, "enums": merged_enums}
 
 
+def seed_ci_sandbox(
+    sandbox_root: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, str, str]:
+    from codex_agy_sync import (
+        AgyGuiSafeSource,
+        AssistantTextEvent,
+        CascadeId,
+        CheckpointEvent,
+        CodexThreadId,
+        DefaultHostTransport,
+        EventOriginAnchor,
+        HostEnvironmentPaths,
+        HostKind,
+        ReadFilePayload,
+        RunCommandPayload,
+        SyncBridge,
+        SystemEvent,
+        ThinkingEvent,
+        ToolCallEvent,
+        ToolCallId,
+        ToolResultEvent,
+        TrajectoryLedger,
+        TransportMode,
+        TurnId,
+        UserInputEvent,
+    )
+
+    workspace_dir = sandbox_root / "workspace"
+    config_root = sandbox_root / "gemini-config"
+    agy_root = sandbox_root / "agy-data"
+    codex_root = sandbox_root / "codex-home"
+    sync_state_dir = sandbox_root / "sync-state"
+    for d in (workspace_dir, config_root, agy_root, codex_root, sync_state_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    readme = workspace_dir / "README.md"
+    readme.write_text("# CI Sandbox Workspace\n", encoding="utf-8")
+
+    paths = HostEnvironmentPaths(
+        gemini_config_dir=config_root,
+        agy_data_dir=agy_root,
+        codex_home_dir=codex_root,
+        sync_state_dir=sync_state_dir,
+    )
+    bridge = SyncBridge(paths=paths)
+    transport = DefaultHostTransport(paths)
+    binding = bridge.pair_workspace(workspace_dir)
+    locks = bridge.guard.probe_locks(None, None)
+
+    events = []
+    for turn_idx in range(1, 6):
+        anchor = EventOriginAnchor(
+            origin_host=HostKind.ANTIGRAVITY,
+            turn_id=TurnId(f"ci-turn-{turn_idx}"),
+            timestamp_iso=f"2026-11-23T12:{turn_idx:02d}:00Z",
+        )
+        call_id = ToolCallId(f"ci-call-{turn_idx}")
+        if turn_idx % 2 == 1:
+            payload = ReadFilePayload(kind="read_file", path=str(readme), start_line=1, end_line=5)
+            tool_name = "read_file"
+            tool_summary = "Read workspace README"
+        else:
+            payload = RunCommandPayload(kind="run_command", command_line="echo ok", cwd=str(workspace_dir), exit_code=0)
+            tool_name = "run_command"
+            tool_summary = "Run verification echo"
+        events.extend(
+            [
+                UserInputEvent(kind="user_input", anchor=anchor, query_text=f"Verify turn {turn_idx} mapping"),
+                ThinkingEvent(kind="thinking", anchor=anchor, summary_text=f"Reasoning for turn {turn_idx}"),
+                ToolCallEvent(
+                    kind="tool_call",
+                    anchor=anchor,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    tool_summary=tool_summary,
+                    payload=payload,
+                ),
+                ToolResultEvent(
+                    kind="tool_result",
+                    anchor=anchor,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    output_text="ok",
+                    is_error=False,
+                    payload=payload,
+                ),
+                AssistantTextEvent(kind="assistant_text", anchor=anchor, text=f"Completed turn {turn_idx}."),
+            ]
+        )
+    last_anchor = EventOriginAnchor(
+        origin_host=HostKind.ANTIGRAVITY,
+        turn_id=TurnId("ci-turn-5"),
+        timestamp_iso="2026-11-23T12:06:00Z",
+    )
+    events.append(
+        CheckpointEvent(
+            kind="checkpoint",
+            anchor=last_anchor,
+            checkpoint_index=1,
+            user_intent="Verify bidirectional schema mapping",
+            session_summary="Seeded realistic multi-turn session for CI verification.",
+            code_change_summary="None",
+            conversation_title="CI Sandbox Session",
+        )
+    )
+    events.append(
+        SystemEvent(
+            kind="system_message",
+            anchor=last_anchor,
+            event_type="info",
+            message_text="CI sandbox verification checkpoint recorded.",
+        )
+    )
+
+    ledger = TrajectoryLedger.from_events(
+        binding.workspace_path,
+        binding.workspace_uri,
+        events,
+        explicit_title_override="CI Sandbox Session",
+    )
+    cascade_id = CascadeId("00000000-0000-4000-8000-00000000c101")
+    thread_id = CodexThreadId("01960000-0000-7000-8000-00000000c102")
+    transport.apply_to_agy(
+        binding,
+        cascade_id,
+        events,
+        ledger,
+        locks,
+        TransportMode.OFFLINE_STORAGE,
+        source_tag=AgyGuiSafeSource.UNSPECIFIED,
+    )
+    transport.apply_to_codex(binding, thread_id, events, ledger, locks, TransportMode.OFFLINE_STORAGE)
+    return agy_root, config_root, codex_root, str(cascade_id), str(thread_id)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Read-only verifier for Antigravity 2.30+ and Codex 0.166+ sessions")
-    parser.add_argument("--agy-id", default=os.environ.get("AGY_CONVERSATION_ID", ""), help="Antigravity cascade_id")
-    parser.add_argument("--codex-id", default=os.environ.get("CODEX_THREAD_ID", ""), help="Codex thread_id")
+    parser.add_argument("--agy-id", default="", help="Antigravity cascade_id")
+    parser.add_argument("--codex-id", default="", help="Codex thread_id")
     parser.add_argument("--output", default="", help="Optional path to write JSON report")
+    parser.add_argument(
+        "--ci-sandbox",
+        action="store_true",
+        help="Seed an isolated AGY+Codex sandbox under out/ and verify read-only decoding without host DBs",
+    )
     args = parser.parse_args()
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
@@ -812,53 +954,68 @@ def main():
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     sidebar_rules = json.loads(rules_path.read_text(encoding="utf-8"))
 
-    home = pathlib.Path.home()
-    agy_root = pathlib.Path(os.environ.get("ANTIGRAVITY_DATA_DIR", str(home / ".gemini" / "antigravity")))
-    config_root = pathlib.Path(os.environ.get("GEMINI_CONFIG_DIR", str(home / ".gemini" / "config")))
-    codex_root = pathlib.Path(os.environ.get("CODEX_HOME", str(home / ".codex")))
+    ci_sandbox_dir: pathlib.Path | None = None
+    try:
+        if args.ci_sandbox:
+            ci_sandbox_dir = repo_root / "out" / f"ci-session-sandbox-{os.getpid()}"
+            if ci_sandbox_dir.exists():
+                shutil.rmtree(ci_sandbox_dir)
+            agy_root, config_root, codex_root, seeded_agy_id, seeded_codex_id = seed_ci_sandbox(ci_sandbox_dir)
+            agy_id = seeded_agy_id
+            codex_id = seeded_codex_id
+        else:
+            home = pathlib.Path.home()
+            agy_root = pathlib.Path(os.environ.get("ANTIGRAVITY_DATA_DIR", str(home / ".gemini" / "antigravity")))
+            config_root = pathlib.Path(os.environ.get("GEMINI_CONFIG_DIR", str(home / ".gemini" / "config")))
+            codex_root = pathlib.Path(os.environ.get("CODEX_HOME", str(home / ".codex")))
+            agy_id = args.agy_id or os.environ.get("AGY_CONVERSATION_ID", "") or select_default_agy_conversation(agy_root)
+            codex_id = args.codex_id or os.environ.get("CODEX_THREAD_ID", "")
 
-    agy_id = args.agy_id or select_default_agy_conversation(agy_root)
-    agy_report = decode_antigravity_session(agy_root, config_root, agy_id, schema, sidebar_rules)
-    if agy_report["counts"]["unknown_wire_fields_count"] != 0:
-        live_schema = _overlay_installed_binary_schema(schema)
-        if live_schema is not schema:
-            agy_report = decode_antigravity_session(agy_root, config_root, agy_id, live_schema, sidebar_rules)
+        agy_report = decode_antigravity_session(agy_root, config_root, agy_id, schema, sidebar_rules)
+        if not args.ci_sandbox and agy_report["counts"]["unknown_wire_fields_count"] != 0:
+            live_schema = _overlay_installed_binary_schema(schema)
+            if live_schema is not schema:
+                agy_report = decode_antigravity_session(agy_root, config_root, agy_id, live_schema, sidebar_rules)
 
-    preferred_cwd = ""
-    uris = agy_report["project_binding"].get("workspace_uris", [])
-    if uris and uris[0].startswith("file://"):
-        preferred_cwd = uris[0][len("file://") :]
+        preferred_cwd = ""
+        uris = agy_report["project_binding"].get("workspace_uris", [])
+        if uris and uris[0].startswith("file://"):
+            preferred_cwd = uris[0][len("file://") :]
 
-    codex_id = args.codex_id or select_default_codex_thread(codex_root, preferred_cwd)
-    codex_report = decode_codex_session(codex_root, codex_id, sidebar_rules)
+        if not codex_id:
+            codex_id = select_default_codex_thread(codex_root, preferred_cwd)
+        codex_report = decode_codex_session(codex_root, codex_id, sidebar_rules)
 
-    negative_controls = validate_negative_controls(schema, sidebar_rules, agy_report, codex_report)
+        negative_controls = validate_negative_controls(schema, sidebar_rules, agy_report, codex_report)
 
-    if agy_report["counts"]["unknown_wire_fields_count"] != 0:
-        raise RuntimeError(
-            f"Lossless wire check failed: unknown wire fields found: {agy_report['unknown_wire_fields']}"
-        )
-    if not agy_report["readonly_integrity"]["conv_db_unchanged"] or not agy_report["readonly_integrity"]["summaries_db_unchanged"]:
-        raise RuntimeError("Read-only violation detected on Antigravity SQLite files!")
-    if not codex_report["readonly_integrity"]["state_5_sqlite_unchanged"]:
-        raise RuntimeError("Read-only violation detected on Codex state_5.sqlite!")
+        if agy_report["counts"]["unknown_wire_fields_count"] != 0:
+            raise RuntimeError(
+                f"Lossless wire check failed: unknown wire fields found: {agy_report['unknown_wire_fields']}"
+            )
+        if not agy_report["readonly_integrity"]["conv_db_unchanged"] or not agy_report["readonly_integrity"]["summaries_db_unchanged"]:
+            raise RuntimeError("Read-only violation detected on Antigravity SQLite files!")
+        if not codex_report["readonly_integrity"]["state_5_sqlite_unchanged"]:
+            raise RuntimeError("Read-only violation detected on Codex state_5.sqlite!")
 
-    full_report = {
-        "status": "VERIFIED",
-        "schema_version": schema["schema_version"],
-        "negative_controls": negative_controls,
-        "antigravity_session": agy_report,
-        "codex_session": codex_report,
-        "canonical_tool_mapping": CANONICAL_TOOL_MAPPING,
-        "bidirectional_field_mapping_matrix": build_bidirectional_mapping_matrix(),
-    }
+        full_report = {
+            "status": "VERIFIED",
+            "schema_version": schema["schema_version"],
+            "negative_controls": negative_controls,
+            "antigravity_session": agy_report,
+            "codex_session": codex_report,
+            "canonical_tool_mapping": CANONICAL_TOOL_MAPPING,
+            "bidirectional_field_mapping_matrix": build_bidirectional_mapping_matrix(),
+        }
 
-    if args.output:
-        out_path = pathlib.Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(full_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        if args.output:
+            out_path = pathlib.Path(args.output)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(full_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    print(json.dumps(full_report, indent=2, ensure_ascii=False))
+        print(json.dumps(full_report, indent=2, ensure_ascii=False))
+    finally:
+        if ci_sandbox_dir is not None and ci_sandbox_dir.exists():
+            shutil.rmtree(ci_sandbox_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
