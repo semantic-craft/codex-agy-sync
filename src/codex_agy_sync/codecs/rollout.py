@@ -124,6 +124,39 @@ def _zstd_error_types(backend: tuple[str, Any] | None) -> tuple[type[BaseExcepti
     return tuple(errs)
 
 
+def _iter_zstandard_chunks(fh: io.BufferedReader | io.BytesIO, mod: Any) -> Iterator[bytes]:
+    dobj = mod.ZstdDecompressor().decompressobj(read_across_frames=True)
+    saw_bytes = False
+    while chunk := fh.read(65536):
+        saw_bytes = True
+        out = dobj.decompress(chunk)
+        if out:
+            yield out
+    tail = dobj.flush()
+    if tail:
+        yield tail
+    if not saw_bytes or not dobj.eof:
+        raise ValueError("Invalid or truncated zstd rollout stream: premature EOF")
+
+
+def _iter_chunked_lf_lines(chunks: Iterable[bytes]) -> Iterator[CodexRawRolloutLine]:
+    buf = b""
+    line_no = 0
+    for chunk in chunks:
+        buf += chunk
+        while (nl := buf.find(b"\n")) != -1:
+            line_no += 1
+            ln = buf[:nl].decode("utf-8", errors="replace")
+            buf = buf[nl + 1 :]
+            if ln.strip():
+                yield CodexRawRolloutLine(line_no=RolloutLineNo(line_no), raw_json=ln)
+    if buf:
+        line_no += 1
+        ln = buf.decode("utf-8", errors="replace")
+        if ln.strip():
+            yield CodexRawRolloutLine(line_no=RolloutLineNo(line_no), raw_json=ln)
+
+
 def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
     """Decompress zstd-compressed Codex rollout bytes into UTF-8 text."""
     if not raw_bytes.startswith(_ZSTD_MAGIC):
@@ -135,8 +168,7 @@ def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
             if kind == "stdlib":
                 data = mod.decompress(raw_bytes)
             else:
-                with mod.ZstdDecompressor().stream_reader(io.BytesIO(raw_bytes), read_across_frames=True) as zr:
-                    data = zr.read()
+                data = b"".join(_iter_zstandard_chunks(io.BytesIO(raw_bytes), mod))
             return data.decode("utf-8", errors="replace")
         proc = subprocess.run(["zstd", "-d", "-c"], input=raw_bytes, capture_output=True, check=True)
         return proc.stdout.decode("utf-8", errors="replace")
@@ -179,12 +211,8 @@ def iter_codex_rollout_lines(path: Path) -> Iterator[CodexRawRolloutLine]:
                 yield from _iter_binary_lf_lines(zfh)
             return
         if backend is not None and backend[0] == "zstandard":
-            with (
-                path.open("rb") as fh,
-                backend[1].ZstdDecompressor().stream_reader(fh, read_across_frames=True) as zr,
-                io.BufferedReader(zr) as br,
-            ):
-                yield from _iter_binary_lf_lines(br)
+            with path.open("rb") as fh:
+                yield from _iter_chunked_lf_lines(_iter_zstandard_chunks(fh, backend[1]))
             return
     except _zstd_error_types(backend) as exc:
         raise ValueError(f"Invalid or truncated zstd rollout stream: {exc}") from exc
