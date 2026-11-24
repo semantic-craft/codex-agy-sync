@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import compression.zstd as zstd
 import contextlib
 import fcntl
 import hashlib
@@ -27,8 +26,8 @@ from codex_agy_sync import (
 from codex_agy_sync.bridge.paths_and_locks import is_sqlite_shm_wal_locked, open_nonblocking_ex_flock
 from codex_agy_sync.cli import main as cli_main
 from codex_agy_sync.codecs import (
-    decode_agy_trajectory, decode_codex_rpc_thread_to_ledger, encode_agy_trajectory,
-    encode_codex_rollout, read_codex_rollout_lines,
+    compress_zstd_rollout_bytes, decode_agy_trajectory, decode_codex_rpc_thread_to_ledger,
+    encode_agy_trajectory, encode_codex_rollout, read_codex_rollout_lines,
 )
 from codex_agy_sync.codecs.tool_payloads import decode_unified_diff_block, encode_unified_diff_block
 from tests._helpers import BridgeSandboxBase
@@ -191,7 +190,7 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         zst_dir = self.paths.codex_home_dir / "sessions" / "2026" / "11" / "12"
         zst_dir.mkdir(parents=True, exist_ok=True)
         zst_path = zst_dir / f"rollout-2026-11-12T10-00-00-{tid}.jsonl.zst"
-        zst_path.write_bytes(zstd.compress(_render_rollout_jsonl(t1_ledger, tid).encode("utf-8")))
+        zst_path.write_bytes(compress_zstd_rollout_bytes(_render_rollout_jsonl(t1_ledger, tid)))
         with self.bridge.guard.acquire_offline_write_locks(HostKind.CODEX, None, tid):
             self.bridge.transport.write_codex_companion_stores(
                 binding, tid, zst_path, t1_ledger, self.bridge.resolve_session_lineage(binding, None, tid), None,

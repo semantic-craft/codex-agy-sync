@@ -199,8 +199,9 @@ def http_call(url: str, *, method: str = "GET", headers: dict[str, str] | None =
     req = urllib.request.Request(url, data=body, method=method)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             return int(resp.status), resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as err:
         return int(err.code), err.read().decode("utf-8", errors="replace")

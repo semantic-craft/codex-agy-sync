@@ -10,9 +10,9 @@ import unittest
 from codex_agy_sync.codecs import (
     AgyRawStepRow, CodexRawRolloutLine, CortexStepTypeCode, GeminiStepWireTag,
     STEP_TAG_TO_SPEC, STEP_WIRE_TABLE, TOOL_CODEC_TABLE,
-    decode_agy_trajectory, decode_codex_rollout, decode_codex_rpc_thread_to_ledger,
-    encode_agy_trajectory, encode_codex_rollout, read_codex_rollout_lines,
-    serialize_agy_chat_tool_arguments, serialize_tool_payload_arguments_json,
+    compress_zstd_rollout_bytes, decode_agy_trajectory, decode_codex_rollout,
+    decode_codex_rpc_thread_to_ledger, encode_agy_trajectory, encode_codex_rollout,
+    read_codex_rollout_lines, serialize_agy_chat_tool_arguments, serialize_tool_payload_arguments_json,
 )
 from codex_agy_sync._wire import (
     UnknownWireField, encode_bytes_field, encode_string_field, encode_varint,
@@ -673,11 +673,9 @@ class TestUnit2CodecsAndFidelity(unittest.TestCase):
             {"timestamp": "2026-11-10T09:01:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Ack both"}]}},
             {"timestamp": "2026-11-10T09:01:04Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t2"}},
         ]
-        jsonl_bytes = ("\n".join(json.dumps(r, ensure_ascii=False) for r in raw_records) + "\n").encode("utf-8")
+        jsonl_text = "\n".join(json.dumps(r, ensure_ascii=False) for r in raw_records) + "\n"
         zst_path = Path(self.temp_dir.name) / "rollout-test.jsonl.zst"
-        from compression import zstd  # type: ignore[attr-defined]
-
-        zst_path.write_bytes(zstd.compress(jsonl_bytes))
+        zst_path.write_bytes(compress_zstd_rollout_bytes(jsonl_text))
         lines = read_codex_rollout_lines(zst_path)
         self.assertEqual(len(lines), len(raw_records))
 

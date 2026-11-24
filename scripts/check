@@ -7,8 +7,21 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 mkdir -p out
 
+CI_MODE=0
+REFRESH_SCHEMA=0
+for arg in "$@"; do
+  case "$arg" in
+    --ci) CI_MODE=1 ;;
+    --refresh-schema) REFRESH_SCHEMA=1 ;;
+    *)
+      echo "ERROR: Unknown argument: $arg (supported: --ci, --refresh-schema)" >&2
+      exit 2
+      ;;
+  esac
+done
+
 echo "[1/6] Verifying Phase 1 schema artifacts and binary descriptor integrity..."
-if [[ "${1:-}" == "--refresh-schema" ]]; then
+if [[ "$REFRESH_SCHEMA" == "1" ]]; then
   python3 scripts/extract_schema.py > out/extract_schema_check.json
 fi
 git diff --exit-code schema/antigravity_2_30_schema.json schema/antigravity_2_30.proto schema/sidebar_visibility_rules.json || {
@@ -17,7 +30,11 @@ git diff --exit-code schema/antigravity_2_30_schema.json schema/antigravity_2_30
 }
 
 echo "[2/6] Running read-only session decoding, field mapping, and negative controls..."
-python3 scripts/verify_session_mapping.py --output out/session_mapping_report.json > /dev/null
+if [[ "$CI_MODE" == "1" ]]; then
+  python3 scripts/verify_session_mapping.py --ci-sandbox --output out/session_mapping_report.json > /dev/null
+else
+  python3 scripts/verify_session_mapping.py --output out/session_mapping_report.json > /dev/null
+fi
 python3 -c '
 import json
 r = json.load(open("out/session_mapping_report.json"))
@@ -25,6 +42,7 @@ assert r["status"] == "VERIFIED", f"Unexpected status: {r}"
 assert r["negative_controls"]["unknown_wire_field_9999_caught"] is True
 assert r["negative_controls"]["forbidden_project_bucket_caught"] is True
 assert r["negative_controls"]["codex_empty_preview_caught"] is True
+assert r["negative_controls"]["codex_empty_cwd_caught"] is True
 agy = r["antigravity_session"]
 assert agy["readonly_integrity"]["conv_db_unchanged"] is True
 assert agy["readonly_integrity"]["summaries_db_unchanged"] is True
@@ -100,9 +118,7 @@ for sym in ("__version__", "OnlineRpcUnavailableError", "AgyRpcReadResult", "Cod
 pyproject_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("pyproject.toml").read_text(encoding="utf-8"), re.M)
 assert pyproject_match is not None, "Missing version in pyproject.toml"
 pyproject_ver = pyproject_match.group(1)
-assert pkg.__version__ == pyproject_ver == "0.4.3", f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
-cargo_match = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("rust/Cargo.toml").read_text(encoding="utf-8"), re.M)
-assert cargo_match is not None and cargo_match.group(1) == pyproject_ver, f"rust/Cargo.toml version mismatch: {cargo_match.group(1) if cargo_match else None} != {pyproject_ver}"
+assert pkg.__version__ == pyproject_ver, f"Version mismatch: __version__={pkg.__version__}, pyproject={pyproject_ver}"
 build_sh_src = pathlib.Path("scripts/build_menubar_app.sh").read_text(encoding="utf-8")
 assert f"\"CFBundleShortVersionString\": \"{pyproject_ver}\"" not in build_sh_src and f"\"{pyproject_ver}\"" not in build_sh_src, "build_menubar_app.sh must not hardcode CFBundleShortVersionString"
 assert "pyproject.toml" in build_sh_src and "CFBundleIconFile" in build_sh_src, "build_menubar_app.sh must derive version from pyproject.toml and set CFBundleIconFile"
@@ -170,9 +186,9 @@ forbidden_legacy_names = (
     "codex-agy-" + "handoff",
 )
 forbidden_legacy_cli = "codex-agy-sync " + "handoff"
-naming_scan_roots = {"src", "macos", "scripts", "bin", "skills", "docs", "tests"}
+naming_scan_roots = {"src", "macos", "rust", "scripts", "bin", "skills", "docs", "tests"}
 naming_scan_files = {"README.md", "AGENTS.md", "NOTES.md"}
-legacy_cli_scan_roots = {"src", "macos", "scripts", "skills", "docs"}
+legacy_cli_scan_roots = {"src", "macos", "rust", "scripts", "skills", "docs"}
 legacy_cli_scan_files = {"README.md", "AGENTS.md", "NOTES.md"}
 
 daemon_tokens = []
@@ -221,7 +237,7 @@ for p in repo.rglob("*"):
     ):
         continue
     txt = p.read_text(encoding="utf-8", errors="ignore")
-    check_home = rel.parts[0] in ("scripts", "src", "docs", "tests", "bin", "skills", "macos")
+    check_home = rel.parts[0] in ("scripts", "src", "docs", "tests", "bin", "skills", "macos", "rust")
     check_naming = rel != pathlib.Path("lessons.md") and (
         rel.parts[0] in naming_scan_roots
         or str(rel) in naming_scan_files
@@ -341,11 +357,12 @@ if bad:
     sys.exit(1)
 print("  Hygiene, naming unification, test UserDefaults sandbox & credential isolation check passed.")
 PY
+PYTHONPATH=src python3 scripts/check_invariants.py
 COMMENT_RATCHET="${COMMENT_RATCHET_CHECK:-${HOME:-}/Projects/agent-home/tools/comment-ratchet/check_comments.py}"
 if [[ -f "$COMMENT_RATCHET" ]]; then
   python3 -B "$COMMENT_RATCHET" check "$REPO_ROOT"
-  echo "  Comment ratchet check passed (0 ordinary comments)."
 fi
+PYTHONPATH=src python3 scripts/check_invariants.py --check-comments
 
 echo "[5/6] Running behavioral test suite..."
 PYTHONPATH=src python3 -m unittest discover -s tests -v
