@@ -363,8 +363,13 @@ STAGE_DIR="$(mktemp -d "$SCRATCH_PATH/bundle-stage.XXXXXX")"
 DEST_STAGE="$OUTPUT_DIR/.${APP_NAME}.app.stage.$$"
 STAGE_APP="$STAGE_DIR/$APP_NAME.app"
 cleanup_stage() {
-    if [[ "$SKIP_LSREGISTER" != "1" && -x "$LSREGISTER" && -d "$STAGE_APP" ]]; then
-        "$LSREGISTER" -u "$STAGE_APP" >/dev/null 2>&1 || true
+    if [[ -x "$LSREGISTER" ]]; then
+        if [[ -d "$STAGE_APP" ]]; then
+            "$LSREGISTER" -u "$STAGE_APP" >/dev/null 2>&1 || true
+        fi
+        if [[ -d "$DEST_STAGE" ]]; then
+            "$LSREGISTER" -u "$DEST_STAGE" >/dev/null 2>&1 || true
+        fi
     fi
     rm -rf "$STAGE_DIR" "$DEST_STAGE"
 }
