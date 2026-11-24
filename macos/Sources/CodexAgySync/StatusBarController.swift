@@ -46,7 +46,8 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private let hostingController: NSHostingController<PopoverView>
     private let router = PopoverRouter()
     private var settingsController: SettingsWindowController?
-    private var hotKey: GlobalHotKey?
+    private let inputHub: DesktopInputHub
+    private var hasStarted: Bool = false
     private var keyMonitor: Any?
     private var lastShowAttentionDot: Bool?
     private var lastLanguage: ResolvedLanguage?
@@ -72,6 +73,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         )
         self.updateViewModel = resolvedUpdateVM
         self.environment = environment
+        self.inputHub = DesktopInputHub(environment: environment)
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         let router = self.router
@@ -116,10 +118,14 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             self?.openSettings(initialTab: tab)
         }
         self.updateViewModel.onPrepareForRelaunch = { [weak self] in
-            self?.hotKey?.unregister()
+            self?.inputHub.suspendForRelaunch()
         }
         self.updateViewModel.onRelaunchFailed = { [weak self] in
-            self?.applyHotKeyPreferences()
+            guard let self else { return }
+            self.inputHub.resumeAfterFailedRelaunch()
+            self.store.preferencesStore.setHotKeyRegistrationFailed(
+                self.inputHub.failedCarbonSlots.contains(.syncPanel)
+            )
         }
         if store.canMutateEnvironment == nil {
             store.canMutateEnvironment = { [weak resolvedUpdateVM] in
@@ -181,37 +187,43 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     private func applyHotKeyPreferences() {
-        guard environment["MENUBAR_DISABLE_GLOBAL_HOTKEY"] != "1", let hk = hotKey else {
+        guard hasStarted else { return }
+        if store.preferencesStore.isRecordingShortcut {
+            inputHub.setShortcutRecording(true)
             return
         }
-        if store.preferencesStore.isRecordingShortcut {
-            hk.suspend()
-        } else {
-            let ok = hk.reconfigure(store.preferencesStore.preferences.hotKey)
-            store.preferencesStore.setHotKeyRegistrationFailed(!ok)
+        registerSyncPanelHotKey()
+        if inputHub.isRecordingShortcut {
+            inputHub.setShortcutRecording(false)
+        }
+        store.preferencesStore.setHotKeyRegistrationFailed(
+            inputHub.failedCarbonSlots.contains(.syncPanel)
+        )
+    }
+
+    private func registerSyncPanelHotKey() {
+        inputHub.registerCarbonHotKey(
+            slot: .syncPanel,
+            featureSlot: .syncPanel,
+            shortcut: store.preferencesStore.preferences.hotKey
+        ) { [weak self] in
+            guard let self else { return }
+            switch self.store.preferencesStore.preferences.hotKeyBehavior {
+            case .togglePanelOnly:
+                self.togglePanel(nil)
+            case .instantPrimaryRescue:
+                self.showPanel(refreshIfNeeded: false)
+                Task { @MainActor in
+                    await self.store.refreshAndPerformPrimaryAction()
+                }
+            }
         }
     }
 
     func start() {
         installKeyMonitorIfNeeded()
-
-        if environment["MENUBAR_DISABLE_GLOBAL_HOTKEY"] != "1" {
-            let hk = GlobalHotKey { [weak self] in
-                guard let self else { return }
-                switch self.store.preferencesStore.preferences.hotKeyBehavior {
-                case .togglePanelOnly:
-                    self.togglePanel(nil)
-                case .instantPrimaryRescue:
-                    self.showPanel(refreshIfNeeded: false)
-                    Task { @MainActor in
-                        await self.store.refreshAndPerformPrimaryAction()
-                    }
-                }
-            }
-            let ok = hk.register(shortcut: store.preferencesStore.preferences.hotKey)
-            store.preferencesStore.setHotKeyRegistrationFailed(!ok)
-            self.hotKey = hk
-        }
+        hasStarted = true
+        applyHotKeyPreferences()
 
         if environment["MENUBAR_AUTO_OPEN_PANEL"] == "1" {
             Task { @MainActor [weak self] in
@@ -237,8 +249,8 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     func stop() {
-        hotKey?.unregister()
-        hotKey = nil
+        hasStarted = false
+        inputHub.stopAll()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
             self.keyMonitor = nil
