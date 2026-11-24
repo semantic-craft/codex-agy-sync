@@ -37,7 +37,10 @@ use crate::registry::{
 };
 use crate::rpc_agy::fetch_agy_trajectory_via_rpc;
 use crate::rpc_codex::{fetch_codex_thread_via_rpc, import_codex_rollout_via_rpc};
-use crate::sqlite::{open_readonly_sqlite, optional_select_columns_sql, table_column_names};
+use crate::sqlite::{
+    HandoffStagingPermit, SqliteWritePermit, open_readonly_sqlite, optional_select_columns_sql,
+    table_column_names,
+};
 use crate::transport::DefaultHostTransport;
 use sha2::{Digest, Sha256};
 
@@ -191,7 +194,7 @@ fn receipt_matches_workspace(receipt_ws: &str, ws_path: &WorkspacePath) -> bool 
 
 /// Load all persisted receipts under `<sync_state_dir>/handoffs/*.json`.
 #[must_use]
-pub fn load_all_receipts(paths: &HostEnvironmentPaths) -> Vec<(PathBuf, SyncReceipt, float_mtime)> {
+pub fn load_all_receipts(paths: &HostEnvironmentPaths) -> Vec<(PathBuf, SyncReceipt, f64)> {
     let state = paths.sync_state_dir.join("handoffs");
     let Ok(rd) = fs::read_dir(&state) else {
         return Vec::new();
@@ -216,9 +219,6 @@ pub fn load_all_receipts(paths: &HostEnvironmentPaths) -> Vec<(PathBuf, SyncRece
     }
     out
 }
-
-#[allow(non_camel_case_types)]
-type float_mtime = f64;
 
 /// Load persisted receipts matching `ws_path`.
 #[must_use]
@@ -615,9 +615,10 @@ fn stage_agy(
     paths: &HostEnvironmentPaths,
     binding: &WorkspaceProjectBinding,
     ledger: &TrajectoryLedger,
-    stage: &Path,
+    staging_permit: &HandoffStagingPermit,
     target_id: &str,
 ) -> Result<(Vec<PathBuf>, PathBuf), HostError> {
+    let stage = staging_permit.dir();
     let mut staged_paths = paths.clone();
     staged_paths.agy_data_dir = stage.to_path_buf();
     staged_paths.agy_cli_data_dir = None;
@@ -636,6 +637,7 @@ fn stage_agy(
         false,
         &lineage,
         None,
+        SqliteWritePermit::Staging(staging_permit),
     )?;
     let persisted = decode_agy_trajectory(
         binding.parsed_path(),
@@ -673,12 +675,13 @@ fn import_agy(
     binding: &WorkspaceProjectBinding,
     ledger: &TrajectoryLedger,
     receipt: &SyncReceipt,
+    staging_permit: &HandoffStagingPermit,
 ) -> Result<String, HostError> {
-    let stage = PathBuf::from(receipt.staging_path());
+    let stage = staging_permit.dir().to_path_buf();
     let target_id = receipt.target_id().ok_or_else(|| {
         HostError::Runtime("Missing target_id on Antigravity handoff receipt.".to_owned())
     })?;
-    let (files, staged_db) = stage_agy(paths, binding, ledger, &stage, target_id)?;
+    let (files, staged_db) = stage_agy(paths, binding, ledger, staging_permit, target_id)?;
     for f in &files {
         let rel = f
             .strip_prefix(&stage)
@@ -869,6 +872,7 @@ pub fn handoff_session(
     validate_session_id(source_id, "source_id")?;
     let binding = require_binding(paths, workspace)?;
     let ws_path = binding.parsed_path();
+    let (handoffs_root, _lock_guard) = open_handoff_lock(paths, ws_path.as_path())?;
     let ledger = read_handoff_source(paths, &binding, direction, source_id, include_interrupted)?;
     let wm = ledger.latest_watermark().ok_or_else(|| {
         HostError::EmptySession("Source session has no completed history to sync.".to_owned())
@@ -886,7 +890,6 @@ pub fn handoff_session(
     };
     let source_digest = wm.boundary_digest.as_str().to_owned();
 
-    let (handoffs_root, _lock_guard) = open_handoff_lock(paths, ws_path.as_path())?;
     let staging_root = handoffs_root.join("staging");
     fs::create_dir_all(&staging_root)?;
 
@@ -991,7 +994,8 @@ pub fn handoff_session(
     save_receipt_file(&receipt_path, &receipt)?;
 
     if to_agy {
-        match import_agy(paths, &binding, &handoff, &receipt) {
+        let staging_permit = HandoffStagingPermit::new(&staging_root, &staging_dir)?;
+        match import_agy(paths, &binding, &handoff, &receipt, &staging_permit) {
             Ok(verified_id) => {
                 receipt.state = ReceiptState::Ready {
                     target_id: verified_id,

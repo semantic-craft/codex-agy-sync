@@ -253,12 +253,26 @@ def encode_any_file_edit(p: FileEditPayload) -> bytes:
     return bytes(buf)
 
 
+_FILE_EDIT_OPS: dict[str, Literal["CREATE", "MODIFY", "DELETE"]] = {
+    "CREATE": "CREATE", "MODIFY": "MODIFY", "DELETE": "DELETE",
+}
+_WORKSPACE_MODES: dict[str, Literal["inherit", "branch", "share"]] = {
+    "inherit": "inherit", "branch": "branch", "share": "share",
+}
+_MANAGE_SUBAGENTS_ACTIONS: dict[str, Literal["list", "kill", "kill_all"]] = {
+    "list": "list", "kill": "kill", "kill_all": "kill_all",
+}
+_MANAGE_TASK_ACTIONS: dict[str, Literal["list", "status", "send_input", "kill"]] = {
+    "list": "list", "status": "status", "send_input": "send_input", "kill": "kill",
+}
+
+
 def decode_any_file_edit(args: Mapping[str, Any], _raw_json: str, any_val: bytes) -> FileEditPayload:
     fm = _pmap(any_val)
     path = _fm_str(fm, FileEditTag.PATH, str(first_present(args, "Path", "path") or ""))
     prior_op = str(first_present(args, "edit_op", "EditOp") or "").upper()
     prior_op = "CREATE" if prior_op == "ADD" else prior_op
-    edit_op: Literal["CREATE", "MODIFY", "DELETE"] = prior_op if prior_op in ("CREATE", "MODIFY", "DELETE") else "MODIFY"  # type: ignore[assignment]
+    edit_op: Literal["CREATE", "MODIFY", "DELETE"] = _FILE_EDIT_OPS.get(prior_op, "MODIFY")
     if (k_val := _fm_varint(fm, FileEditTag.KIND)) is not None:
         edit_op = "CREATE" if k_val == FileEditKindCode.CREATE else ("DELETE" if k_val == 0 else "MODIFY")
     elif fm and (prior_op == "DELETE" or not prior_op):
@@ -412,7 +426,7 @@ def decode_any_invoke_subagent(args: Mapping[str, Any], _raw_json: str, any_val:
     role = str(first_present(args, "Role", "role") or "")
     prompt = str(first_present(args, "Prompt", "prompt", "message") or "")
     raw_ws = str(first_present(args, "Workspace", "workspace_mode") or "inherit")
-    ws_mode: Literal["inherit", "branch", "share"] = raw_ws if raw_ws in ("inherit", "branch", "share") else "inherit"  # type: ignore[assignment]
+    ws_mode: Literal["inherit", "branch", "share"] = _WORKSPACE_MODES.get(raw_ws, "inherit")
     for s_raw in _fm_bytes(fm, InvokeSubagentTag.SUBAGENTS):
         sfm = _pmap(s_raw)
         sub_type = _fm_str(sfm, SubagentSpecFieldTag.TYPE_NAME, sub_type)
@@ -467,7 +481,7 @@ def decode_any_manage_subagents(args: Mapping[str, Any], _raw_json: str, any_val
     cids = wire_cids if has_wire else ([str(c) for c in fb] if isinstance(fb, list) else [])
     if not cids and not has_wire and (single := first_present(args, "id", "agent_id")):
         cids = [str(single)]
-    action_norm: Literal["list", "kill", "kill_all"] = raw_action if raw_action in ("list", "kill", "kill_all") else "list"  # type: ignore[assignment]
+    action_norm: Literal["list", "kill", "kill_all"] = _MANAGE_SUBAGENTS_ACTIONS.get(raw_action, "list")
     return ManageSubagentsPayload(kind="manage_subagents", action=action_norm, target_conversation_ids=tuple(cids))
 
 
@@ -485,7 +499,7 @@ def decode_any_manage_task(args: Mapping[str, Any], _raw_json: str, any_val: byt
     wire_ids = _fm_strs(fm, ManageTaskTag.TASK_IDS)
     task_id = first_present(args, "TaskId", "task_id", "session_id") or (wire_ids[0] if wire_ids else None)
     inp = _fm_opt_str(fm, ManageTaskTag.INPUT, first_present(args, "Input", "input_text", "chars"))
-    action_norm: Literal["list", "status", "send_input", "kill"] = raw_action if raw_action in ("list", "status", "send_input", "kill") else "status"  # type: ignore[assignment]
+    action_norm: Literal["list", "status", "send_input", "kill"] = _MANAGE_TASK_ACTIONS.get(raw_action, "status")
     return ManageTaskPayload(kind="manage_task", action=action_norm, task_id=str(task_id) if task_id else None, input_text=inp)
 
 

@@ -191,7 +191,10 @@ public enum UpdatePathGuard {
         cachesDirectory: URL? = nil,
         preferencesDirectory: URL? = nil,
         removeLegacyPreferencesDomains: Bool = false,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        hasLegacyKeys: ((String) -> Bool)? = nil,
+        clearLegacyDomain: ((String) -> Void)? = nil,
+        delayedReunlink: (@Sendable (URL, @escaping @Sendable () -> Void) -> Void)? = nil
     ) {
         let legacyAppName = PreferencesStore.legacyAppName
         let legacyBundleID = PreferencesStore.legacyPreferencesSuiteName
@@ -223,49 +226,27 @@ public enum UpdatePathGuard {
                )
            )
         {
-            if preferencesDirectory == nil {
+            let useTwoPassCleanup = preferencesDirectory == nil
+                || hasLegacyKeys != nil
+                || clearLegacyDomain != nil
+                || delayedReunlink != nil
+            if useTwoPassCleanup {
+                let checkKeys = hasLegacyKeys ?? { domain in
+                    preferencesDirectory == nil ? defaultHasLegacyKeys(domain: domain) : false
+                }
+                let clearDomain = clearLegacyDomain ?? { domain in
+                    if preferencesDirectory == nil {
+                        defaultClearLegacyDomain(domain: domain)
+                    }
+                }
+                let scheduleReunlink = delayedReunlink ?? defaultDelayedReunlink(plistURL:perform:)
                 for domain in [legacyBundleID, legacyAppName] {
                     let plistURL = targetPrefsDir.appendingPathComponent("\(domain).plist", isDirectory: false)
                     let hasPlistItem = (try? fileManager.attributesOfItem(atPath: plistURL.path)) != nil
-                    let anyKeys = (CFPreferencesCopyKeyList(
-                        domain as CFString,
-                        kCFPreferencesCurrentUser,
-                        kCFPreferencesAnyHost
-                    ) as? [String]) ?? []
-                    let hostKeys = (CFPreferencesCopyKeyList(
-                        domain as CFString,
-                        kCFPreferencesCurrentUser,
-                        kCFPreferencesCurrentHost
-                    ) as? [String]) ?? []
-
-                    if !anyKeys.isEmpty || !hostKeys.isEmpty {
-                        if !anyKeys.isEmpty {
-                            CFPreferencesSetMultiple(
-                                nil,
-                                anyKeys as CFArray,
-                                domain as CFString,
-                                kCFPreferencesCurrentUser,
-                                kCFPreferencesAnyHost
-                            )
-                        }
-                        if !hostKeys.isEmpty {
-                            CFPreferencesSetMultiple(
-                                nil,
-                                hostKeys as CFArray,
-                                domain as CFString,
-                                kCFPreferencesCurrentUser,
-                                kCFPreferencesCurrentHost
-                            )
-                        }
-                        _ = CFPreferencesSynchronize(
-                            domain as CFString,
-                            kCFPreferencesCurrentUser,
-                            kCFPreferencesAnyHost
-                        )
-                        _ = CFPreferencesAppSynchronize(domain as CFString)
+                    if checkKeys(domain) {
+                        clearDomain(domain)
                         try? fileManager.removeItem(at: plistURL)
-                        Task.detached(priority: .utility) {
-                            try? await Task.sleep(for: .seconds(8))
+                        scheduleReunlink(plistURL) {
                             try? FileManager.default.removeItem(at: plistURL)
                         }
                     } else if hasPlistItem {
@@ -278,6 +259,67 @@ public enum UpdatePathGuard {
                 try? fileManager.removeItem(at: legacyBundlePlist)
                 try? fileManager.removeItem(at: legacyAppPlist)
             }
+        }
+    }
+
+    private static func defaultHasLegacyKeys(domain: String) -> Bool {
+        let anyKeys = (CFPreferencesCopyKeyList(
+            domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        ) as? [String]) ?? []
+        let hostKeys = (CFPreferencesCopyKeyList(
+            domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [String]) ?? []
+        return !anyKeys.isEmpty || !hostKeys.isEmpty
+    }
+
+    private static func defaultClearLegacyDomain(domain: String) {
+        let anyKeys = (CFPreferencesCopyKeyList(
+            domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        ) as? [String]) ?? []
+        if !anyKeys.isEmpty {
+            CFPreferencesSetMultiple(
+                nil,
+                anyKeys as CFArray,
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost
+            )
+        }
+        let hostKeys = (CFPreferencesCopyKeyList(
+            domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [String]) ?? []
+        if !hostKeys.isEmpty {
+            CFPreferencesSetMultiple(
+                nil,
+                hostKeys as CFArray,
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesCurrentHost
+            )
+        }
+        _ = CFPreferencesSynchronize(
+            domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        )
+        _ = CFPreferencesAppSynchronize(domain as CFString)
+    }
+
+    private static func defaultDelayedReunlink(
+        plistURL _: URL,
+        perform: @escaping @Sendable () -> Void
+    ) {
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .seconds(8))
+            perform()
         }
     }
 

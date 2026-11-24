@@ -1,13 +1,14 @@
 //! Read-only SQLite openers (`?mode=ro` + `PRAGMA query_only = ON`) and host DDL schemas.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cas_core::resolve_strict_false;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::error::HostError;
+use crate::locks::OfflineWriteLockGuard;
 
 fn path_to_readonly_sqlite_uri(db_path: &Path) -> Result<String, HostError> {
     let resolved = resolve_strict_false(db_path);
@@ -33,11 +34,71 @@ pub fn open_readonly_sqlite(db_path: &Path) -> Result<Connection, HostError> {
     Ok(conn)
 }
 
-/// Open a writable SQLite connection ONLY inside verified offline/staging/locked sections.
+/// Validated capability proving a handoff staging directory sits strictly inside its staging root.
+#[derive(Debug, Clone)]
+pub struct HandoffStagingPermit {
+    staging_dir: PathBuf,
+}
+
+impl HandoffStagingPermit {
+    /// Construct a staging write permit after verifying `staging_dir` is strictly inside `staging_root`.
+    ///
+    /// # Errors
+    /// Returns [`HostError::InvalidArgument`] if `staging_dir` equals or escapes `staging_root`.
+    pub fn new(staging_root: &Path, staging_dir: &Path) -> Result<Self, HostError> {
+        let root_resolved = resolve_strict_false(staging_root);
+        let dir_resolved = resolve_strict_false(staging_dir);
+        if dir_resolved == root_resolved || !dir_resolved.starts_with(&root_resolved) {
+            return Err(HostError::InvalidArgument(format!(
+                "Staging directory {} must be strictly inside staging root {}.",
+                staging_dir.display(),
+                staging_root.display()
+            )));
+        }
+        Ok(Self {
+            staging_dir: dir_resolved,
+        })
+    }
+
+    /// Return the canonicalized staging directory path.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.staging_dir
+    }
+}
+
+/// Capability proof required to open a writable SQLite connection via [`open_locked_rw_sqlite`].
+#[derive(Clone, Copy)]
+pub enum SqliteWritePermit<'a> {
+    Locked(&'a OfflineWriteLockGuard),
+    Staging(&'a HandoffStagingPermit),
+}
+
+/// Open a writable SQLite connection ONLY with an active [`OfflineWriteLockGuard`] or validated [`HandoffStagingPermit`].
+///
+/// ```compile_fail
+/// use std::path::Path;
+/// use cas_host::open_locked_rw_sqlite;
+/// let _ = open_locked_rw_sqlite(Path::new("x.db"));
+/// ```
 ///
 /// # Errors
-/// Returns [`HostError::Sqlite`] if connection or busy-timeout configuration fails.
-pub fn open_locked_rw_sqlite(db_path: &Path) -> Result<Connection, HostError> {
+/// Returns [`HostError::InvalidArgument`] if a staging permit is used outside its staging directory,
+/// or [`HostError::Sqlite`] / [`HostError::Io`] if connection or busy-timeout configuration fails.
+pub fn open_locked_rw_sqlite(
+    db_path: &Path,
+    permit: SqliteWritePermit<'_>,
+) -> Result<Connection, HostError> {
+    if let SqliteWritePermit::Staging(staging) = permit {
+        let resolved_db = resolve_strict_false(db_path);
+        if resolved_db == staging.dir() || !resolved_db.starts_with(staging.dir()) {
+            return Err(HostError::InvalidArgument(format!(
+                "Staging SQLite write path {} escapes staging directory {}.",
+                db_path.display(),
+                staging.dir().display()
+            )));
+        }
+    }
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

@@ -357,7 +357,8 @@ if [[ ! -x "$RUST_CLI_PATH" ]]; then
     exit 1
 fi
 
-LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+TCCUTIL="${CODEX_AGY_TCCUTIL_BIN:-tccutil}"
+LSREGISTER="${CODEX_AGY_LSREGISTER_BIN:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 STAGE_DIR="$(mktemp -d "$SCRATCH_PATH/bundle-stage.XXXXXX")"
 DEST_STAGE="$OUTPUT_DIR/.${APP_NAME}.app.stage.$$"
@@ -471,7 +472,7 @@ if [[ "$INSTALL" -eq 1 ]]; then
     if [[ -d "$LEGACY_BUNDLE" ]]; then
         pkill -f "$LEGACY_BUNDLE/Contents/MacOS/$LEGACY_NAME" >/dev/null 2>&1 || true
         if [[ "$SKIP_LSREGISTER" != "1" ]]; then
-            tccutil reset All "$LEGACY_BUNDLE_ID" >/dev/null 2>&1 || true
+            "$TCCUTIL" reset All "$LEGACY_BUNDLE_ID" >/dev/null 2>&1 || true
             if [[ -x "$LSREGISTER" ]]; then
                 "$LSREGISTER" -u "$LEGACY_BUNDLE" >/dev/null 2>&1 || true
             fi

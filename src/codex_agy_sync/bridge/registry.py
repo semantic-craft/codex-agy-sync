@@ -25,10 +25,12 @@ from ..workspace import (
 from .paths_and_locks import (
     HostEnvironmentPaths,
     PresenceWalGuard,
+    SqliteWritePermit,
     SyncBusyLockError,
     atomic_write_text,
     deterministic_uuid,
     expand_existing_with_sidecars,
+    open_locked_rw_sqlite,
     open_readonly_sqlite,
 )
 from .project_rpc import (
@@ -223,6 +225,7 @@ class ProjectRegistry:
 
     def _ensure_codex_project(
         self, ws_path: WorkspacePath, ws_uri: WorkspaceRootUri, ws_name: str,
+        *, permit: SqliteWritePermit,
     ) -> tuple[CodexProjectId, CodexLegacyProjectId]:
         self._paths.codex_home_dir.mkdir(parents=True, exist_ok=True)
         state_db = self._paths.codex_home_dir / "state_5.sqlite"
@@ -236,7 +239,7 @@ class ProjectRegistry:
 
         if not existing_pid:
             existing_pid = deterministic_uuid("codex-project", str(ws_uri))
-            conn = sqlite3.connect(str(state_db), timeout=10.0)
+            conn = open_locked_rw_sqlite(state_db, permit)
             try:
                 ensure_codex_state_db_schema(conn)
                 max_pos_row = conn.execute("SELECT COALESCE(MAX(position), -1) FROM projects").fetchone()
@@ -284,12 +287,18 @@ class ProjectRegistry:
         atomic_write_text(global_state_path, json.dumps(gs_data, ensure_ascii=False, indent=2) + "\n")
         return CodexProjectId(existing_pid), CodexLegacyProjectId(legacy_pid)
 
-    def ensure_workspace_binding(self, workspace: str | Path, prefer_online_rpc: bool = True) -> WorkspaceProjectBinding:
+    def ensure_workspace_binding(
+        self, workspace: str | Path, prefer_online_rpc: bool = True, *, permit: SqliteWritePermit | None = None,
+    ) -> WorkspaceProjectBinding:
         _ = prefer_online_rpc
         ws_path, ws_uri = parse_workspace_identity(workspace)
         ws_name = ws_path.name or "workspace"
         agy_pid = self._ensure_agy_project(ws_path, ws_uri, ws_name)
-        codex_pid, codex_legacy_pid = self._ensure_codex_project(ws_path, ws_uri, ws_name)
+        if permit is not None:
+            codex_pid, codex_legacy_pid = self._ensure_codex_project(ws_path, ws_uri, ws_name, permit=permit)
+        else:
+            with PresenceWalGuard(self._paths).acquire_offline_write_locks(HostKind.CODEX, None, None) as held:
+                codex_pid, codex_legacy_pid = self._ensure_codex_project(ws_path, ws_uri, ws_name, permit=held.write_permit())
         return WorkspaceProjectBinding(ws_path, ws_uri, ws_name, agy_pid, codex_pid, codex_legacy_pid)
 
     def resolve_readonly_binding(self, workspace: str | Path) -> WorkspaceProjectBinding:
@@ -309,9 +318,15 @@ class ProjectRegistry:
         ro = self.resolve_readonly_binding(workspace)
         return dataclasses.replace(ro, agy_project_id=self._ensure_agy_project(ro.workspace_path, ro.workspace_uri, ro.workspace_name))
 
-    def ensure_codex_binding(self, workspace: str | Path) -> WorkspaceProjectBinding:
+    def ensure_codex_binding(
+        self, workspace: str | Path, *, permit: SqliteWritePermit | None = None,
+    ) -> WorkspaceProjectBinding:
         ro = self.resolve_readonly_binding(workspace)
-        codex_pid, codex_legacy_pid = self._ensure_codex_project(ro.workspace_path, ro.workspace_uri, ro.workspace_name)
+        if permit is not None:
+            codex_pid, codex_legacy_pid = self._ensure_codex_project(ro.workspace_path, ro.workspace_uri, ro.workspace_name, permit=permit)
+        else:
+            with PresenceWalGuard(self._paths).acquire_offline_write_locks(HostKind.CODEX, None, None) as held:
+                codex_pid, codex_legacy_pid = self._ensure_codex_project(ro.workspace_path, ro.workspace_uri, ro.workspace_name, permit=held.write_permit())
         return dataclasses.replace(ro, codex_project_id=codex_pid, codex_legacy_project_id=codex_legacy_pid)
 
     def pair_workspace(
@@ -577,9 +592,10 @@ def _pair_codex_involved_offline(
                 expected_new_files=candidates,
             )
             try:
+                permit = locks.write_permit()
                 if need_agy:
-                    return registry.ensure_workspace_binding(workspace, prefer_online_rpc=prefer_online_rpc)
-                return registry.ensure_codex_binding(workspace)
+                    return registry.ensure_workspace_binding(workspace, prefer_online_rpc=prefer_online_rpc, permit=permit)
+                return registry.ensure_codex_binding(workspace, permit=permit)
             except Exception:
                 backup.restore()
                 raise

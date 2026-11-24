@@ -592,13 +592,15 @@ def read_agy_session_lineage(
     if sum_row:
         role = role or str(sum_row[0] or "").strip()
         parent_cid = parent_cid or str(sum_row[1] or "").strip()
-        depth = max(depth, int(sum_row[2] or 0))  # type: ignore[arg-type]
+        raw_depth = sum_row[2]
+        if isinstance(raw_depth, (int, float, str)):
+            depth = max(depth, int(raw_depth or 0))
     tblob = readonly_fetchone(
         validated_child_path(paths.agy_data_dir, "conversations", f"{cid_key}.db", label="cascade_id"),
         "SELECT data FROM trajectory_metadata_blob WHERE id = 'main'",
     )
-    if tblob and tblob[0]:
-        meta = decode_trajectory_metadata_proto(bytes(tblob[0]))  # type: ignore[arg-type]
+    if tblob and isinstance(tblob[0], (bytes, bytearray, memoryview)):
+        meta = decode_trajectory_metadata_proto(bytes(tblob[0]))
         parent_cid = parent_cid or str(meta["parent_conversation_id"] or "")
         root_cid = root_cid or str(meta["root_conversation_id"] or "")
         type_name = type_name or str(meta["agent_type_name"] or "")

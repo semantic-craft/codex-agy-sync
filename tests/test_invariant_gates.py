@@ -83,11 +83,15 @@ class InvariantGatesTest(unittest.TestCase):
 
     def test_raw_sqlite_connect_catches_disallowed_and_allows_allowlisted(self) -> None:
         _write_text(
-            self.mini_repo / "src" / "codex_agy_sync" / "bridge" / "transport.py",
+            self.mini_repo / "src" / "codex_agy_sync" / "bridge" / "paths_and_locks.py",
             'import sqlite3\ndef ok():\n    return sqlite3.connect(":memory:")\n',
         )
         self.assertEqual(INVARIANTS.check_repo_invariants(self.mini_repo), [])
 
+        _write_text(
+            self.mini_repo / "src" / "codex_agy_sync" / "bridge" / "transport.py",
+            'import sqlite3\ndef bad_transport():\n    return sqlite3.connect(":memory:")\n',
+        )
         _write_text(
             self.mini_repo / "src" / "codex_agy_sync" / "workbench" / "bad.py",
             'import sqlite3\ndef bad():\n    return sqlite3.connect(":memory:")\n',
@@ -97,12 +101,47 @@ class InvariantGatesTest(unittest.TestCase):
             'import sqlite3\ndef bad2():\n    return sqlite3.connect(":memory:")\n',
         )
         errors = INVARIANTS.check_repo_invariants(self.mini_repo)
-        self.assertEqual(len(errors), 2)
+        self.assertEqual(len(errors), 3)
         joined = "\n".join(errors)
         self.assertIn("RAW_SQLITE_CONNECT", joined)
+        self.assertIn("src/codex_agy_sync/bridge/transport.py:3", joined)
         self.assertIn("src/codex_agy_sync/workbench/bad.py:3", joined)
         self.assertIn("src/codex_agy_sync/bridge/handoff.py:3", joined)
-        self.assertIn("open_readonly_sqlite", joined)
+        self.assertIn("open_locked_rw_sqlite(path, permit)", joined)
+
+    def test_sqlite_write_permit_runtime_guards(self) -> None:
+        from typing import Any, cast
+
+        from codex_agy_sync.bridge.paths_and_locks import (
+            SqliteWritePermit,
+            make_staging_write_permit,
+            open_locked_rw_sqlite,
+        )
+
+        db_path = self.mini_repo / "sample.sqlite"
+        with self.assertRaises(TypeError):
+            open_locked_rw_sqlite(db_path, cast(Any, None))
+        with self.assertRaises(TypeError):
+            SqliteWritePermit(kind="locked")
+
+        staging_root = self.mini_repo / "staging-root"
+        staging_dir = staging_root / "run-1"
+        with self.assertRaises(ValueError):
+            make_staging_write_permit(staging_root, self.mini_repo / "escaped")
+
+        permit = make_staging_write_permit(staging_root, staging_dir)
+        with self.assertRaises(ValueError):
+            open_locked_rw_sqlite(self.mini_repo / "outside.sqlite", permit)
+        self.assertFalse((self.mini_repo / "outside.sqlite").exists())
+
+        inside_db = staging_dir / "nested" / "ok.sqlite"
+        conn = open_locked_rw_sqlite(inside_db, permit)
+        try:
+            conn.execute("CREATE TABLE ok (x INT)")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertTrue(inside_db.is_file())
 
     def test_bare_urlopen_catches_module_and_imported_forms(self) -> None:
         _write_text(

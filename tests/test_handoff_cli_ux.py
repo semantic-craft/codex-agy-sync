@@ -146,8 +146,9 @@ class HandoffCliUxTest(unittest.TestCase):
             binding.workspace_path, binding.workspace_uri, lines, explicit_title_override=title,
         )
         new_tid = CodexThreadId(generate_uuid7())
-        clean_locks = dataclasses.replace(self.bridge.guard.probe_locks(None, None), codex_daemon=None)
-        self.transport.apply_to_codex(binding, new_tid, ledger.events, ledger, clean_locks, TransportMode.OFFLINE_STORAGE)
+        with mock.patch.object(self.bridge.guard, "discover_codex_daemon", return_value=None):
+            with self.bridge.guard.acquire_offline_write_locks(HostKind.CODEX, None, new_tid) as held:
+                self.transport.apply_to_codex(binding, new_tid, ledger.events, ledger, held, TransportMode.OFFLINE_STORAGE)
         return str(new_tid)
 
     @contextlib.contextmanager

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import fcntl
@@ -19,7 +19,7 @@ import stat
 import struct
 import subprocess
 import sys
-from typing import Any, Iterator, Mapping, Sequence, Tuple
+from typing import Any, Iterator, Literal, Mapping, Sequence, Tuple
 import uuid
 
 from ..workspace import CascadeId, CodexThreadId, HostKind, validate_session_id
@@ -84,27 +84,14 @@ class HostEnvironmentPaths:
     codex_app_server_socket: Path | None = None
 
     @classmethod
-    def discover(
-        cls,
-        env: Mapping[str, str] | None = None,
-    ) -> HostEnvironmentPaths:
+    def discover(cls, env: Mapping[str, str] | None = None) -> HostEnvironmentPaths:
         source_env = env if env is not None else os.environ
         home = Path(source_env.get("HOME") or Path.home()).expanduser().resolve(strict=False)
         gemini_root = Path(source_env.get("GEMINI_HOME") or (home / ".gemini")).expanduser().resolve(strict=False)
-
-        gemini_config_dir = Path(
-            source_env.get("GEMINI_CONFIG_DIR") or (gemini_root / "config")
-        ).expanduser().resolve(strict=False)
-        agy_data_dir = Path(
-            source_env.get("ANTIGRAVITY_DATA_DIR") or (gemini_root / "antigravity")
-        ).expanduser().resolve(strict=False)
-        codex_home_dir = Path(
-            source_env.get("CODEX_HOME") or (home / ".codex")
-        ).expanduser().resolve(strict=False)
-        sync_state_dir = Path(
-            source_env.get("CODEX_AGY_SYNC_STATE_DIR") or (gemini_root / "codex-agy-sync")
-        ).expanduser().resolve(strict=False)
-
+        gemini_config_dir = Path(source_env.get("GEMINI_CONFIG_DIR") or (gemini_root / "config")).expanduser().resolve(strict=False)
+        agy_data_dir = Path(source_env.get("ANTIGRAVITY_DATA_DIR") or (gemini_root / "antigravity")).expanduser().resolve(strict=False)
+        codex_home_dir = Path(source_env.get("CODEX_HOME") or (home / ".codex")).expanduser().resolve(strict=False)
+        sync_state_dir = Path(source_env.get("CODEX_AGY_SYNC_STATE_DIR") or (gemini_root / "codex-agy-sync")).expanduser().resolve(strict=False)
         raw_cli_dir = source_env.get("ANTIGRAVITY_CLI_DATA_DIR")
         if raw_cli_dir:
             agy_cli_data_dir: Path | None = Path(raw_cli_dir).expanduser().resolve(strict=False)
@@ -112,17 +99,12 @@ class HostEnvironmentPaths:
             agy_cli_data_dir = (gemini_root / "antigravity-cli").resolve(strict=False)
         else:
             agy_cli_data_dir = None
-
         raw_codex_sock = (source_env.get("CODEX_APP_SERVER_SOCKET") or "").strip()
         codex_app_server_socket = Path(raw_codex_sock).expanduser() if raw_codex_sock else None
-
         return cls(
-            gemini_config_dir=gemini_config_dir,
-            agy_data_dir=agy_data_dir,
-            codex_home_dir=codex_home_dir,
-            sync_state_dir=sync_state_dir,
-            agy_cli_data_dir=agy_cli_data_dir,
-            codex_app_server_socket=codex_app_server_socket,
+            gemini_config_dir=gemini_config_dir, agy_data_dir=agy_data_dir,
+            codex_home_dir=codex_home_dir, sync_state_dir=sync_state_dir,
+            agy_cli_data_dir=agy_cli_data_dir, codex_app_server_socket=codex_app_server_socket,
         )
 
 
@@ -164,11 +146,48 @@ def validated_child_path(base_dir: Path, *parts: str, label: str = "path") -> Pa
     return raw_candidate
 
 
+_PERMIT_TOKEN: object = object()
+
+
+@dataclass(frozen=True)
+class SqliteWritePermit:
+    """Validated capability proof required by `open_locked_rw_sqlite`."""
+
+    kind: Literal["locked", "staging"]
+    staging_dir: Path | None = None
+    _token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _PERMIT_TOKEN:
+            raise TypeError("SqliteWritePermit must come from OfflineWriteLock.write_permit() or make_staging_write_permit().")
+
+
+def make_staging_write_permit(staging_root: Path, staging_dir: Path) -> SqliteWritePermit:
+    root_res = staging_root.resolve(strict=False)
+    dir_res = staging_dir.resolve(strict=False)
+    if dir_res == root_res or not dir_res.is_relative_to(root_res):
+        raise ValueError(f"Staging directory {staging_dir} must be strictly inside {staging_root}.")
+    return SqliteWritePermit(kind="staging", staging_dir=dir_res, _token=_PERMIT_TOKEN)
+
+
 def open_readonly_sqlite(db_path: Path) -> sqlite3.Connection:
     uri = f"{db_path.resolve(strict=False).as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
     conn.execute("PRAGMA query_only = ON;")
     return conn
+
+
+def open_locked_rw_sqlite(db_path: Path, permit: SqliteWritePermit, *, timeout: float = 10.0) -> sqlite3.Connection:
+    if not isinstance(permit, SqliteWritePermit):
+        raise TypeError("open_locked_rw_sqlite requires a SqliteWritePermit.")
+    if permit.kind == "staging":
+        if permit.staging_dir is None:
+            raise ValueError("Staging SqliteWritePermit is missing staging_dir.")
+        resolved_db = db_path.resolve(strict=False)
+        if resolved_db == permit.staging_dir or not resolved_db.is_relative_to(permit.staging_dir):
+            raise ValueError(f"Staging SQLite write path {db_path} escapes staging directory {permit.staging_dir}.")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(str(db_path), timeout=timeout)
 
 
 def expand_existing_with_sidecars(candidates: Sequence[Path]) -> list[Path]:
@@ -247,19 +266,24 @@ class HostLockSnapshot:
     codex_turn_inflight: bool
 
     def can_write_agy_offline(self) -> bool:
-        return (
-            (self.agy_daemon is None)
-            and (not self.agy_presence_locked)
-            and (not self.agy_wal_active)
-            and (not self.agy_turn_inflight)
-        )
+        return (self.agy_daemon is None) and (not self.agy_presence_locked) and (not self.agy_wal_active) and (not self.agy_turn_inflight)
 
     def can_write_codex_offline(self) -> bool:
-        return (
-            (self.codex_daemon is None)
-            and (not self.codex_wal_active)
-            and (not self.codex_turn_inflight)
-        )
+        return (self.codex_daemon is None) and (not self.codex_wal_active) and (not self.codex_turn_inflight)
+
+
+@dataclass(frozen=True)
+class OfflineWriteLock(HostLockSnapshot):
+    """Held offline write-lock capability minted exclusively by `acquire_offline_write_locks`."""
+
+    _lock_token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._lock_token is not _PERMIT_TOKEN:
+            raise TypeError("OfflineWriteLock must be acquired via PresenceWalGuard.acquire_offline_write_locks().")
+
+    def write_permit(self) -> SqliteWritePermit:
+        return SqliteWritePermit(kind="locked", _token=_PERMIT_TOKEN)
 
 
 def _unlink_with_sqlite_sidecars(path: Path, keep_resolved: set[Path]) -> None:
@@ -415,18 +439,13 @@ class PresenceWalGuard:
         for hf in sorted(daemon_dir.glob("hub_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 raw = json.loads(hf.read_text(encoding="utf-8"))
-                pid = int(raw.get("pid") or 0)
-                tok = str(raw.get("csrfToken") or "").strip()
+                pid, tok = int(raw.get("pid") or 0), str(raw.get("csrfToken") or "").strip()
                 if pid > 0 and tok and is_pid_alive(pid):
-                    candidates.append(
-                        AgyDaemonEndpoint(
-                            pid=pid,
-                            http_port=int(raw.get("httpPort") or raw.get("port") or 0),
-                            https_port=int(raw.get("httpsPort") or 0),
-                            ls_version=str(raw.get("lsVersion") or "2.30.0"),
-                            csrf_secret=CsrfSecret(tok),
-                        )
-                    )
+                    candidates.append(AgyDaemonEndpoint(
+                        pid=pid, http_port=int(raw.get("httpPort") or raw.get("port") or 0),
+                        https_port=int(raw.get("httpsPort") or 0), ls_version=str(raw.get("lsVersion") or "2.30.0"),
+                        csrf_secret=CsrfSecret(tok),
+                    ))
             except Exception:
                 continue
         if len(candidates) > 1:
@@ -531,12 +550,9 @@ class PresenceWalGuard:
         )
 
         return HostLockSnapshot(
-            agy_daemon=agy_daemon,
-            agy_presence_locked=agy_presence_locked,
-            agy_wal_active=agy_wal_active,
-            agy_turn_inflight=agy_turn_inflight,
-            codex_daemon=codex_daemon,
-            codex_wal_active=codex_wal_active,
+            agy_daemon=agy_daemon, agy_presence_locked=agy_presence_locked,
+            agy_wal_active=agy_wal_active, agy_turn_inflight=agy_turn_inflight,
+            codex_daemon=codex_daemon, codex_wal_active=codex_wal_active,
             codex_turn_inflight=codex_turn_inflight,
         )
 
@@ -549,12 +565,11 @@ class PresenceWalGuard:
         *,
         agy_turn_inflight: bool = False,
         codex_turn_inflight: bool = False,
-    ) -> Iterator[HostLockSnapshot]:
+    ) -> Iterator[OfflineWriteLock]:
         if cascade_id is not None:
             validate_session_id(str(cascade_id), label="cascade_id")
         if codex_thread_id is not None:
             validate_session_id(str(codex_thread_id), label="codex_thread_id")
-
         sync_lock_path = self._paths.sync_state_dir / "locks" / "sync.lock"
         sync_lock_path.parent.mkdir(parents=True, exist_ok=True)
         sync_fd = open_nonblocking_ex_flock(sync_lock_path, create=True)
@@ -564,35 +579,28 @@ class PresenceWalGuard:
         try:
             if target_host == HostKind.ANTIGRAVITY and cascade_id is not None:
                 presence_dir = self._paths.agy_data_dir / "presence"
-                candidate_lock = validated_child_path(
-                    self._paths.agy_data_dir, "presence", f"{cascade_id}.lock", label="cascade_id"
-                )
+                candidate_lock = validated_child_path(self._paths.agy_data_dir, "presence", f"{cascade_id}.lock", label="cascade_id")
                 if candidate_lock.exists():
-                    try:
+                    with contextlib.suppress(FileNotFoundError):
                         presence_fd = open_nonblocking_ex_flock(candidate_lock, create=False)
                         presence_lock_path = candidate_lock
-                    except FileNotFoundError:
-                        pass
                 if presence_fd is None and presence_dir.is_dir():
                     presence_fd = open_nonblocking_ex_flock(candidate_lock, create=True)
                     presence_lock_path = candidate_lock
                     created_temp_presence = True
-
             locks = self.probe_locks(
-                cascade_id,
-                codex_thread_id,
-                agy_turn_inflight=agy_turn_inflight,
-                codex_turn_inflight=codex_turn_inflight,
-                ignore_held_agy_presence=(presence_fd is not None),
+                cascade_id, codex_thread_id, agy_turn_inflight=agy_turn_inflight,
+                codex_turn_inflight=codex_turn_inflight, ignore_held_agy_presence=(presence_fd is not None),
             )
-            can_write = (
-                locks.can_write_agy_offline()
-                if target_host == HostKind.ANTIGRAVITY
-                else locks.can_write_codex_offline()
-            )
+            can_write = locks.can_write_agy_offline() if target_host == HostKind.ANTIGRAVITY else locks.can_write_codex_offline()
             if not can_write:
                 raise BlockingIOError(f"Offline write blocked after lock re-probe for {target_host.value}.")
-            yield locks
+            yield OfflineWriteLock(
+                agy_daemon=locks.agy_daemon, agy_presence_locked=locks.agy_presence_locked,
+                agy_wal_active=locks.agy_wal_active, agy_turn_inflight=locks.agy_turn_inflight,
+                codex_daemon=locks.codex_daemon, codex_wal_active=locks.codex_wal_active,
+                codex_turn_inflight=locks.codex_turn_inflight, _lock_token=_PERMIT_TOKEN,
+            )
         finally:
             if presence_fd is not None:
                 try:

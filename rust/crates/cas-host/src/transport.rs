@@ -25,7 +25,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::error::HostError;
-use crate::locks::PresenceWalGuard;
+use crate::locks::{OfflineWriteLockGuard, PresenceWalGuard};
 use crate::paths::{
     HostEnvironmentPaths, atomic_write_bytes, atomic_write_text, deterministic_uuid,
     expand_existing_with_sidecars, now_iso, validated_child_path,
@@ -34,7 +34,7 @@ use crate::registry::{ProjectRegistry, WorkspaceProjectBinding};
 use crate::rpc_agy::fetch_agy_trajectory_via_rpc;
 use crate::rpc_codex::fetch_codex_thread_via_rpc;
 use crate::sqlite::{
-    ensure_agy_conversation_db_schema, ensure_agy_summaries_db_schema,
+    SqliteWritePermit, ensure_agy_conversation_db_schema, ensure_agy_summaries_db_schema,
     ensure_codex_state_db_schema, open_locked_rw_sqlite, open_readonly_sqlite,
 };
 
@@ -640,6 +640,7 @@ impl DefaultHostTransport {
         incremental: bool,
         effective_lineage: &SubagentLineage,
         forked_from_cascade_id: Option<&CascadeId>,
+        permit: SqliteWritePermit<'_>,
     ) -> Result<(PathBuf, Vec<AgyRawStepRow>), HostError> {
         let conv_db = validated_child_path(
             &self.paths.agy_data_dir,
@@ -649,7 +650,7 @@ impl DefaultHostTransport {
         let mut traj_id =
             TrajectoryId::parse(&deterministic_uuid("agy-trajectory", target_cid.as_str()))?;
         let is_incremental = incremental && conv_db.is_file() && !events.is_empty();
-        let conn = open_locked_rw_sqlite(&conv_db)?;
+        let conn = open_locked_rw_sqlite(&conv_db, permit)?;
         ensure_agy_conversation_db_schema(&conn)?;
 
         if let Ok(existing_tid) = conn.query_row(
@@ -889,6 +890,7 @@ impl DefaultHostTransport {
         conv_db: &Path,
         source_tag: AgyGuiSafeSource,
         effective_lineage: &SubagentLineage,
+        lock_guard: &OfflineWriteLockGuard,
     ) -> Result<(), HostError> {
         let viewed_iso = now_iso();
         let mut summary_proj = persisted_ledger.project_agy_cascade_summary(
@@ -923,7 +925,7 @@ impl DefaultHostTransport {
         }
 
         let sum_db = self.paths.agy_data_dir.join("conversation_summaries.db");
-        let sconn = open_locked_rw_sqlite(&sum_db)?;
+        let sconn = open_locked_rw_sqlite(&sum_db, SqliteWritePermit::Locked(lock_guard))?;
         ensure_agy_summaries_db_schema(&sconn)?;
         let ws_uris_json = serde_json::to_string(
             &summary_proj
@@ -996,7 +998,7 @@ impl DefaultHostTransport {
         cascade_id: Option<&CascadeId>,
         events: &[CanonicalEvent],
         full_ledger: &TrajectoryLedger,
-        lock_snapshot: &HostLockSnapshot,
+        lock_guard: &OfflineWriteLockGuard,
         mode: TransportMode,
         parent_cascade_id: Option<&CascadeId>,
         source_tag: AgyGuiSafeSource,
@@ -1010,7 +1012,7 @@ impl DefaultHostTransport {
                 mode.as_str()
             )));
         }
-        if !lock_snapshot.can_write_agy_offline() {
+        if !lock_guard.snapshot.can_write_agy_offline() {
             return Err(HostError::Runtime(
                 "Cannot raw-write Antigravity storage while presence lock, daemon WAL, or in-flight turn is active.".to_owned(),
             ));
@@ -1035,6 +1037,7 @@ impl DefaultHostTransport {
             incremental,
             &eff_lineage,
             forked_from_cascade_id,
+            SqliteWritePermit::Locked(lock_guard),
         )?;
         let persisted_ledger = decode_agy_trajectory(
             binding.parsed_path(),
@@ -1050,6 +1053,7 @@ impl DefaultHostTransport {
             &conv_db,
             source_tag,
             &eff_lineage,
+            lock_guard,
         )?;
         Ok(target_cid)
     }
@@ -1165,6 +1169,7 @@ impl DefaultHostTransport {
         atomic_write_text(&gs_path, &gs_text)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn write_codex_companion_stores(
         &self,
         binding: &WorkspaceProjectBinding,
@@ -1173,6 +1178,7 @@ impl DefaultHostTransport {
         full_ledger: &TrajectoryLedger,
         lineage: Option<&SubagentLineage>,
         effective_parent_tid: Option<&CodexThreadId>,
+        lock_guard: &OfflineWriteLockGuard,
     ) -> Result<(), HostError> {
         let thread_proj =
             full_ledger.project_codex_thread_summary(target_tid, &binding.codex_project_id)?;
@@ -1203,7 +1209,7 @@ impl DefaultHostTransport {
         };
 
         let state_db = self.paths.codex_home_dir.join("state_5.sqlite");
-        let conn = open_locked_rw_sqlite(&state_db)?;
+        let conn = open_locked_rw_sqlite(&state_db, SqliteWritePermit::Locked(lock_guard))?;
         ensure_codex_state_db_schema(&conn)?;
         conn.execute(
             r#"
@@ -1247,7 +1253,7 @@ impl DefaultHostTransport {
         thread_id: Option<&CodexThreadId>,
         events: &[CanonicalEvent],
         full_ledger: &TrajectoryLedger,
-        lock_snapshot: &HostLockSnapshot,
+        lock_guard: &OfflineWriteLockGuard,
         mode: TransportMode,
         parent_thread_id: Option<&CodexThreadId>,
         incremental: bool,
@@ -1259,7 +1265,7 @@ impl DefaultHostTransport {
                 mode.as_str()
             )));
         }
-        if !lock_snapshot.can_write_codex_offline() {
+        if !lock_guard.snapshot.can_write_codex_offline() {
             return Err(HostError::Runtime(
                 "Cannot raw-write Codex storage while app-server daemon, WAL lock, or in-flight turn is active.".to_owned(),
             ));
@@ -1316,6 +1322,7 @@ impl DefaultHostTransport {
             full_ledger,
             lineage,
             eff_parent_tid.as_ref(),
+            lock_guard,
         )?;
         Ok(target_tid)
     }
@@ -1457,7 +1464,7 @@ impl DefaultHostTransport {
         ) && conv_db.is_file()
             && locks.can_write_agy_offline()
             && self.agy_companions_missing(&binding, cascade_id, lineage)
-            && let Ok(_lock) = guard.acquire_offline_write_locks(
+            && let Ok(lock) = guard.acquire_offline_write_locks(
                 HostKind::Antigravity,
                 Some(cascade_id),
                 Some(codex_thread_id),
@@ -1501,6 +1508,7 @@ impl DefaultHostTransport {
                     &conv_db,
                     source_tag,
                     &eff_lin,
+                    &lock,
                 )?;
                 Ok(updated)
             })();
@@ -1514,7 +1522,7 @@ impl DefaultHostTransport {
 
         if locks.can_write_codex_offline()
             && self.codex_companions_missing(&binding, codex_thread_id)
-            && let Ok(_lock) = guard.acquire_offline_write_locks(
+            && let Ok(lock) = guard.acquire_offline_write_locks(
                 HostKind::Codex,
                 Some(cascade_id),
                 Some(codex_thread_id),
@@ -1533,7 +1541,7 @@ impl DefaultHostTransport {
             )
         {
             let res: Result<WorkspaceProjectBinding, HostError> = (|| {
-                let updated = registry.ensure_codex_binding(&binding.workspace_path)?;
+                let updated = registry.ensure_codex_binding(&binding.workspace_path, &lock)?;
                 self.write_codex_companion_stores(
                     &updated,
                     codex_thread_id,
@@ -1541,6 +1549,7 @@ impl DefaultHostTransport {
                     c_ledger,
                     Some(lineage),
                     lineage.parent_codex_thread_id.as_ref(),
+                    &lock,
                 )?;
                 Ok(updated)
             })();

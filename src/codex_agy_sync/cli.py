@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from .bridge import HostEnvironmentPaths, SyncBusyLockError, TransportMode
 from .workspace import AgyGuiSafeSource, CascadeId, CodexThreadId, PACKAGE_VERSION, normalize_workspace_spec
@@ -475,15 +475,25 @@ def _matches_exc(exc: Exception, rel_mod: str, attr: str) -> bool:
     return any(base.__name__ == attr and base.__module__ == target_mod for base in type(exc).__mro__)
 
 
+@runtime_checkable
+class _ErrorPayloadException(Protocol):
+    def to_error_payload(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class _ReceiptException(Protocol):
+    receipt: Any
+
+
 def _exception_to_error_payload(exc: Exception, subcommand: str) -> dict[str, Any]:
     if isinstance(exc, SyncBusyLockError):
         return exc.to_error_payload()
     if isinstance(exc, FileNotFoundError):
         return {"error": "file_not_found", "message": str(exc)}
-    if _matches_exc(exc, ".bridge.registry", "UnpairedWorkspaceError"):
-        return exc.to_error_payload()  # type: ignore[attr-defined]
-    if _matches_exc(exc, ".bridge.handoff_store", "HandoffPendingError"):
-        receipt = exc.receipt  # type: ignore[attr-defined]
+    if _matches_exc(exc, ".bridge.registry", "UnpairedWorkspaceError") and isinstance(exc, _ErrorPayloadException):
+        return exc.to_error_payload()
+    if _matches_exc(exc, ".bridge.handoff_store", "HandoffPendingError") and isinstance(exc, _ReceiptException):
+        receipt = exc.receipt
         receipt_dict = dataclasses.asdict(receipt)
         return {
             **receipt_dict,
