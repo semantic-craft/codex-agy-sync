@@ -222,7 +222,7 @@ pub fn is_sqlite_shm_wal_locked(db_path: &Path) -> bool {
     };
     // SAFETY: `file.as_raw_fd()` is valid and `fl` is a properly initialized `libc::flock`.
     let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut fl) };
-    rc == 0 && i32::from(fl.l_type) != i32::from(libc::F_UNLCK)
+    rc == 0 && i64::from(fl.l_type) != i64::from(libc::F_UNLCK)
 }
 
 /// RAII critical-section guard holding `sync.lock` and optional Antigravity `presence/<id>.lock`.
