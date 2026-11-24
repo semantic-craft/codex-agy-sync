@@ -106,12 +106,10 @@ class _RolloutTurnTracker:
 def _zstd_module() -> tuple[str, Any] | None:
     try:
         from compression import zstd  # type: ignore[attr-defined]
-
         return ("stdlib", zstd)
     except ImportError:
         try:
             import zstandard  # type: ignore[import-not-found]
-
             return ("zstandard", zstandard)
         except ImportError:
             return None
@@ -137,7 +135,6 @@ def _iter_zstandard_chunks(fh: io.BufferedReader | io.BytesIO, mod: Any) -> Iter
 
 
 def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
-    """Decompress zstd-compressed Codex rollout bytes into UTF-8 text."""
     if not raw_bytes.startswith(_ZSTD_MAGIC):
         raise ValueError("Invalid or truncated zstd rollout stream: empty or invalid zstd header")
     backend = _zstd_module()
@@ -152,7 +149,6 @@ def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
 
 
 def compress_zstd_rollout_bytes(text: str) -> bytes:
-    """Compress UTF-8 Codex rollout text into zstd frame bytes."""
     payload, backend = text.encode("utf-8"), _zstd_module()
     if backend is not None:
         return backend[1].compress(payload) if backend[0] == "stdlib" else backend[1].ZstdCompressor().compress(payload)
