@@ -126,11 +126,17 @@ def _zstd_error_types(backend: tuple[str, Any] | None) -> tuple[type[BaseExcepti
 
 def decompress_zstd_rollout_bytes(raw_bytes: bytes) -> str:
     """Decompress zstd-compressed Codex rollout bytes into UTF-8 text."""
+    if not raw_bytes.startswith(_ZSTD_MAGIC):
+        raise ValueError("Invalid or truncated zstd rollout stream: empty or invalid zstd header")
     backend = _zstd_module()
     try:
         if backend is not None:
             kind, mod = backend
-            data = mod.decompress(raw_bytes) if kind == "stdlib" else mod.ZstdDecompressor().decompress(raw_bytes)
+            if kind == "stdlib":
+                data = mod.decompress(raw_bytes)
+            else:
+                with mod.ZstdDecompressor().stream_reader(io.BytesIO(raw_bytes), read_across_frames=True) as zr:
+                    data = zr.read()
             return data.decode("utf-8", errors="replace")
         proc = subprocess.run(["zstd", "-d", "-c"], input=raw_bytes, capture_output=True, check=True)
         return proc.stdout.decode("utf-8", errors="replace")
@@ -158,11 +164,14 @@ def _iter_binary_lf_lines(stream: Iterable[bytes]) -> Iterator[CodexRawRolloutLi
 def iter_codex_rollout_lines(path: Path) -> Iterator[CodexRawRolloutLine]:
     """Stream `.jsonl` or `.jsonl.zst` Codex rollout lines splitting strictly on LF."""
     with path.open("rb") as fh:
-        is_zst = path.name.endswith(".zst") or fh.read(4) == _ZSTD_MAGIC
+        header = fh.read(4)
+    is_zst = path.name.endswith(".zst") or header == _ZSTD_MAGIC
     if not is_zst:
         with path.open("rb") as fh:
             yield from _iter_binary_lf_lines(fh)
         return
+    if header != _ZSTD_MAGIC:
+        raise ValueError("Invalid or truncated zstd rollout stream: empty or invalid zstd header")
     backend = _zstd_module()
     try:
         if backend is not None and backend[0] == "stdlib":
