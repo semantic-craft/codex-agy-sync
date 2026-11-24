@@ -4,6 +4,7 @@ import SwiftUI
 
 public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
     case general
+    case desktopTools
     case updates
 
     public var id: String { rawValue }
@@ -12,6 +13,8 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .general:
             return AppCopy.text(.settingsTabGeneral, in: language)
+        case .desktopTools:
+            return AppCopy.text(.settingsTabDesktopTools, in: language)
         case .updates:
             return AppCopy.text(.settingsTabUpdates, in: language)
         }
@@ -21,6 +24,8 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .general:
             return "slider.horizontal.3"
+        case .desktopTools:
+            return "macwindow.on.rectangle"
         case .updates:
             return "arrow.triangle.2.circlepath.circle"
         }
@@ -45,6 +50,9 @@ public struct SettingsView: View {
     private let preferencesStore: PreferencesStore
     private let updateViewModel: UpdateViewModel
     private let navigation: SettingsNavigationModel
+    private let inputHub: DesktopInputHub?
+    private let windowResizeDiagnostic: String?
+    private let windowResizeStatusStore: WindowResizeStatusStore?
     private let onDidChangeCLI: (() -> Void)?
 
     @State private var hostWindowBox = WeakWindowBox()
@@ -54,11 +62,17 @@ public struct SettingsView: View {
         updateViewModel: UpdateViewModel,
         initialTab: SettingsTab = .general,
         navigation: SettingsNavigationModel? = nil,
+        inputHub: DesktopInputHub? = nil,
+        windowResizeDiagnostic: String? = nil,
+        windowResizeStatusStore: WindowResizeStatusStore? = nil,
         onDidChangeCLI: (() -> Void)? = nil
     ) {
         self.preferencesStore = preferencesStore
         self.updateViewModel = updateViewModel
         self.navigation = navigation ?? SettingsNavigationModel(selectedTab: initialTab)
+        self.inputHub = inputHub
+        self.windowResizeDiagnostic = windowResizeDiagnostic
+        self.windowResizeStatusStore = windowResizeStatusStore
         self.onDidChangeCLI = onDidChangeCLI
     }
 
@@ -76,6 +90,13 @@ public struct SettingsView: View {
                     GeneralSettingsPane(
                         preferencesStore: preferencesStore,
                         hostWindowBox: hostWindowBox
+                    )
+                case .desktopTools:
+                    DesktopToolsSettingsPane(
+                        preferencesStore: preferencesStore,
+                        inputHub: inputHub,
+                        windowResizeDiagnostic: windowResizeDiagnostic,
+                        windowResizeStatusStore: windowResizeStatusStore
                     )
                 case .updates:
                     UpdatesSettingsPane(

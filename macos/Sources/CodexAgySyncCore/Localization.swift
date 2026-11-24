@@ -218,6 +218,7 @@ public enum AppCopyKey: CaseIterable, Sendable {
 
     case settingsWindowTitle
     case settingsTabGeneral
+    case settingsTabDesktopTools
     case settingsTabUpdates
     case settingsLanguageTitle
     case settingsLanguageSubtitle
@@ -300,6 +301,49 @@ public enum AppCopyKey: CaseIterable, Sendable {
     case menuCopy
     case menuPaste
     case menuSelectAll
+
+    case desktopPermissionsTitle
+    case desktopPermissionsSubtitle
+    case desktopPermissionsRecheck
+    case desktopPermissionsPausedWarning
+    case desktopPermissionAccessibilityTitle
+    case desktopPermissionInputMonitoringTitle
+    case desktopPermissionsRequest
+    case desktopPermissionsOpenSettings
+    case desktopPermissionGrantedBadge
+    case desktopPermissionMissingBadge
+
+    case windowResizeCardTitle
+    case windowResizeCardSubtitle
+    case windowResizeEnableAX
+    case windowResizeNearestCornerTitle
+    case windowResizeNearestCornerSubtitle
+    case windowResizeGesturesHeader
+    case windowResizeGestureMoveDesc
+    case windowResizeGestureResizeDesc
+    case windowResizeGestureTilingDesc
+    case windowResizeGestureSplitDesc
+    case windowResizeConflictsTitle
+    case windowResizeNativeTilingOverlapNote
+    case windowResizeConflictLimitationNote
+    case windowResizeClearDiagnostic
+    case windowResizeDiagnosticPermissionDenied
+
+    case windowResizeHUDSplitLeft
+    case windowResizeHUDSplitRight
+    case windowResizeHUDEnterFullScreen
+    case windowResizeHUDExitFullScreen
+    case windowResizeHUDNeutralPrompt
+    case windowResizeHUDCancelHint
+
+    case excludedAppsTitle
+    case excludedAppsSubtitle
+    case excludedAppsAddRunning
+    case excludedAppsNoRunningCandidates
+    case excludedAppsChooseApp
+    case excludedAppsChoosePanelTitle
+    case excludedAppsEmpty
+    case excludedAppsRemove
 }
 
 public enum AppCopy {
@@ -410,6 +454,8 @@ public enum AppCopy {
             return BilingualText(zhHans: "CodexAgySync 设置", en: "CodexAgySync Settings")
         case .settingsTabGeneral:
             return BilingualText(zhHans: "常规与同步", en: "General & Sync")
+        case .settingsTabDesktopTools:
+            return BilingualText(zhHans: "桌面工具", en: "Desktop Tools")
         case .settingsTabUpdates:
             return BilingualText(zhHans: "版本与更新", en: "Version & Updates")
         case .settingsLanguageTitle:
@@ -603,6 +649,112 @@ public enum AppCopy {
             return BilingualText(zhHans: "粘贴", en: "Paste")
         case .menuSelectAll:
             return BilingualText(zhHans: "全选", en: "Select All")
+
+        case .desktopPermissionsTitle:
+            return BilingualText(zhHans: "系统权限状态", en: "System Permissions")
+        case .desktopPermissionsSubtitle:
+            return BilingualText(
+                zhHans: "仅在开启桌面工具时使用；默认关闭不会弹窗请求权限，会话同步与 ⌃⌥H 不受影响。",
+                en: "Used only when desktop tools are enabled. Default off never prompts, and session sync with ⌃⌥H keeps working."
+            )
+        case .desktopPermissionsRecheck:
+            return BilingualText(zhHans: "重新检测", en: "Re-check")
+        case .desktopPermissionsPausedWarning:
+            return BilingualText(
+                zhHans: "窗口调整已开启但缺少所需权限，当前处于安全暂停状态（所有按键与鼠标事件透传）。请授予权限后点击“重新检测”。",
+                en: "Window Resize is enabled but missing required permissions. Input passes through safely until permissions are granted."
+            )
+        case .desktopPermissionAccessibilityTitle:
+            return BilingualText(zhHans: "辅助功能（Accessibility）", en: "Accessibility")
+        case .desktopPermissionInputMonitoringTitle:
+            return BilingualText(zhHans: "输入监控（Input Monitoring）", en: "Input Monitoring")
+        case .desktopPermissionsRequest:
+            return BilingualText(zhHans: "请求权限", en: "Request")
+        case .desktopPermissionsOpenSettings:
+            return BilingualText(zhHans: "打开系统设置", en: "Open Settings")
+        case .desktopPermissionGrantedBadge:
+            return BilingualText(zhHans: "已授权", en: "Granted")
+        case .desktopPermissionMissingBadge:
+            return BilingualText(zhHans: "未授权", en: "Not Granted")
+
+        case .windowResizeCardTitle:
+            return BilingualText(zhHans: "窗口调整（Window Resize）", en: "Window Resize")
+        case .windowResizeCardSubtitle:
+            return BilingualText(
+                zhHans: "无需点击激活即可移动/缩放指针下窗口，并通过系统原生菜单调用平铺、全屏与 Split View。",
+                en: "Move or resize the window under the pointer without focusing it, and trigger native macOS tiling, full screen, and Split View."
+            )
+        case .windowResizeEnableAX:
+            return BilingualText(zhHans: "启用窗口调整", en: "Enable Window Resize")
+        case .windowResizeNearestCornerTitle:
+            return BilingualText(zhHans: "从最近角调整尺寸（Nearest Corner）", en: "Resize from Nearest Corner")
+        case .windowResizeNearestCornerSubtitle:
+            return BilingualText(
+                zhHans: "开启后按指针所在象限锁定最近窗口角缩放；关闭时固定以右下角缩放。",
+                en: "Locks the nearest window quadrant when resizing; when off, resizes from the bottom-right corner."
+            )
+        case .windowResizeGesturesHeader:
+            return BilingualText(zhHans: "快捷键与手势说明", en: "Shortcuts & Gestures")
+        case .windowResizeGestureMoveDesc:
+            return BilingualText(zhHans: "移动指针下窗口（无需先点击激活）", en: "Move window under pointer without clicking to focus")
+        case .windowResizeGestureResizeDesc:
+            return BilingualText(zhHans: "调整指针下窗口尺寸（可拖动中按/松 Option 切换）", en: "Resize window under pointer (toggle Option live mid-drag)")
+        case .windowResizeGestureTilingDesc:
+            return BilingualText(zhHans: "对当前活跃窗口调用系统原生平铺 / 填充 / 居中 / 还原", en: "Native macOS Tile / Fill / Center / Restore on active window")
+        case .windowResizeGestureSplitDesc:
+            return BilingualText(zhHans: "松手应用：左/右 Split View，上全屏，下退出全屏/分屏，Esc 取消", en: "Apply on release: Left/Right Split View, Up Full Screen, Down Exit, Esc cancels")
+        case .windowResizeConflictsTitle:
+            return BilingualText(zhHans: "检测到快捷键冲突", en: "Detected Shortcut Conflicts")
+        case .windowResizeNativeTilingOverlapNote:
+            return BilingualText(
+                zhHans: "说明：fn + ctrl + 方向键 / F / C / R 与 macOS 15+ 原生“窗口 -> 移动并调整大小”键位一致，本功能会直接触发原生菜单动作。",
+                en: "Note: fn + ctrl + Arrows / F / C / R matches macOS 15+ native Window -> Move & Resize shortcuts and invokes those native menu actions directly."
+            )
+        case .windowResizeConflictLimitationNote:
+            return BilingualText(
+                zhHans: "提示：macOS 公开 API 无法自动检测第三方窗口/快捷键工具（如 Rectangle、Magnet、Raycast）或外接键盘固件 Fn 键占用；如遇按键无响应请检查上述冲突来源。",
+                en: "Note: macOS public APIs cannot detect third-party tools (such as Rectangle, Magnet, or Raycast) or external keyboards whose firmware does not report Fn."
+            )
+        case .windowResizeClearDiagnostic:
+            return BilingualText(zhHans: "清除", en: "Dismiss")
+        case .windowResizeDiagnosticPermissionDenied:
+            return BilingualText(
+                zhHans: "上次原生窗口操作未执行：缺少辅助功能权限。",
+                en: "Last native window action was skipped: Accessibility permission is missing."
+            )
+
+        case .windowResizeHUDSplitLeft:
+            return BilingualText(zhHans: "左侧 Split View（松手应用）", en: "Split View Left (Release to Apply)")
+        case .windowResizeHUDSplitRight:
+            return BilingualText(zhHans: "右侧 Split View（松手应用）", en: "Split View Right (Release to Apply)")
+        case .windowResizeHUDEnterFullScreen:
+            return BilingualText(zhHans: "进入全屏（松手应用）", en: "Enter Full Screen (Release to Apply)")
+        case .windowResizeHUDExitFullScreen:
+            return BilingualText(zhHans: "退出全屏 / 分屏（松手应用）", en: "Exit Full Screen / Split (Release to Apply)")
+        case .windowResizeHUDNeutralPrompt:
+            return BilingualText(zhHans: "向四方向拖动选择分屏或全屏", en: "Drag in a direction for Split View or Full Screen")
+        case .windowResizeHUDCancelHint:
+            return BilingualText(zhHans: "退回中心或按 Esc 取消", en: "Return to center or press Esc to cancel")
+
+        case .excludedAppsTitle:
+            return BilingualText(zhHans: "排除应用", en: "Excluded Apps")
+        case .excludedAppsSubtitle:
+            return BilingualText(
+                zhHans: "列表中的应用将完整透传所有窗口调整按键与鼠标手势。",
+                en: "Apps in this list receive all keys and pointer gestures untouched."
+            )
+        case .excludedAppsAddRunning:
+            return BilingualText(zhHans: "从运行中应用添加", en: "Add Running App")
+        case .excludedAppsNoRunningCandidates:
+            return BilingualText(zhHans: "没有可添加的运行中应用", en: "No additional running apps")
+        case .excludedAppsChooseApp:
+            return BilingualText(zhHans: "选择应用…", en: "Choose App…")
+        case .excludedAppsChoosePanelTitle:
+            return BilingualText(zhHans: "选择要排除的应用程序", en: "Choose Application to Exclude")
+        case .excludedAppsEmpty:
+            return BilingualText(zhHans: "暂未排除任何应用", en: "No excluded apps")
+        case .excludedAppsRemove:
+            return BilingualText(zhHans: "移除", en: "Remove")
         }
     }
 
@@ -1195,6 +1347,54 @@ public enum AppCopy {
             return "远端检查不可用（\(detail)）；可直接从本地源码仓 v\(repoVersion) 同步构建。"
         case .en:
             return "Remote check unavailable (\(detail)); sync directly from local repo v\(repoVersion)."
+        }
+    }
+
+    public static func windowResizeDiagnosticUnsupportedApp(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "目标应用不支持该系统原生窗口动作（\(detail)）。"
+        case .en:
+            return "Target app does not support this native window action (\(detail))."
+        }
+    }
+
+    public static func windowResizeDiagnosticUnsupportedSystem(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "当前系统状态不支持该原生窗口动作（\(detail)）。"
+        case .en:
+            return "Current system state does not support this native window action (\(detail))."
+        }
+    }
+
+    public static func windowResizeConflictInternal(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "应用内部快捷键冲突：\(detail)"
+        case .en:
+            return "Internal shortcut conflict: \(detail)"
+        }
+    }
+
+    public static func windowResizeConflictSymbolic(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "与系统符号快捷键冲突：\(detail)"
+        case .en:
+            return "Conflicts with a macOS system shortcut: \(detail)"
         }
     }
 }

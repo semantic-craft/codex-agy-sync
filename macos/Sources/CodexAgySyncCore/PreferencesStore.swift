@@ -220,6 +220,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         case localRepoPathForSync
         case language
         case autoUpdatePolicy
+        case windowResize
     }
 
     public var showAttentionDotOnStatusIcon: Bool
@@ -231,6 +232,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
     public var localRepoPathForSync: String?
     public var language: AppLanguage
     public var autoUpdatePolicy: AutoUpdatePolicy
+    public var windowResize: WindowResizePreferences
 
     public init(
         showAttentionDotOnStatusIcon: Bool = true,
@@ -241,7 +243,8 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         customCLIPath: String? = nil,
         localRepoPathForSync: String? = nil,
         language: AppLanguage = .zhHans,
-        autoUpdatePolicy: AutoUpdatePolicy = .checkOnly
+        autoUpdatePolicy: AutoUpdatePolicy = .checkOnly,
+        windowResize: WindowResizePreferences = WindowResizePreferences()
     ) {
         self.showAttentionDotOnStatusIcon = showAttentionDotOnStatusIcon
         self.hotKey = hotKey
@@ -252,6 +255,11 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         self.localRepoPathForSync = Self.normalizedOptionalPath(localRepoPathForSync)
         self.language = language
         self.autoUpdatePolicy = autoUpdatePolicy
+        self.windowResize = WindowResizePreferences(
+            isEnabled: windowResize.isEnabled,
+            nearestCornerResize: windowResize.nearestCornerResize,
+            excludedBundleIds: windowResize.excludedBundleIds
+        )
     }
 
     public init(from decoder: Decoder) throws {
@@ -274,6 +282,8 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         self.language = rawLanguage.flatMap(AppLanguage.init(rawValue:)) ?? .zhHans
         let rawAutoUpdatePolicy = try container.decodeIfPresent(String.self, forKey: .autoUpdatePolicy)
         self.autoUpdatePolicy = rawAutoUpdatePolicy.flatMap(AutoUpdatePolicy.init(rawValue:)) ?? .checkOnly
+        self.windowResize = try container.decodeIfPresent(WindowResizePreferences.self, forKey: .windowResize)
+            ?? WindowResizePreferences()
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -287,6 +297,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         try container.encodeIfPresent(localRepoPathForSync, forKey: .localRepoPathForSync)
         try container.encode(language, forKey: .language)
         try container.encode(autoUpdatePolicy, forKey: .autoUpdatePolicy)
+        try container.encode(windowResize, forKey: .windowResize)
     }
 
     private static func clampFeedLimit(_ value: Int) -> Int {
@@ -476,7 +487,8 @@ public final class PreferencesStore {
             customCLIPath: next.customCLIPath,
             localRepoPathForSync: next.localRepoPathForSync,
             language: next.language,
-            autoUpdatePolicy: next.autoUpdatePolicy
+            autoUpdatePolicy: next.autoUpdatePolicy,
+            windowResize: next.windowResize
         )
         guard next != preferences else { return }
         preferences = next
@@ -549,6 +561,39 @@ public final class PreferencesStore {
 
     public func setLocalRepoPathForSync(_ path: String?) {
         update { $0.localRepoPathForSync = path }
+    }
+
+    public func setWindowResizePreferences(_ value: WindowResizePreferences) {
+        update { $0.windowResize = value }
+    }
+
+    public func setWindowResizeEnabled(_ enabled: Bool) {
+        update { $0.windowResize.isEnabled = enabled }
+    }
+
+    public func setWindowResizeNearestCorner(_ enabled: Bool) {
+        update { $0.windowResize.nearestCornerResize = enabled }
+    }
+
+    public func setWindowResizeExcludedBundleIds(_ bundleIds: [String]) {
+        update { $0.windowResize.excludedBundleIds = ExcludedAppMatcher.normalize(bundleIds) }
+    }
+
+    public func addWindowResizeExcludedBundleId(_ bundleId: String) {
+        update { prefs in
+            var list = prefs.windowResize.excludedBundleIds
+            list.append(bundleId)
+            prefs.windowResize.excludedBundleIds = ExcludedAppMatcher.normalize(list)
+        }
+    }
+
+    public func removeWindowResizeExcludedBundleId(_ bundleId: String) {
+        let normalizedTarget = bundleId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        update { prefs in
+            prefs.windowResize.excludedBundleIds.removeAll { existing in
+                existing.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTarget
+            }
+        }
     }
 
     public func setLaunchAtLogin(_ enabled: Bool) {

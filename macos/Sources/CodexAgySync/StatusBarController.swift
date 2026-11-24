@@ -47,6 +47,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private let router = PopoverRouter()
     private var settingsController: SettingsWindowController?
     private let inputHub: DesktopInputHub
+    private let windowResizeConsumer: WindowResizeConsumer
+    private let windowResizeStatusStore = WindowResizeStatusStore()
+    private let gestureHUDController = GestureHUDController()
     private var hasStarted: Bool = false
     private var keyMonitor: Any?
     private var lastShowAttentionDot: Bool?
@@ -74,6 +77,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         self.updateViewModel = resolvedUpdateVM
         self.environment = environment
         self.inputHub = DesktopInputHub(environment: environment)
+        self.windowResizeConsumer = WindowResizeConsumer(
+            preferences: store.preferencesStore.preferences.windowResize
+        )
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         let router = self.router
@@ -117,7 +123,21 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         self.router.openSettings = { [weak self] tab in
             self?.openSettings(initialTab: tab)
         }
+        self.windowResizeConsumer.setHandlers(
+            onHUDStateChange: { [weak self] hudState in
+                guard let self else { return }
+                self.gestureHUDController.update(
+                    state: hudState,
+                    language: self.store.preferencesStore.effectiveLanguage
+                )
+            },
+            onDiagnosticResult: { [weak self] result in
+                self?.windowResizeStatusStore.record(result)
+            }
+        )
         self.updateViewModel.onPrepareForRelaunch = { [weak self] in
+            self?.gestureHUDController.hide()
+            self?.windowResizeConsumer.handleTapReset()
             self?.inputHub.suspendForRelaunch()
         }
         self.updateViewModel.onRelaunchFailed = { [weak self] in
@@ -178,6 +198,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.updateStatusButtonAppearance()
             self.applyHotKeyPreferences()
+            self.applyDesktopToolsPreferences()
             if self.panel.isVisible {
                 self.positionPanel()
             }
@@ -201,6 +222,16 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         )
     }
 
+    private func applyDesktopToolsPreferences() {
+        guard hasStarted else { return }
+        let windowResizePrefs = store.preferencesStore.preferences.windowResize
+        windowResizeConsumer.updatePreferences(windowResizePrefs)
+        if !windowResizePrefs.isEnabled {
+            gestureHUDController.hide()
+        }
+        _ = inputHub.syncTapState()
+    }
+
     private func registerSyncPanelHotKey() {
         inputHub.registerCarbonHotKey(
             slot: .syncPanel,
@@ -222,8 +253,10 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     func start() {
         installKeyMonitorIfNeeded()
+        inputHub.registerConsumer(windowResizeConsumer)
         hasStarted = true
         applyHotKeyPreferences()
+        applyDesktopToolsPreferences()
 
         if environment["MENUBAR_AUTO_OPEN_PANEL"] == "1" {
             Task { @MainActor [weak self] in
@@ -250,6 +283,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     func stop() {
         hasStarted = false
+        gestureHUDController.hide()
+        windowResizeConsumer.handleTapReset()
+        inputHub.unregisterConsumer(windowResizeConsumer)
         inputHub.stopAll()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
@@ -270,6 +306,8 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             settingsController = SettingsWindowController(
                 preferencesStore: store.preferencesStore,
                 updateViewModel: updateViewModel,
+                inputHub: inputHub,
+                windowResizeStatusStore: windowResizeStatusStore,
                 onDidChangeCLI: { [weak self] in
                     Task { @MainActor in
                         await self?.store.refresh()
