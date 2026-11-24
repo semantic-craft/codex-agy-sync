@@ -43,7 +43,7 @@ pub use paths::{
 pub use registry::{
     PairedSessionDescriptor, ProjectRegistry, WorkspaceBindingDiagnosis, WorkspaceProjectBinding,
     build_workspace_binding_diagnosis, diagnose_workspace_binding, guarded_pair_workspace,
-    pair_workspace_with_mode,
+    pair_workspace_with_mode, pair_workspace_with_registrars,
 };
 pub use rpc_agy::{
     AgyHttpConn, AgyRpcReadResult, encode_agy_create_project_request,
@@ -54,9 +54,9 @@ pub use rpc_codex::{
     import_codex_rollout_via_rpc, register_codex_project_via_rpc,
 };
 pub use sqlite::{
-    ensure_agy_conversation_db_schema, ensure_agy_summaries_db_schema,
-    ensure_codex_state_db_schema, open_locked_rw_sqlite, open_readonly_sqlite,
-    optional_select_columns_sql, table_column_names,
+    HandoffStagingPermit, SqliteWritePermit, ensure_agy_conversation_db_schema,
+    ensure_agy_summaries_db_schema, ensure_codex_state_db_schema, open_locked_rw_sqlite,
+    open_readonly_sqlite, optional_select_columns_sql, table_column_names,
 };
 pub use sync_engine::{
     HandoffCandidate, InspectCounts, InspectReport, InspectWatermark, ReconcileEntry,

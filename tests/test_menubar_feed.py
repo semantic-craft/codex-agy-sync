@@ -152,9 +152,11 @@ class MenubarFeedTest(unittest.TestCase):
                 eff_binding, CascadeId(cid), events, ledger, locks, TransportMode.OFFLINE_STORAGE, lineage=lineage,
             )
         else:
-            self.transport.write_agy_conversation_db(
-                eff_binding, CascadeId(cid), events, ledger, AgyGuiSafeSource.CASCADE_CLIENT, False, lineage or SubagentLineage(), None,
-            )
+            with self.guard.acquire_offline_write_locks(HostKind.ANTIGRAVITY, CascadeId(cid), None) as held:
+                self.transport.write_agy_conversation_db(
+                    eff_binding, CascadeId(cid), events, ledger, AgyGuiSafeSource.CASCADE_CLIENT, False, lineage or SubagentLineage(), None,
+                    permit=held.write_permit(),
+                )
         db_file = self.paths.agy_data_dir / "conversations" / f"{cid}.db"
         os.utime(db_file, (mtime, mtime))
         return db_file

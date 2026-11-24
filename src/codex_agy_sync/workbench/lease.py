@@ -20,9 +20,10 @@ from ..bridge import HostEnvironmentPaths, atomic_write_text, is_pid_alive
 def default_workbench_ui_path() -> Path:
     with contextlib.suppress(Exception):
         ui_res = importlib.resources.files("codex_agy_sync.workbench").joinpath("ui/index.html")
-        cand = Path(os.fspath(ui_res))  # type: ignore[arg-type]
-        if cand.is_file():
-            return cand
+        if isinstance(ui_res, os.PathLike):
+            cand = Path(os.fspath(ui_res))
+            if cand.is_file():
+                return cand
     base = Path(__file__).resolve().parent
     candidates = (base / "ui" / "index.html", base / "workbench.html")
     for candidate in candidates:

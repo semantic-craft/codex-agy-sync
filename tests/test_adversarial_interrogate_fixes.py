@@ -191,9 +191,10 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         zst_dir.mkdir(parents=True, exist_ok=True)
         zst_path = zst_dir / f"rollout-2026-11-12T10-00-00-{tid}.jsonl.zst"
         zst_path.write_bytes(compress_zstd_rollout_bytes(_render_rollout_jsonl(t1_ledger, tid)))
-        with self.bridge.guard.acquire_offline_write_locks(HostKind.CODEX, None, tid):
+        with self.bridge.guard.acquire_offline_write_locks(HostKind.CODEX, None, tid) as held:
             self.bridge.transport.write_codex_companion_stores(
                 binding, tid, zst_path, t1_ledger, self.bridge.resolve_session_lineage(binding, None, tid), None,
+                permit=held.write_permit(),
             )
 
         rec1 = self.bridge.sync_session(self.workspace_dir, codex_thread_id=tid, direction=SyncDirection.CODEX_TO_AGY)
@@ -337,9 +338,10 @@ class TestAdversarialInterrogateFixes(BridgeSandboxBase):
         rdir.mkdir(parents=True, exist_ok=True)
         rpath = rdir / f"rollout-2026-11-12T11-00-00-{tid_stream}.jsonl"
         rpath.write_text(_render_rollout_jsonl(t1_led, tid_stream), encoding="utf-8")
-        with self.bridge.guard.acquire_offline_write_locks(HostKind.CODEX, None, tid_stream):
+        with self.bridge.guard.acquire_offline_write_locks(HostKind.CODEX, None, tid_stream) as held:
             self.bridge.transport.write_codex_companion_stores(
                 binding, tid_stream, rpath, t1_led, self.bridge.resolve_session_lineage(binding, None, tid_stream), None,
+                permit=held.write_permit(),
             )
 
         rec_init = self.bridge.sync_session(

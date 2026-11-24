@@ -32,6 +32,7 @@ from .paths_and_locks import (
     BackupManifest,
     HostEnvironmentPaths,
     HostLockSnapshot,
+    OfflineWriteLock,
     PresenceWalGuard,
     TransportMode,
     atomic_write_text,
@@ -319,7 +320,8 @@ class SyncBridge:
             codex_wm, written_tid = plan.source_ledger.latest_watermark(), plan.target_tid
         else:
             if plan.selected_transport == TransportMode.OFFLINE_STORAGE:
-                binding = self._registry.ensure_codex_binding(binding.workspace_path)
+                permit = held_locks.write_permit() if isinstance(held_locks, OfflineWriteLock) else None
+                binding = self._registry.ensure_codex_binding(binding.workspace_path, permit=permit)
             written_tid = self._transport.apply_to_codex(
                 binding=binding, thread_id=plan.target_tid, events=plan.events, full_ledger=plan.full_ledger,
                 lock_snapshot=held_locks, mode=plan.selected_transport,

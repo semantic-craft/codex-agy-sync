@@ -45,7 +45,15 @@ from .handoff_store import (
     save_handoff_receipt,
 )
 from .native_codex import import_codex_rollout_via_rpc
-from .paths_and_locks import HostEnvironmentPaths, PresenceWalGuard, TransportMode, now_iso, validated_child_path
+from .paths_and_locks import (
+    HostEnvironmentPaths,
+    PresenceWalGuard,
+    SqliteWritePermit,
+    TransportMode,
+    make_staging_write_permit,
+    now_iso,
+    validated_child_path,
+)
 from .registry import ProjectRegistry, UnpairedWorkspaceError, WorkspaceProjectBinding, diagnose_workspace_binding
 from .rescue_and_fork import is_source_actively_running
 from .state_machine import EmptySessionError, SyncDirection, generate_uuid7
@@ -201,12 +209,15 @@ def _stage_agy(
     ledger: TrajectoryLedger,
     stage: Path,
     target_id: str,
+    staging_permit: SqliteWritePermit,
 ) -> tuple[Path, ...]:
     staged_paths = dataclasses.replace(paths, agy_data_dir=stage, agy_cli_data_dir=None)
     transport = DefaultHostTransport(staged_paths)
     cid = CascadeId(target_id)
     lineage = SubagentLineage(root_cascade_id=cid)
-    db, rows = transport.write_agy_conversation_db(binding, cid, ledger.events, ledger, AgyGuiSafeSource.CASCADE_CLIENT, False, lineage, None)
+    db, rows = transport.write_agy_conversation_db(
+        binding, cid, ledger.events, ledger, AgyGuiSafeSource.CASCADE_CLIENT, False, lineage, None, permit=staging_permit,
+    )
     persisted = decode_agy_trajectory(binding.workspace_path, binding.workspace_uri, rows, explicit_title_override=ledger.title)
     _verify_context(ledger, persisted)
     viewed_iso = now_iso()
@@ -233,11 +244,17 @@ def publish_new_file(source: Path, target: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _import_agy(paths: HostEnvironmentPaths, binding: WorkspaceProjectBinding, ledger: TrajectoryLedger, receipt: HandoffReceipt) -> str:
+def _import_agy(
+    paths: HostEnvironmentPaths,
+    binding: WorkspaceProjectBinding,
+    ledger: TrajectoryLedger,
+    receipt: HandoffReceipt,
+    staging_permit: SqliteWritePermit,
+) -> str:
     stage = Path(receipt.staging_path)
     target_id = receipt.target_id
     assert target_id is not None
-    files = _stage_agy(paths, binding, ledger, stage, target_id)
+    files = _stage_agy(paths, binding, ledger, stage, target_id, staging_permit)
     for file in files:
         publish_new_file(file, paths.agy_data_dir / file.relative_to(stage))
     if paths.agy_cli_data_dir is not None and paths.agy_cli_data_dir.resolve(strict=False) != paths.agy_data_dir.resolve(strict=False):
@@ -357,7 +374,11 @@ def _handoff_locked(
     )
     save_handoff_receipt(receipt_path, receipt)
     try:
-        target_id = _import_agy(paths, binding, handed, receipt) if to_agy else _import_codex(paths, binding, handed, receipt)
+        if to_agy:
+            staging_permit = make_staging_write_permit(state / "staging", Path(receipt.staging_path))
+            target_id = _import_agy(paths, binding, handed, receipt, staging_permit)
+        else:
+            target_id = _import_codex(paths, binding, handed, receipt)
     except Exception as exc:
         receipt = dataclasses.replace(receipt, error=f"{type(exc).__name__}: {exc}")
         if getattr(exc, "thread_id", None):

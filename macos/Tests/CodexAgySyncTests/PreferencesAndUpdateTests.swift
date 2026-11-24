@@ -2651,6 +2651,87 @@ final class PreferencesAndUpdateTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: currentBundlePlist.path))
     }
 
+    func testCleanupLegacyUpdateResidueTwoPassUnlinkBranches() throws {
+        let sandbox = try makeSandboxDir()
+        let appSupport = sandbox.appendingPathComponent("Application Support", isDirectory: true)
+        let caches = sandbox.appendingPathComponent("Caches", isDirectory: true)
+        let prefs = sandbox.appendingPathComponent("Preferences", isDirectory: true)
+        try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: caches, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: prefs, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+
+        let legacyBundleID = PreferencesStore.legacyPreferencesSuiteName
+        let legacyAppName = PreferencesStore.legacyAppName
+        let legacyBundlePlist = prefs.appendingPathComponent("\(legacyBundleID).plist", isDirectory: false)
+        let legacyAppPlist = prefs.appendingPathComponent("\(legacyAppName).plist", isDirectory: false)
+
+        final class ScheduledRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            var entries: [(URL, @Sendable () -> Void)] = []
+
+            var urls: [URL] {
+                lock.withLock { entries.map(\.0) }
+            }
+
+            func record(_ url: URL, perform: @escaping @Sendable () -> Void) {
+                lock.withLock { entries.append((url, perform)) }
+            }
+
+            func runAll() {
+                let actions = lock.withLock { entries.map(\.1) }
+                for action in actions {
+                    action()
+                }
+            }
+        }
+
+        try Data("zero-key-bundle".utf8).write(to: legacyBundlePlist)
+        try Data("zero-key-app".utf8).write(to: legacyAppPlist)
+        var clearedZero: [String] = []
+        let scheduledZero = ScheduledRecorder()
+
+        UpdatePathGuard.cleanupLegacyUpdateResidue(
+            appSupportDirectory: appSupport,
+            cachesDirectory: caches,
+            preferencesDirectory: prefs,
+            removeLegacyPreferencesDomains: true,
+            hasLegacyKeys: { _ in false },
+            clearLegacyDomain: { clearedZero.append($0) },
+            delayedReunlink: { scheduledZero.record($0, perform: $1) }
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyBundlePlist.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyAppPlist.path))
+        XCTAssertTrue(clearedZero.isEmpty)
+        XCTAssertTrue(scheduledZero.urls.isEmpty)
+
+        try Data("dirty-key-bundle".utf8).write(to: legacyBundlePlist)
+        var clearedDirty: [String] = []
+        let scheduledDirty = ScheduledRecorder()
+
+        UpdatePathGuard.cleanupLegacyUpdateResidue(
+            appSupportDirectory: appSupport,
+            cachesDirectory: caches,
+            preferencesDirectory: prefs,
+            removeLegacyPreferencesDomains: true,
+            hasLegacyKeys: { $0 == legacyBundleID },
+            clearLegacyDomain: { clearedDirty.append($0) },
+            delayedReunlink: { scheduledDirty.record($0, perform: $1) }
+        )
+
+        XCTAssertEqual(clearedDirty, [legacyBundleID])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyBundlePlist.path))
+        XCTAssertEqual(scheduledDirty.urls, [legacyBundlePlist])
+
+        let recreated42Bytes = Data(repeating: 0x42, count: 42)
+        try recreated42Bytes.write(to: legacyBundlePlist)
+        XCTAssertEqual((try Data(contentsOf: legacyBundlePlist)).count, 42)
+
+        scheduledDirty.runAll()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyBundlePlist.path))
+    }
+
     @MainActor
     func testUnisolatedPreferencesStoreInTestsSkipsHostPersistence() {
         XCTAssertFalse(PreferencesStore.isProductionAppBundleProcess)

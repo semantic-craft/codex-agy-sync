@@ -16,11 +16,12 @@ use cas_core::{
     WorkspaceRootUri,
 };
 use cas_host::{
-    DefaultHostTransport, HostEnvironmentPaths, HostError, MenubarCandidateState, PresenceWalGuard,
-    ProjectRegistry, build_menubar_feed, diagnose_workspace_binding, execute_handoff,
-    handoff_session, inspect_session_ledger, is_pid_alive, open_locked_rw_sqlite,
-    open_readonly_sqlite, pair_workspace_with_mode, parse_ws_ident, reconcile_workspace_handoffs,
-    resolve_handoff_request, summarize_workspace_handoffs,
+    DefaultHostTransport, HandoffStagingPermit, HostEnvironmentPaths, HostError,
+    MenubarCandidateState, PresenceWalGuard, ProjectRegistry, SqliteWritePermit,
+    build_menubar_feed, diagnose_workspace_binding, execute_handoff, handoff_session,
+    inspect_session_ledger, is_pid_alive, open_locked_rw_sqlite, open_readonly_sqlite,
+    pair_workspace_with_mode, pair_workspace_with_registrars, parse_ws_ident,
+    reconcile_workspace_handoffs, resolve_handoff_request, summarize_workspace_handoffs,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -108,9 +109,12 @@ fn sample_ledger(ws: &Path, interrupted: bool) -> TrajectoryLedger {
 #[test]
 fn readonly_sqlite_blocks_mutations_and_pid_alive_checks_self() {
     let tmp = make_sandbox();
-    let db = tmp.path().join("ro.sqlite");
+    let staging_root = tmp.path().join("staging-root");
+    let staging_dir = staging_root.join("run-1");
+    let permit = HandoffStagingPermit::new(&staging_root, &staging_dir).expect("permit");
+    let db = staging_dir.join("ro.sqlite");
     {
-        let rw = open_locked_rw_sqlite(&db).expect("rw");
+        let rw = open_locked_rw_sqlite(&db, SqliteWritePermit::Staging(&permit)).expect("rw");
         rw.execute("CREATE TABLE t (x INT)", []).expect("create");
     }
     let ro = open_readonly_sqlite(&db).expect("ro");
@@ -141,22 +145,24 @@ fn pair_apply_inspect_handoff_and_reconcile_offline_roundtrip() {
 
     let transport = DefaultHostTransport::new(paths.clone());
     let ledger = sample_ledger(&ws, false);
-    let locks = guard
-        .probe_locks(None, None, false, false, false)
-        .expect("locks");
-    let tid = transport
-        .apply_to_codex(
-            &binding,
-            None,
-            &ledger.events,
-            &ledger,
-            &locks,
-            TransportMode::OfflineStorage,
-            None,
-            false,
-            None,
-        )
-        .expect("apply codex");
+    let tid = {
+        let lock_guard = guard
+            .acquire_offline_write_locks(HostKind::Codex, None, None, false, false)
+            .expect("lock guard");
+        transport
+            .apply_to_codex(
+                &binding,
+                None,
+                &ledger.events,
+                &ledger,
+                &lock_guard,
+                TransportMode::OfflineStorage,
+                None,
+                false,
+                None,
+            )
+            .expect("apply codex")
+    };
 
     let insp = inspect_session_ledger(
         &paths,
@@ -360,24 +366,25 @@ fn interrupted_session_promoted_as_hero_within_window() {
     let (binding, _) =
         pair_workspace_with_mode(&paths, &guard, &registry, &ws_str, false).expect("pair");
     let transport = DefaultHostTransport::new(paths.clone());
-    let locks = guard
-        .probe_locks(None, None, false, false, false)
-        .expect("locks");
-
     let interrupted_ledger = sample_ledger(&ws, true);
-    let tid = transport
-        .apply_to_codex(
-            &binding,
-            None,
-            &interrupted_ledger.events,
-            &interrupted_ledger,
-            &locks,
-            TransportMode::OfflineStorage,
-            None,
-            false,
-            None,
-        )
-        .expect("apply interrupted");
+    let tid = {
+        let lock_guard = guard
+            .acquire_offline_write_locks(HostKind::Codex, None, None, false, false)
+            .expect("lock guard");
+        transport
+            .apply_to_codex(
+                &binding,
+                None,
+                &interrupted_ledger.events,
+                &interrupted_ledger,
+                &lock_guard,
+                TransportMode::OfflineStorage,
+                None,
+                false,
+                None,
+            )
+            .expect("apply interrupted")
+    };
 
     let feed = build_menubar_feed(&paths, 6, std::slice::from_ref(&ws_str), None).expect("feed");
     let hero = feed
@@ -590,4 +597,226 @@ fn is_excluded_for_homes_blocks_tcc_and_trash_paths_lexically() {
         &home.join("Projects/demo"),
         &homes
     ));
+}
+
+fn spawn_mock_agy_trajectory_server(agy_data_dir: PathBuf) -> (u16, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind tcp");
+    let port = listener.local_addr().expect("addr").port();
+    let handle = thread::spawn(move || {
+        for conn in listener.incoming().take(2) {
+            let Ok(mut stream) = conn else { break };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut req_line = String::new();
+            if reader.read_line(&mut req_line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let mut content_len = 0usize;
+            loop {
+                let mut h = String::new();
+                if reader.read_line(&mut h).unwrap_or(0) == 0 {
+                    break;
+                }
+                let t = h.trim();
+                if t.is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = t.split_once(':')
+                    && k.trim().eq_ignore_ascii_case("content-length")
+                {
+                    content_len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_len];
+            let _ = reader.read_exact(&mut body);
+            let mut cid_req = String::new();
+            for (fn_tag, wt, _, raw) in iter_wire_fields(&body).unwrap_or_default() {
+                if fn_tag == 1 && wt == 2 {
+                    cid_req = String::from_utf8_lossy(&raw).into_owned();
+                }
+            }
+            let conv_db = agy_data_dir
+                .join("conversations")
+                .join(format!("{cid_req}.db"));
+            let mut traj = encode_string_field(1, "traj-live");
+            if let Ok(c) = open_readonly_sqlite(&conv_db)
+                && let Ok(mut stmt) = c.prepare("SELECT step_payload FROM steps ORDER BY idx ASC")
+                && let Ok(mut rows) = stmt.query([])
+            {
+                while let Ok(Some(row)) = rows.next() {
+                    if let Ok(blob) = row.get::<_, Vec<u8>>(0) {
+                        traj.extend_from_slice(&encode_bytes_field(2, &blob));
+                    }
+                }
+            }
+            let mut resp = encode_bytes_field(1, &traj);
+            resp.extend_from_slice(&encode_varint_field(2, 1));
+            let hdr = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/proto\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                resp.len()
+            );
+            let _ = stream.write_all(hdr.as_bytes());
+            let _ = stream.write_all(&resp);
+            if req_line.contains("GetCascadeTrajectory") && conv_db.is_file() {
+                break;
+            }
+        }
+    });
+    (port, handle)
+}
+
+#[test]
+fn staging_permit_rejects_db_path_outside_staging_dir() {
+    let tmp = make_sandbox();
+    let staging_root = tmp.path().join("staging-root");
+    let staging_dir = staging_root.join("run-1");
+    let escape_res = HandoffStagingPermit::new(&staging_root, tmp.path().join("other").as_path());
+    assert!(matches!(escape_res, Err(HostError::InvalidArgument(_))));
+
+    let permit = HandoffStagingPermit::new(&staging_root, &staging_dir).expect("permit");
+    let outside_db = tmp.path().join("outside.sqlite");
+    let err = open_locked_rw_sqlite(&outside_db, SqliteWritePermit::Staging(&permit));
+    assert!(
+        matches!(err, Err(HostError::InvalidArgument(_))),
+        "expected InvalidArgument for path outside staging dir, got {err:?}"
+    );
+    assert!(!outside_db.exists());
+}
+
+#[test]
+fn codex_to_agy_handoff_succeeds_when_cli_data_dir_equals_or_symlinks_agy_data_dir() {
+    for use_symlink in [false, true] {
+        let tmp = make_sandbox();
+        let (mut paths, ws) = make_sandbox_paths(tmp.path());
+        if use_symlink {
+            let cli_link = tmp.path().join("agy-cli-link");
+            std::os::unix::fs::symlink(&paths.agy_data_dir, &cli_link).expect("symlink");
+            paths.agy_cli_data_dir = Some(cli_link);
+        } else {
+            paths.agy_cli_data_dir = Some(paths.agy_data_dir.clone());
+        }
+
+        let ws_str = ws.display().to_string();
+        let guard = PresenceWalGuard::new(paths.clone());
+        let registry = ProjectRegistry::new(paths.clone());
+        let (binding, _) =
+            pair_workspace_with_mode(&paths, &guard, &registry, &ws_str, false).expect("pair");
+        let transport = DefaultHostTransport::new(paths.clone());
+        let ledger = sample_ledger(&ws, false);
+        let tid = {
+            let lock_guard = guard
+                .acquire_offline_write_locks(HostKind::Codex, None, None, false, false)
+                .expect("lock guard");
+            transport
+                .apply_to_codex(
+                    &binding,
+                    None,
+                    &ledger.events,
+                    &ledger,
+                    &lock_guard,
+                    TransportMode::OfflineStorage,
+                    None,
+                    false,
+                    None,
+                )
+                .expect("apply codex")
+        };
+
+        let (port, srv_handle) = spawn_mock_agy_trajectory_server(paths.agy_data_dir.clone());
+        let daemon_dir = paths.agy_data_dir.join("daemon");
+        fs::create_dir_all(&daemon_dir).expect("daemon dir");
+        let hub_file = daemon_dir.join(format!("hub_{port}.json"));
+        fs::write(
+            &hub_file,
+            json!({
+                "pid": std::process::id(),
+                "httpPort": port,
+                "httpsPort": 0,
+                "lsVersion": "2.30.0",
+                "csrfToken": "ephemeral-test-token"
+            })
+            .to_string(),
+        )
+        .expect("hub json");
+
+        let receipt = handoff_session(
+            &paths,
+            &ws_str,
+            SyncDirection::CodexToAgy,
+            tid.as_str(),
+            None,
+            false,
+            None,
+            None,
+            0,
+            None,
+        )
+        .expect("handoff should succeed when cli_data_dir aliases agy_data_dir");
+        let _ = srv_handle.join();
+        let _ = fs::remove_file(&hub_file);
+        assert_eq!(receipt.status_str(), "ready");
+        let target_cid = receipt.target_id().expect("target cid");
+        let transcript = paths
+            .agy_data_dir
+            .join("brain")
+            .join(target_cid)
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        assert!(transcript.is_file());
+    }
+}
+
+#[test]
+fn pair_workspace_propagates_non_unavailable_rpc_error() {
+    let tmp = make_sandbox();
+    let (paths, ws) = make_sandbox_paths(tmp.path());
+    let ws_str = ws.display().to_string();
+    let guard = PresenceWalGuard::new(paths.clone());
+    let registry = ProjectRegistry::new(paths.clone());
+
+    let agy_err = pair_workspace_with_registrars(
+        &paths,
+        &guard,
+        &registry,
+        &ws_str,
+        true,
+        || {
+            Err(HostError::Runtime(
+                "fatal agy rpc validation error".to_owned(),
+            ))
+        },
+        || Ok("0194b456-1111-7111-8111-111111111111".to_owned()),
+    );
+    assert!(
+        matches!(agy_err, Err(HostError::Runtime(ref msg)) if msg.contains("fatal agy rpc")),
+        "expected Runtime error propagation, got {agy_err:?}"
+    );
+    assert!(
+        !diagnose_workspace_binding(&paths, &ws_str)
+            .expect("diag")
+            .is_paired()
+    );
+
+    let codex_err = pair_workspace_with_registrars(
+        &paths,
+        &guard,
+        &registry,
+        &ws_str,
+        true,
+        || Err(HostError::OnlineRpcUnavailable("agy offline".to_owned())),
+        || {
+            Err(HostError::InvalidArgument(
+                "invalid codex workspace".to_owned(),
+            ))
+        },
+    );
+    assert!(
+        matches!(codex_err, Err(HostError::InvalidArgument(ref msg)) if msg.contains("invalid codex workspace")),
+        "expected InvalidArgument propagation, got {codex_err:?}"
+    );
+    assert!(
+        !diagnose_workspace_binding(&paths, &ws_str)
+            .expect("diag2")
+            .is_paired()
+    );
 }

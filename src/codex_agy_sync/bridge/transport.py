@@ -28,9 +28,10 @@ from ..events import (
 from ..ledger import TrajectoryLedger
 from ..workspace import validate_session_id
 from .paths_and_locks import (
-    HostEnvironmentPaths, HostLockSnapshot, PresenceWalGuard, TransportMode,
-    atomic_write_bytes, atomic_write_text, deterministic_uuid, expand_existing_with_sidecars,
-    now_iso, open_readonly_sqlite, validated_child_path,
+    HostEnvironmentPaths, HostLockSnapshot, OfflineWriteLock, PresenceWalGuard, SqliteWritePermit,
+    TransportMode, atomic_write_bytes, atomic_write_text, deterministic_uuid,
+    expand_existing_with_sidecars, now_iso, open_locked_rw_sqlite, open_readonly_sqlite,
+    validated_child_path,
 )
 from .registry import ProjectRegistry, WorkspaceProjectBinding
 from .rpc import read_agy_ledger_dual_mode, read_codex_ledger_dual_mode
@@ -250,12 +251,12 @@ class DefaultHostTransport:
         events: Sequence[CanonicalEvent], full_ledger: TrajectoryLedger,
         source_tag: AgyGuiSafeSource, incremental: bool,
         effective_lineage: SubagentLineage, forked_from_cascade_id: CascadeId | None,
+        *, permit: SqliteWritePermit,
     ) -> tuple[Path, list[AgyRawStepRow]]:
         conv_db = validated_child_path(self._paths.agy_data_dir, "conversations", f"{target_cid}.db", label="cascade_id")
-        conv_db.parent.mkdir(parents=True, exist_ok=True)
         traj_id = TrajectoryId(deterministic_uuid("agy-trajectory", str(target_cid)))
         is_incremental = incremental and conv_db.is_file() and len(events) > 0
-        conn = sqlite3.connect(str(conv_db), timeout=10.0)
+        conn = open_locked_rw_sqlite(conv_db, permit)
         try:
             ensure_agy_conversation_db_schema(conn)
             if existing_meta := conn.execute("SELECT trajectory_id FROM trajectory_meta LIMIT 1").fetchone():
@@ -345,6 +346,7 @@ class DefaultHostTransport:
         self, binding: WorkspaceProjectBinding, target_cid: CascadeId,
         persisted_ledger: TrajectoryLedger, persisted_step_count: int,
         conv_db: Path, source_tag: AgyGuiSafeSource, effective_lineage: SubagentLineage,
+        *, permit: SqliteWritePermit,
     ) -> None:
         viewed_iso = now_iso()
         summary_proj = persisted_ledger.project_agy_cascade_summary(
@@ -360,7 +362,7 @@ class DefaultHostTransport:
                 if ev.anchor.agy_step_index is not None:
                     last_user_idx = int(ev.anchor.agy_step_index)
         sum_db = self._paths.agy_data_dir / "conversation_summaries.db"
-        sconn = sqlite3.connect(str(sum_db), timeout=10.0)
+        sconn = open_locked_rw_sqlite(sum_db, permit)
         try:
             ensure_agy_summaries_db_schema(sconn)
             sconn.execute(
@@ -398,6 +400,7 @@ class DefaultHostTransport:
         source_tag: AgyGuiSafeSource = AgyGuiSafeSource.CASCADE_CLIENT,
         incremental: bool = False, lineage: SubagentLineage | None = None,
         forked_from_cascade_id: CascadeId | None = None,
+        *, permit: SqliteWritePermit | None = None,
     ) -> CascadeId:
         if mode != TransportMode.OFFLINE_STORAGE:
             raise RuntimeError(f"apply_to_agy requires TransportMode.OFFLINE_STORAGE (got {mode.value}); refusing to raw-write active WAL storage.")
@@ -410,14 +413,24 @@ class DefaultHostTransport:
         target_cid = cascade_id or CascadeId(str(uuid.uuid4()))
         validate_session_id(str(target_cid), label="cascade_id")
         eff_lineage = resolve_effective_agy_lineage(parent_cascade_id, lineage)
-        conv_db, raw_persisted = self.write_agy_conversation_db(
-            binding, target_cid, events, full_ledger, source_tag, incremental, eff_lineage, forked_from_cascade_id
-        )
-        persisted_ledger = decode_agy_trajectory(
-            workspace_path=binding.workspace_path, workspace_uri=binding.workspace_uri,
-            raw_steps=raw_persisted, explicit_title_override=full_ledger.title,
-        )
-        self.write_agy_companion_stores(binding, target_cid, persisted_ledger, len(raw_persisted), conv_db, source_tag, eff_lineage)
+        eff_permit = permit or (lock_snapshot.write_permit() if isinstance(lock_snapshot, OfflineWriteLock) else None)
+        with contextlib.ExitStack() as stack:
+            if eff_permit is None:
+                eff_permit = stack.enter_context(
+                    PresenceWalGuard(self._paths).acquire_offline_write_locks(HostKind.ANTIGRAVITY, target_cid, None)
+                ).write_permit()
+            conv_db, raw_persisted = self.write_agy_conversation_db(
+                binding, target_cid, events, full_ledger, source_tag, incremental, eff_lineage, forked_from_cascade_id,
+                permit=eff_permit,
+            )
+            persisted_ledger = decode_agy_trajectory(
+                workspace_path=binding.workspace_path, workspace_uri=binding.workspace_uri,
+                raw_steps=raw_persisted, explicit_title_override=full_ledger.title,
+            )
+            self.write_agy_companion_stores(
+                binding, target_cid, persisted_ledger, len(raw_persisted), conv_db, source_tag, eff_lineage,
+                permit=eff_permit,
+            )
         return target_cid
 
     def _resolve_or_allocate_codex_rollout_path(self, target_tid: CodexThreadId, *, had_explicit_tid: bool) -> Path:
@@ -477,6 +490,7 @@ class DefaultHostTransport:
         self, binding: WorkspaceProjectBinding, target_tid: CodexThreadId,
         rollout_path: Path, full_ledger: TrajectoryLedger,
         lineage: SubagentLineage | None, effective_parent_tid: CodexThreadId | None,
+        *, permit: SqliteWritePermit,
     ) -> None:
         thread_proj = full_ledger.project_codex_thread_summary(thread_id=target_tid, project_id=binding.codex_project_id)
         created_sec, updated_sec = max(1, thread_proj.created_at_ms // 1000), max(1, thread_proj.updated_at_ms // 1000)
@@ -494,7 +508,7 @@ class DefaultHostTransport:
             )
             if (lineage is not None and lineage.is_subagent) else "desktop"
         )
-        conn = sqlite3.connect(str(self._paths.codex_home_dir / "state_5.sqlite"), timeout=10.0)
+        conn = open_locked_rw_sqlite(self._paths.codex_home_dir / "state_5.sqlite", permit)
         try:
             ensure_codex_state_db_schema(conn)
             conn.execute(
@@ -525,6 +539,7 @@ class DefaultHostTransport:
         lock_snapshot: HostLockSnapshot, mode: TransportMode,
         parent_thread_id: CodexThreadId | None = None,
         incremental: bool = False, lineage: SubagentLineage | None = None,
+        *, permit: SqliteWritePermit | None = None,
     ) -> CodexThreadId:
         if mode != TransportMode.OFFLINE_STORAGE:
             raise RuntimeError(f"apply_to_codex requires TransportMode.OFFLINE_STORAGE (got {mode.value}); refusing to raw-write active WAL storage.")
@@ -539,21 +554,27 @@ class DefaultHostTransport:
         eff_parent_tid = parent_thread_id or (lineage.parent_codex_thread_id if lineage is not None else None)
         if eff_parent_tid is not None:
             validate_session_id(str(eff_parent_tid), label="parent_codex_thread_id")
-        rollout_path = self._resolve_or_allocate_codex_rollout_path(target_tid, had_explicit_tid=(thread_id is not None))
-        if incremental and rollout_path.is_file() and len(events) > 0:
-            prior_lines = [r.raw_json for r in read_codex_rollout_lines(rollout_path)]
-            delta_rollout = encode_codex_rollout(
-                events, starting_line_no=RolloutLineNo(len(prior_lines) + 1),
-                session_id=str(target_tid), cwd=str(binding.workspace_path),
-            )
-            atomic_write_rollout(rollout_path, "\n".join([*prior_lines, *(r.raw_json for r in delta_rollout)]) + "\n")
-        else:
-            full_rollout = encode_codex_rollout(
-                full_ledger, starting_line_no=RolloutLineNo(1),
-                session_id=str(target_tid), cwd=str(binding.workspace_path),
-            )
-            atomic_write_rollout(rollout_path, "\n".join(r.raw_json for r in full_rollout) + ("\n" if full_rollout else ""))
-        self.write_codex_companion_stores(binding, target_tid, rollout_path, full_ledger, lineage, eff_parent_tid)
+        eff_permit = permit or (lock_snapshot.write_permit() if isinstance(lock_snapshot, OfflineWriteLock) else None)
+        with contextlib.ExitStack() as stack:
+            if eff_permit is None:
+                eff_permit = stack.enter_context(
+                    PresenceWalGuard(self._paths).acquire_offline_write_locks(HostKind.CODEX, None, target_tid)
+                ).write_permit()
+            rollout_path = self._resolve_or_allocate_codex_rollout_path(target_tid, had_explicit_tid=(thread_id is not None))
+            if incremental and rollout_path.is_file() and len(events) > 0:
+                prior_lines = [r.raw_json for r in read_codex_rollout_lines(rollout_path)]
+                delta_rollout = encode_codex_rollout(
+                    events, starting_line_no=RolloutLineNo(len(prior_lines) + 1),
+                    session_id=str(target_tid), cwd=str(binding.workspace_path),
+                )
+                atomic_write_rollout(rollout_path, "\n".join([*prior_lines, *(r.raw_json for r in delta_rollout)]) + "\n")
+            else:
+                full_rollout = encode_codex_rollout(
+                    full_ledger, starting_line_no=RolloutLineNo(1),
+                    session_id=str(target_tid), cwd=str(binding.workspace_path),
+                )
+                atomic_write_rollout(rollout_path, "\n".join(r.raw_json for r in full_rollout) + ("\n" if full_rollout else ""))
+            self.write_codex_companion_stores(binding, target_tid, rollout_path, full_ledger, lineage, eff_parent_tid, permit=eff_permit)
         return target_tid
 
     def agy_companions_missing(
@@ -612,7 +633,7 @@ class DefaultHostTransport:
         guard: PresenceWalGuard, registry: ProjectRegistry, conv_db: Path,
     ) -> WorkspaceProjectBinding:
         with contextlib.suppress(BlockingIOError):
-            with guard.acquire_offline_write_locks(HostKind.ANTIGRAVITY, cascade_id, codex_thread_id):
+            with guard.acquire_offline_write_locks(HostKind.ANTIGRAVITY, cascade_id, codex_thread_id) as held:
                 agy_cands, _ = self.candidate_target_paths(
                     HostKind.ANTIGRAVITY, cascade_id, None, binding=binding, lineage=lineage, include_primary_store=False
                 )
@@ -629,6 +650,7 @@ class DefaultHostTransport:
                     self.write_agy_companion_stores(
                         binding, cascade_id, persisted, len(raw_rows), conv_db, source_tag,
                         resolve_effective_agy_lineage(lineage.parent_cascade_id, lineage),
+                        permit=held.write_permit(),
                     )
                 except Exception:
                     backup.restore()
@@ -641,16 +663,18 @@ class DefaultHostTransport:
         guard: PresenceWalGuard, registry: ProjectRegistry,
     ) -> WorkspaceProjectBinding:
         with contextlib.suppress(BlockingIOError, FileNotFoundError):
-            with guard.acquire_offline_write_locks(HostKind.CODEX, cascade_id, codex_thread_id):
+            with guard.acquire_offline_write_locks(HostKind.CODEX, cascade_id, codex_thread_id) as held:
                 rollout_path, _ = self.find_codex_rollout_and_title(codex_thread_id)
                 cx_cands, _ = self.candidate_target_paths(HostKind.CODEX, None, None, include_primary_store=False)
                 backup = guard.create_offline_backup(
                     HostKind.CODEX, str(codex_thread_id), expand_existing_with_sidecars(cx_cands), expected_new_files=cx_cands
                 )
                 try:
-                    binding = registry.ensure_codex_binding(binding.workspace_path)
+                    permit = held.write_permit()
+                    binding = registry.ensure_codex_binding(binding.workspace_path, permit=permit)
                     self.write_codex_companion_stores(
-                        binding, codex_thread_id, rollout_path, codex_ledger, lineage, lineage.parent_codex_thread_id
+                        binding, codex_thread_id, rollout_path, codex_ledger, lineage, lineage.parent_codex_thread_id,
+                        permit=permit,
                     )
                 except Exception:
                     backup.restore()

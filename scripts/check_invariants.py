@@ -17,8 +17,6 @@ from _comment_lexer import discover_repo_files, mask_swift_source, scan_comment_
 
 RAW_SQLITE_ALLOWLIST: frozenset[str] = frozenset({
     "bridge/paths_and_locks.py",
-    "bridge/transport.py",
-    "bridge/registry.py",
 })
 
 TMP_GUARD_ALLOWLIST: frozenset[str] = frozenset({
@@ -174,7 +172,7 @@ def _resolve_call_target(func: ast.AST, mod_aliases: dict[str, str], sym_aliases
 def _check_raw_sqlite_connect(
     parsed_files: list[tuple[str, ast.Module, dict[str, str], dict[str, str]]],
 ) -> list[InvariantViolation]:
-    fix = "Use open_readonly_sqlite() for reads or route locked writes through bridge/paths_and_locks.py."
+    fix = "Use open_readonly_sqlite() for reads or open_locked_rw_sqlite(path, permit) for locked/staging writes."
     prefix = "src/codex_agy_sync/"
     violations: list[InvariantViolation] = []
     for rel_repo, tree, mod_aliases, sym_aliases in parsed_files:

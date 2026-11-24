@@ -433,6 +433,75 @@ if tool == "spctl":
         self.assertNotEqual(tmp_bad.returncode, 0)
         self.assertIn("/tmp", tmp_bad.stderr)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS packaging scripts require Darwin")
+    def test_install_retires_legacy_bundle_in_strict_tcc_lsregister_rm_order(self) -> None:
+        legacy_name = "CodexAgy" + "Handoff"
+        legacy_bundle_id = "dev.semanticcraft.codex-agy-" + "handoff"
+        legacy_bundle = self.home_dir / "Applications" / f"{legacy_name}.app"
+        (legacy_bundle / "Contents").mkdir(parents=True, exist_ok=True)
+        (legacy_bundle / "Contents" / "Info.plist").write_text("<plist/>", encoding="utf-8")
+
+        order_log = self.root / "retire-order.jsonl"
+        stub_template = (
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "tool, log_path, legacy_path = {tool!r}, pathlib.Path({log!r}), pathlib.Path({legacy!r})\n"
+            "rec = {{'tool': tool, 'args': sys.argv[1:], 'legacy_exists': legacy_path.exists()}}\n"
+            "with log_path.open('a', encoding='utf-8') as fh:\n"
+            "    fh.write(json.dumps(rec) + '\\n')\n"
+        )
+        tccutil_stub = self.bin_dir / "tccutil-stub"
+        lsregister_stub = self.bin_dir / "lsregister-stub"
+        _write_executable(
+            tccutil_stub,
+            stub_template.format(tool="tccutil", log=str(order_log), legacy=str(legacy_bundle)),
+        )
+        _write_executable(
+            lsregister_stub,
+            stub_template.format(tool="lsregister", log=str(order_log), legacy=str(legacy_bundle)),
+        )
+
+        env = self._env({
+            "CODEX_AGY_SKIP_LSREGISTER": "0",
+            "CODEX_AGY_TCCUTIL_BIN": str(tccutil_stub),
+            "CODEX_AGY_LSREGISTER_BIN": str(lsregister_stub),
+        })
+        proc = subprocess.run(
+            [str(BUILD_SCRIPT), "--install"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"stderr={proc.stderr}\nstdout={proc.stdout}")
+
+        events = [
+            json.loads(line)
+            for line in order_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        retire_events = [
+            ev for ev in events
+            if ev["tool"] == "tccutil"
+            or (ev["tool"] == "lsregister" and ev["args"] == ["-u", str(legacy_bundle)])
+        ]
+        self.assertEqual(len(retire_events), 2, msg=f"Unexpected retirement sequence: {events}")
+        self.assertEqual(retire_events[0]["tool"], "tccutil")
+        self.assertEqual(retire_events[0]["args"], ["reset", "All", legacy_bundle_id])
+        self.assertIs(retire_events[0]["legacy_exists"], True)
+
+        self.assertEqual(retire_events[1]["tool"], "lsregister")
+        self.assertEqual(retire_events[1]["args"], ["-u", str(legacy_bundle)])
+        self.assertIs(retire_events[1]["legacy_exists"], True)
+
+        self.assertFalse(legacy_bundle.exists())
+        installed_app = self.home_dir / "Applications" / "CodexAgySync.app"
+        self.assertTrue(installed_app.is_dir())
+        self.assertTrue(
+            any(ev["tool"] == "lsregister" and ev["args"] == ["-f", str(installed_app)] for ev in events),
+            msg=f"Missing lsregister -f for installed app in {events}",
+        )
+
     def test_notary_policy_compliance_and_no_hardcoded_private_literals(self) -> None:
         private_profile = "xw" + "-notary"
         custom_profile_re = re.compile(

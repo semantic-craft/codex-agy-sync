@@ -18,14 +18,16 @@ use crate::catalog::{
     uris_match_workspace,
 };
 use crate::error::HostError;
-use crate::locks::PresenceWalGuard;
+use crate::locks::{OfflineWriteLockGuard, PresenceWalGuard};
 use crate::paths::{
     HostEnvironmentPaths, atomic_write_text, deterministic_uuid, expand_existing_with_sidecars,
     parse_ws_ident,
 };
 use crate::rpc_agy::register_agy_project_via_rpc;
 use crate::rpc_codex::register_codex_project_via_rpc;
-use crate::sqlite::{ensure_codex_state_db_schema, open_locked_rw_sqlite, open_readonly_sqlite};
+use crate::sqlite::{
+    SqliteWritePermit, ensure_codex_state_db_schema, open_locked_rw_sqlite, open_readonly_sqlite,
+};
 
 /// Verified bidirectional project identity for a single workspace folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -292,6 +294,7 @@ impl ProjectRegistry {
         ws_path: &WorkspacePath,
         ws_uri: &WorkspaceRootUri,
         ws_name: &str,
+        lock_guard: &OfflineWriteLockGuard,
     ) -> Result<(CodexProjectId, CodexLegacyProjectId), HostError> {
         fs::create_dir_all(&self.paths.codex_home_dir)?;
         let state_db = self.paths.codex_home_dir.join("state_5.sqlite");
@@ -310,7 +313,7 @@ impl ProjectRegistry {
             pid
         } else {
             let pid = deterministic_uuid("codex-project", ws_uri.as_str());
-            let conn = open_locked_rw_sqlite(&state_db)?;
+            let conn = open_locked_rw_sqlite(&state_db, SqliteWritePermit::Locked(lock_guard))?;
             ensure_codex_state_db_schema(&conn)?;
             let next_pos: i64 = conn
                 .query_row(
@@ -406,12 +409,13 @@ impl ProjectRegistry {
     pub fn ensure_workspace_binding(
         &self,
         workspace: &str,
+        lock_guard: &OfflineWriteLockGuard,
     ) -> Result<WorkspaceProjectBinding, HostError> {
         let (ws_path, ws_uri) = parse_ws_ident(workspace)?;
         let ws_name = workspace_display_name(&ws_path);
         let agy_pid = self.ensure_agy_project(&ws_path, &ws_uri, &ws_name)?;
         let (codex_pid, codex_legacy_pid) =
-            self.ensure_codex_project(&ws_path, &ws_uri, &ws_name)?;
+            self.ensure_codex_project(&ws_path, &ws_uri, &ws_name, lock_guard)?;
         Ok(WorkspaceProjectBinding {
             workspace_path: ws_path.to_string(),
             workspace_uri: ws_uri.as_str().to_owned(),
@@ -436,11 +440,13 @@ impl ProjectRegistry {
     pub fn ensure_codex_binding(
         &self,
         workspace: &str,
+        lock_guard: &OfflineWriteLockGuard,
     ) -> Result<WorkspaceProjectBinding, HostError> {
         let mut ro = self.resolve_readonly_binding(workspace)?;
         let ws_path = ro.parsed_path();
         let ws_uri = ro.parsed_uri();
-        let (cp, lp) = self.ensure_codex_project(&ws_path, &ws_uri, &ro.workspace_name)?;
+        let (cp, lp) =
+            self.ensure_codex_project(&ws_path, &ws_uri, &ro.workspace_name, lock_guard)?;
         ro.codex_project_id = cp;
         ro.codex_legacy_project_id = lp;
         Ok(ro)
@@ -668,19 +674,26 @@ fn apply_rpc_project_ids(
     Ok(binding)
 }
 
-/// Pair missing host registrations via online RPC (when preferred) or locked offline backup.
+/// Pair missing host registrations using caller-provided online RPC registrars or locked offline backup.
 ///
-/// Returns `(binding, mode)` where `mode` is `"already_paired"`, `"online_rpc"`, `"hybrid"`, or `"offline_locked"`.
+/// Only falls back to offline pairing on [`HostError::OnlineRpcUnavailable`]; all other RPC errors propagate.
 ///
 /// # Errors
-/// Returns [`HostError::SyncBusyLock`] if an active lock blocks offline registration, or [`HostError`] on failure.
-pub fn pair_workspace_with_mode(
+/// Returns [`HostError::SyncBusyLock`] if an active lock blocks offline registration, or propagates fatal RPC/validation errors.
+#[allow(clippy::too_many_arguments)]
+pub fn pair_workspace_with_registrars<FA, FC>(
     paths: &HostEnvironmentPaths,
     guard: &PresenceWalGuard,
     registry: &ProjectRegistry,
     workspace: &str,
     prefer_online_rpc: bool,
-) -> Result<(WorkspaceProjectBinding, String), HostError> {
+    register_agy: FA,
+    register_codex: FC,
+) -> Result<(WorkspaceProjectBinding, String), HostError>
+where
+    FA: FnOnce() -> Result<String, HostError>,
+    FC: FnOnce() -> Result<String, HostError>,
+{
     let ro_binding = registry.resolve_readonly_binding(workspace)?;
     let ws_path = ro_binding.parsed_path();
     let ws_uri = ro_binding.parsed_uri();
@@ -700,25 +713,27 @@ pub fn pair_workspace_with_mode(
     let mut online_count = 0usize;
 
     if prefer_online_rpc {
-        if need_agy
-            && let Ok(pid) = register_agy_project_via_rpc(
-                paths,
-                workspace,
-                |uri| {
-                    let (wp, wu) = parse_ws_ident(uri.as_str()).ok()?;
-                    registry.find_readonly_agy_project_id(&wp, &wu, None)
-                },
-                5.0,
-            )
-        {
-            agy_rpc_id = Some(pid);
-            need_agy = false;
-            online_count += 1;
+        if need_agy {
+            match register_agy() {
+                Ok(pid) => {
+                    agy_rpc_id = Some(pid);
+                    need_agy = false;
+                    online_count += 1;
+                }
+                Err(HostError::OnlineRpcUnavailable(_)) => {}
+                Err(err) => return Err(err),
+            }
         }
-        if need_codex && let Ok(pid) = register_codex_project_via_rpc(paths, workspace, 5.0) {
-            codex_rpc_id = Some(pid);
-            need_codex = false;
-            online_count += 1;
+        if need_codex {
+            match register_codex() {
+                Ok(pid) => {
+                    codex_rpc_id = Some(pid);
+                    need_codex = false;
+                    online_count += 1;
+                }
+                Err(HostError::OnlineRpcUnavailable(_)) => {}
+                Err(err) => return Err(err),
+            }
         }
     }
 
@@ -794,9 +809,9 @@ pub fn pair_workspace_with_mode(
             &[],
         )?;
         let res = if need_agy {
-            registry.ensure_workspace_binding(workspace)
+            registry.ensure_workspace_binding(workspace, &locks)
         } else {
-            registry.ensure_codex_binding(workspace)
+            registry.ensure_codex_binding(workspace, &locks)
         };
         match res {
             Ok(b) => b,
@@ -824,6 +839,40 @@ pub fn pair_workspace_with_mode(
         CodexThreadId::parse,
     );
     Ok((final_binding, mode))
+}
+
+/// Pair missing host registrations via online RPC (when preferred) or locked offline backup.
+///
+/// Returns `(binding, mode)` where `mode` is `"already_paired"`, `"online_rpc"`, `"hybrid"`, or `"offline_locked"`.
+///
+/// # Errors
+/// Returns [`HostError::SyncBusyLock`] if an active lock blocks offline registration, or [`HostError`] on failure.
+pub fn pair_workspace_with_mode(
+    paths: &HostEnvironmentPaths,
+    guard: &PresenceWalGuard,
+    registry: &ProjectRegistry,
+    workspace: &str,
+    prefer_online_rpc: bool,
+) -> Result<(WorkspaceProjectBinding, String), HostError> {
+    pair_workspace_with_registrars(
+        paths,
+        guard,
+        registry,
+        workspace,
+        prefer_online_rpc,
+        || {
+            register_agy_project_via_rpc(
+                paths,
+                workspace,
+                |uri| {
+                    let (wp, wu) = parse_ws_ident(uri.as_str()).ok()?;
+                    registry.find_readonly_agy_project_id(&wp, &wu, None)
+                },
+                5.0,
+            )
+        },
+        || register_codex_project_via_rpc(paths, workspace, 5.0),
+    )
 }
 
 /// Pair workspace registrations using online RPC when available or offline locked backup.
