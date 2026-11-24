@@ -41,6 +41,13 @@ class MacosNotarizationTest(unittest.TestCase):
         self._install_common_stubs()
 
     def tearDown(self) -> None:
+        lsregister = Path(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        )
+        if lsregister.is_file():
+            for app_dir in sorted(self.root.rglob("*.app")):
+                if app_dir.is_dir():
+                    subprocess.run([str(lsregister), "-u", str(app_dir)], check=False, capture_output=True)
         self._temp.cleanup()
 
     def _install_common_stubs(self) -> None:
