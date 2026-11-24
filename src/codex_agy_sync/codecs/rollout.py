@@ -123,14 +123,15 @@ def _zstd_error_types(backend: tuple[str, Any] | None) -> tuple[type[BaseExcepti
 
 
 def _iter_zstandard_chunks(fh: io.BufferedReader | io.BytesIO, mod: Any) -> Iterator[bytes]:
-    dobj, saw = mod.ZstdDecompressor().decompressobj(read_across_frames=True), False
+    dctx, dobj, saw = mod.ZstdDecompressor(), None, False
     while chunk := fh.read(65536):
-        saw = True
-        if out := dobj.decompress(chunk):
-            yield out
-    if tail := dobj.flush():
-        yield tail
-    if not saw or not dobj.eof:
+        saw, buf = True, chunk
+        while buf:
+            dobj = dobj or dctx.decompressobj()
+            if out := dobj.decompress(buf):
+                yield out
+            buf, dobj = (dobj.unused_data, None) if dobj.eof else (b"", dobj)
+    if not saw or dobj is not None:
         raise ValueError("Invalid or truncated zstd rollout stream: premature EOF")
 
 
