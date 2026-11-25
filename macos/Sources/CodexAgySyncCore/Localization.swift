@@ -219,6 +219,7 @@ public enum AppCopyKey: CaseIterable, Sendable {
     case settingsWindowTitle
     case settingsTabGeneral
     case settingsTabDesktopTools
+    case settingsTabAutomation
     case settingsTabUpdates
     case settingsLanguageTitle
     case settingsLanguageSubtitle
@@ -344,6 +345,67 @@ public enum AppCopyKey: CaseIterable, Sendable {
     case excludedAppsChoosePanelTitle
     case excludedAppsEmpty
     case excludedAppsRemove
+
+    case automationIntroTitle
+    case automationIntroSubtitle
+    case automationValueAgentTitle
+    case automationValueAgentDesc
+    case automationValueScriptTitle
+    case automationValueScriptDesc
+    case automationValueJSONTitle
+    case automationValueJSONDesc
+    case automationInstallBothCTA
+    case automationInstallPathsFootnote
+    case automationManageTitle
+    case automationRefresh
+    case automationDismissNotice
+
+    case automationCLICardTitle
+    case automationCLICardSubtitle
+    case automationCLIPathLabel
+    case automationCopyPath
+    case automationCopiedPath
+    case automationCLIInstall
+    case automationCLIUpdate
+    case automationCLIUninstall
+    case automationCLIStatusInstalled
+    case automationCLIStatusNotInstalled
+    case automationCLIStatusOutdated
+    case automationCLIStatusBundledMissing
+    case automationCLIStatusConflict
+    case automationCLIBundledMissingHint
+    case automationCLIPathNotOnPATHHint
+
+    case automationSkillCardTitle
+    case automationSkillCardSubtitle
+    case automationSkillCanonicalLabel
+    case automationSkillLinkedLabel
+    case automationSkillSlashHint
+    case automationSkillInstall
+    case automationSkillReviewChanges
+    case automationSkillRepairLinks
+    case automationSkillUninstall
+    case automationSkillStatusUpToDate
+    case automationSkillStatusNotInstalled
+    case automationSkillStatusUpdateAvailable
+    case automationSkillStatusBrokenLinks
+    case automationSkillStatusExternal
+    case automationSkillStatusConflict
+
+    case automationDiffTitle
+    case automationDiffSubtitle
+    case automationDiffCancel
+    case automationDiffApply
+    case automationDiffNewFileBadge
+
+    case automationNoticeCLIInstalled
+    case automationNoticeCLIUninstalled
+    case automationNoticeSkillInstalled
+    case automationNoticeSkillUpdated
+    case automationNoticeSkillLinksRepaired
+    case automationNoticeSkillUninstalled
+    case automationNoticeBothInstalled
+    case automationNoticeReviewPending
 }
 
 public enum AppCopy {
@@ -456,6 +518,8 @@ public enum AppCopy {
             return BilingualText(zhHans: "常规与同步", en: "General & Sync")
         case .settingsTabDesktopTools:
             return BilingualText(zhHans: "桌面工具", en: "Desktop Tools")
+        case .settingsTabAutomation:
+            return BilingualText(zhHans: "自动化", en: "Automation")
         case .settingsTabUpdates:
             return BilingualText(zhHans: "版本与更新", en: "Version & Updates")
         case .settingsLanguageTitle:
@@ -755,6 +819,159 @@ public enum AppCopy {
             return BilingualText(zhHans: "暂未排除任何应用", en: "No excluded apps")
         case .excludedAppsRemove:
             return BilingualText(zhHans: "移除", en: "Remove")
+
+        case .automationIntroTitle:
+            return BilingualText(
+                zhHans: "让 AI Agent 直接使用 CodexAgySync",
+                en: "Let AI agents use CodexAgySync"
+            )
+        case .automationIntroSubtitle:
+            return BilingualText(
+                zhHans: "安装命令行软链与 Agent Skill，让终端脚本与 AI 编程助手安全检查、配对并同步会话。",
+                en: "Install the CLI symlink and Agent Skill so scripts and AI coding agents can inspect, pair, and sync sessions safely."
+            )
+        case .automationValueAgentTitle:
+            return BilingualText(zhHans: "为 AI Agent 打造", en: "Built for AI agents")
+        case .automationValueAgentDesc:
+            return BilingualText(
+                zhHans: "内置干净室技能文档与排错手册，支持在支持的客户端中使用 /codex-agy-sync。",
+                en: "Includes clean-room skill docs and troubleshooting guides ready for /codex-agy-sync."
+            )
+        case .automationValueScriptTitle:
+            return BilingualText(zhHans: "全流程可脚本化的会话同步", en: "Fully scriptable session sync")
+        case .automationValueScriptDesc:
+            return BilingualText(
+                zhHans: "软链直连应用内置引擎，应用更新时 CLI 自动保持一致，无需拷贝二进制。",
+                en: "Symlinks directly to the bundled engine so the CLI stays aligned whenever the app updates."
+            )
+        case .automationValueJSONTitle:
+            return BilingualText(zhHans: "为 jq 优化的结构化 JSON 输出", en: "Machine-readable JSON for jq")
+        case .automationValueJSONDesc:
+            return BilingualText(
+                zhHans: "主线命令标准输出恒为纯 JSON，错误码 2 通过标准错误输出结构化诊断。",
+                en: "Mainline commands emit pure JSON on stdout and structured exit-code-2 diagnostics on stderr."
+            )
+        case .automationInstallBothCTA:
+            return BilingualText(zhHans: "安装 CLI 与 Agent Skill", en: "Install CLI & Agent Skill")
+        case .automationInstallPathsFootnote:
+            return BilingualText(zhHans: "安装位置", en: "Install locations")
+        case .automationManageTitle:
+            return BilingualText(zhHans: "CLI 与 Agent Skill 管理", en: "CLI & Agent Skill")
+        case .automationRefresh:
+            return BilingualText(zhHans: "刷新", en: "Refresh")
+        case .automationDismissNotice:
+            return BilingualText(zhHans: "关闭", en: "Dismiss")
+
+        case .automationCLICardTitle:
+            return BilingualText(zhHans: "命令行工具（CLI）", en: "Command-Line Tool (CLI)")
+        case .automationCLICardSubtitle:
+            return BilingualText(
+                zhHans: "通过受管软链暴露应用内置的 codex-agy-sync 可执行文件。",
+                en: "Exposes the bundled codex-agy-sync executable via a managed symlink."
+            )
+        case .automationCLIPathLabel:
+            return BilingualText(zhHans: "安装路径", en: "Install Path")
+        case .automationCopyPath:
+            return BilingualText(zhHans: "复制路径", en: "Copy Path")
+        case .automationCopiedPath:
+            return BilingualText(zhHans: "已复制", en: "Copied")
+        case .automationCLIInstall:
+            return BilingualText(zhHans: "安装", en: "Install")
+        case .automationCLIUpdate:
+            return BilingualText(zhHans: "更新", en: "Update")
+        case .automationCLIUninstall:
+            return BilingualText(zhHans: "卸载", en: "Uninstall")
+        case .automationCLIStatusInstalled:
+            return BilingualText(zhHans: "已安装", en: "Installed")
+        case .automationCLIStatusNotInstalled:
+            return BilingualText(zhHans: "未安装", en: "Not Installed")
+        case .automationCLIStatusOutdated:
+            return BilingualText(zhHans: "软链待更新", en: "Update Available")
+        case .automationCLIStatusBundledMissing:
+            return BilingualText(zhHans: "缺少内置 CLI", en: "Bundled CLI Missing")
+        case .automationCLIStatusConflict:
+            return BilingualText(zhHans: "存在冲突", en: "Conflict")
+        case .automationCLIBundledMissingHint:
+            return BilingualText(
+                zhHans: "当前未从包含 Contents/Helpers/codex-agy-sync 的打包 .app 启动，无法创建受管软链。",
+                en: "Not launched from a packaged .app bundle containing Contents/Helpers/codex-agy-sync."
+            )
+        case .automationCLIPathNotOnPATHHint:
+            return BilingualText(
+                zhHans: "当前环境 PATH 未包含 ~/.local/bin；可直接复制上方绝对路径调用，或在 shell 配置中加入 export PATH=\"$HOME/.local/bin:$PATH\"。",
+                en: "~/.local/bin is not on PATH. Use the copied absolute path directly or add export PATH=\"$HOME/.local/bin:$PATH\" to your shell profile."
+            )
+
+        case .automationSkillCardTitle:
+            return BilingualText(zhHans: "Agent Skill", en: "Agent Skill")
+        case .automationSkillCardSubtitle:
+            return BilingualText(
+                zhHans: "在规范目录写入干净室模板并维护客户端软链。",
+                en: "Installs clean-room skill templates into the canonical folder and links AI clients."
+            )
+        case .automationSkillCanonicalLabel:
+            return BilingualText(zhHans: "规范目录", en: "Canonical Directory")
+        case .automationSkillLinkedLabel:
+            return BilingualText(zhHans: "客户端软链", en: "Client Symlink")
+        case .automationSkillSlashHint:
+            return BilingualText(
+                zhHans: "在支持的 AI Agent 中输入 /codex-agy-sync 即可调用。",
+                en: "Invoke /codex-agy-sync inside supported AI agents."
+            )
+        case .automationSkillInstall:
+            return BilingualText(zhHans: "安装", en: "Install")
+        case .automationSkillReviewChanges:
+            return BilingualText(zhHans: "审阅更新", en: "Review Changes")
+        case .automationSkillRepairLinks:
+            return BilingualText(zhHans: "修复链接", en: "Repair Links")
+        case .automationSkillUninstall:
+            return BilingualText(zhHans: "卸载", en: "Uninstall")
+        case .automationSkillStatusUpToDate:
+            return BilingualText(zhHans: "最新版本", en: "Up to Date")
+        case .automationSkillStatusNotInstalled:
+            return BilingualText(zhHans: "未安装", en: "Not Installed")
+        case .automationSkillStatusUpdateAvailable:
+            return BilingualText(zhHans: "发现更新", en: "Update Available")
+        case .automationSkillStatusBrokenLinks:
+            return BilingualText(zhHans: "链接损坏", en: "Links Broken")
+        case .automationSkillStatusExternal:
+            return BilingualText(zhHans: "外部托管", en: "Externally Managed")
+        case .automationSkillStatusConflict:
+            return BilingualText(zhHans: "存在冲突", en: "Conflict")
+
+        case .automationDiffTitle:
+            return BilingualText(zhHans: "审阅 Agent Skill 变更", en: "Review Agent Skill Changes")
+        case .automationDiffSubtitle:
+            return BilingualText(
+                zhHans: "检测到目标技能文件与当前内置模板存在差异，确认以下变更后才会写入。",
+                en: "Target skill files differ from the bundled templates. Confirm these changes before writing."
+            )
+        case .automationDiffCancel:
+            return BilingualText(zhHans: "取消", en: "Cancel")
+        case .automationDiffApply:
+            return BilingualText(zhHans: "应用更新", en: "Apply Changes")
+        case .automationDiffNewFileBadge:
+            return BilingualText(zhHans: "新增", en: "New")
+
+        case .automationNoticeCLIInstalled:
+            return BilingualText(zhHans: "已安装并更新 CLI 软链。", en: "CLI symlink installed.")
+        case .automationNoticeCLIUninstalled:
+            return BilingualText(zhHans: "已卸载受管 CLI 软链。", en: "Managed CLI symlink removed.")
+        case .automationNoticeSkillInstalled:
+            return BilingualText(zhHans: "已安装 Agent Skill 与客户端软链。", en: "Agent Skill and client symlink installed.")
+        case .automationNoticeSkillUpdated:
+            return BilingualText(zhHans: "已应用 Agent Skill 模板更新。", en: "Agent Skill changes applied.")
+        case .automationNoticeSkillLinksRepaired:
+            return BilingualText(zhHans: "已修复 Agent Skill 客户端软链。", en: "Agent Skill client symlink repaired.")
+        case .automationNoticeSkillUninstalled:
+            return BilingualText(zhHans: "已卸载受管 Agent Skill 文件与软链。", en: "Managed Agent Skill files and symlink removed.")
+        case .automationNoticeBothInstalled:
+            return BilingualText(zhHans: "CLI 与 Agent Skill 均已就绪。", en: "CLI and Agent Skill are ready.")
+        case .automationNoticeReviewPending:
+            return BilingualText(
+                zhHans: "检测到已有技能文件存在差异，请先审阅变更再决定是否应用。",
+                en: "Existing skill files differ from bundled templates. Review changes before applying."
+            )
         }
     }
 
@@ -1395,6 +1612,92 @@ public enum AppCopy {
             return "与系统符号快捷键冲突：\(detail)"
         case .en:
             return "Conflicts with a macOS system shortcut: \(detail)"
+        }
+    }
+
+    public static func automationCLIOutdatedDetail(
+        currentTarget: String,
+        expectedTarget: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "当前指向 \(currentTarget)，建议更新至 \(expectedTarget)。"
+        case .en:
+            return "Currently points to \(currentTarget). Update to \(expectedTarget)."
+        }
+    }
+
+    public static func automationCLIConflictDetail(
+        path: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "路径 \(path) 已存在非本应用托管的文件或软链，已拒绝覆盖与删除。"
+        case .en:
+            return "\(path) is not managed by CodexAgySync. Refusing to overwrite or remove."
+        }
+    }
+
+    public static func automationSkillExternalDetail(
+        path: String,
+        destination: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "路径 \(path) 已由外部软链托管（指向 \(destination)），已保持只读，不会覆盖或删除。"
+        case .en:
+            return "\(path) is externally symlinked to \(destination). Left untouched."
+        }
+    }
+
+    public static func automationSkillConflictDetail(
+        path: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "路径 \(path) 存在非受管文件或目录冲突，已拒绝自动覆写。"
+        case .en:
+            return "\(path) has a non-managed file or directory conflict. Refusing to overwrite."
+        }
+    }
+
+    public static func automationSkillBrokenLinksDetail(
+        count: Int,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "有 \(count) 处客户端软链缺失或失效，点击“修复链接”即可恢复。"
+        case .en:
+            return "\(count) client symlink(s) are missing or broken. Click Repair Links to restore."
+        }
+    }
+
+    public static func automationSkillUpdateDetail(
+        fileCount: Int,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "有 \(fileCount) 个技能文件与当前内置模板存在差异，可审阅 diff 后应用。"
+        case .en:
+            return "\(fileCount) skill file(s) differ from the bundled templates. Review the diff before applying."
+        }
+    }
+
+    public static func automationNoticeFilesystemError(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "文件操作失败：\(detail)"
+        case .en:
+            return "Filesystem error: \(detail)"
         }
     }
 }

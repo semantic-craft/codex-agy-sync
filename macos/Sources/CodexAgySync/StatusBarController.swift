@@ -40,6 +40,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     private let store: SessionSyncStore
     private let updateViewModel: UpdateViewModel
+    private let automationViewModel: AutomationViewModel
     private let environment: [String: String]
     private let statusItem: NSStatusItem
     private let panel: SyncPalettePanel
@@ -75,6 +76,14 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             }
         )
         self.updateViewModel = resolvedUpdateVM
+        let resolvedAppVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+            ?? resolvedUpdateVM.appVersion
+        self.automationViewModel = AutomationViewModel(
+            preferencesStore: store.preferencesStore,
+            appVersion: resolvedAppVersion,
+            bundleURL: Bundle.main.bundleURL,
+            environment: environment
+        )
         self.environment = environment
         self.inputHub = DesktopInputHub(environment: environment)
         self.windowResizeConsumer = WindowResizeConsumer(
@@ -306,6 +315,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             settingsController = SettingsWindowController(
                 preferencesStore: store.preferencesStore,
                 updateViewModel: updateViewModel,
+                automationViewModel: automationViewModel,
                 inputHub: inputHub,
                 windowResizeStatusStore: windowResizeStatusStore,
                 onDidChangeCLI: { [weak self] in
