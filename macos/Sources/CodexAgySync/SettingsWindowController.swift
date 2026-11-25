@@ -8,6 +8,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let hostingController: NSHostingController<SettingsView>
     private let preferencesStore: PreferencesStore
     private let updateViewModel: UpdateViewModel
+    private let automationViewModel: AutomationViewModel
+    private let inputHub: DesktopInputHub?
     private let navigation: SettingsNavigationModel
     private var hasCenteredOnce = false
     private var languageObserverToken: ObservationToken?
@@ -15,16 +17,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     init(
         preferencesStore: PreferencesStore,
         updateViewModel: UpdateViewModel,
+        automationViewModel: AutomationViewModel,
+        inputHub: DesktopInputHub? = nil,
+        windowResizeStatusStore: WindowResizeStatusStore? = nil,
         onDidChangeCLI: (() -> Void)? = nil
     ) {
         self.preferencesStore = preferencesStore
         self.updateViewModel = updateViewModel
+        self.automationViewModel = automationViewModel
+        self.inputHub = inputHub
         let navigation = SettingsNavigationModel(selectedTab: .general)
         self.navigation = navigation
         let rootView = SettingsView(
             preferencesStore: preferencesStore,
             updateViewModel: updateViewModel,
+            automationViewModel: automationViewModel,
             navigation: navigation,
+            inputHub: inputHub,
+            windowResizeStatusStore: windowResizeStatusStore,
             onDidChangeCLI: onDidChangeCLI
         )
         let hosting = NSHostingController(rootView: rootView)
@@ -32,7 +42,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         self.hostingController = hosting
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -61,6 +71,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             _ = NSApp.setActivationPolicy(.regular)
         }
         preferencesStore.refreshLaunchAtLoginStatus()
+        _ = inputHub?.refreshPermissions()
+        automationViewModel.refresh()
         Task { @MainActor [weak updateViewModel = self.updateViewModel] in
             await updateViewModel?.refreshOnSurfaceOpen(
                 trigger: .settingsOpened,
@@ -90,6 +102,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         Task { @MainActor in
             _ = NSApp.setActivationPolicy(.accessory)
         }
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        _ = inputHub?.refreshPermissions()
+        automationViewModel.refresh()
     }
 
     func windowDidResignKey(_ notification: Notification) {

@@ -218,6 +218,8 @@ public enum AppCopyKey: CaseIterable, Sendable {
 
     case settingsWindowTitle
     case settingsTabGeneral
+    case settingsTabDesktopTools
+    case settingsTabAutomation
     case settingsTabUpdates
     case settingsLanguageTitle
     case settingsLanguageSubtitle
@@ -300,6 +302,110 @@ public enum AppCopyKey: CaseIterable, Sendable {
     case menuCopy
     case menuPaste
     case menuSelectAll
+
+    case desktopPermissionsTitle
+    case desktopPermissionsSubtitle
+    case desktopPermissionsRecheck
+    case desktopPermissionsPausedWarning
+    case desktopPermissionAccessibilityTitle
+    case desktopPermissionInputMonitoringTitle
+    case desktopPermissionsRequest
+    case desktopPermissionsOpenSettings
+    case desktopPermissionGrantedBadge
+    case desktopPermissionMissingBadge
+
+    case windowResizeCardTitle
+    case windowResizeCardSubtitle
+    case windowResizeEnableAX
+    case windowResizeNearestCornerTitle
+    case windowResizeNearestCornerSubtitle
+    case windowResizeGesturesHeader
+    case windowResizeGestureMoveDesc
+    case windowResizeGestureResizeDesc
+    case windowResizeGestureTilingDesc
+    case windowResizeGestureSplitDesc
+    case windowResizeConflictsTitle
+    case windowResizeNativeTilingOverlapNote
+    case windowResizeConflictLimitationNote
+    case windowResizeClearDiagnostic
+    case windowResizeDiagnosticPermissionDenied
+
+    case windowResizeHUDSplitLeft
+    case windowResizeHUDSplitRight
+    case windowResizeHUDEnterFullScreen
+    case windowResizeHUDExitFullScreen
+    case windowResizeHUDNeutralPrompt
+    case windowResizeHUDCancelHint
+
+    case excludedAppsTitle
+    case excludedAppsSubtitle
+    case excludedAppsAddRunning
+    case excludedAppsNoRunningCandidates
+    case excludedAppsChooseApp
+    case excludedAppsChoosePanelTitle
+    case excludedAppsEmpty
+    case excludedAppsRemove
+
+    case automationIntroTitle
+    case automationIntroSubtitle
+    case automationValueAgentTitle
+    case automationValueAgentDesc
+    case automationValueScriptTitle
+    case automationValueScriptDesc
+    case automationValueJSONTitle
+    case automationValueJSONDesc
+    case automationInstallBothCTA
+    case automationInstallPathsFootnote
+    case automationManageTitle
+    case automationRefresh
+    case automationDismissNotice
+
+    case automationCLICardTitle
+    case automationCLICardSubtitle
+    case automationCLIPathLabel
+    case automationCopyPath
+    case automationCopiedPath
+    case automationCLIInstall
+    case automationCLIUpdate
+    case automationCLIUninstall
+    case automationCLIStatusInstalled
+    case automationCLIStatusNotInstalled
+    case automationCLIStatusOutdated
+    case automationCLIStatusBundledMissing
+    case automationCLIStatusConflict
+    case automationCLIBundledMissingHint
+    case automationCLIPathNotOnPATHHint
+
+    case automationSkillCardTitle
+    case automationSkillCardSubtitle
+    case automationSkillCanonicalLabel
+    case automationSkillLinkedLabel
+    case automationSkillSlashHint
+    case automationSkillInstall
+    case automationSkillReviewChanges
+    case automationSkillRepairLinks
+    case automationSkillUninstall
+    case automationSkillStatusUpToDate
+    case automationSkillStatusNotInstalled
+    case automationSkillStatusUpdateAvailable
+    case automationSkillStatusBrokenLinks
+    case automationSkillStatusExternal
+    case automationSkillStatusConflict
+
+    case automationDiffTitle
+    case automationDiffSubtitle
+    case automationDiffCancel
+    case automationDiffApply
+    case automationDiffNewFileBadge
+
+    case automationNoticeCLIInstalled
+    case automationNoticeCLIUninstalled
+    case automationNoticeSkillInstalled
+    case automationNoticeSkillUpdated
+    case automationNoticeSkillLinksRepaired
+    case automationNoticeSkillUninstalled
+    case automationNoticeBothInstalled
+    case automationNoticeReviewPending
 }
 
 public enum AppCopy {
@@ -410,6 +516,10 @@ public enum AppCopy {
             return BilingualText(zhHans: "CodexAgySync 设置", en: "CodexAgySync Settings")
         case .settingsTabGeneral:
             return BilingualText(zhHans: "常规与同步", en: "General & Sync")
+        case .settingsTabDesktopTools:
+            return BilingualText(zhHans: "桌面工具", en: "Desktop Tools")
+        case .settingsTabAutomation:
+            return BilingualText(zhHans: "自动化", en: "Automation")
         case .settingsTabUpdates:
             return BilingualText(zhHans: "版本与更新", en: "Version & Updates")
         case .settingsLanguageTitle:
@@ -603,6 +713,265 @@ public enum AppCopy {
             return BilingualText(zhHans: "粘贴", en: "Paste")
         case .menuSelectAll:
             return BilingualText(zhHans: "全选", en: "Select All")
+
+        case .desktopPermissionsTitle:
+            return BilingualText(zhHans: "系统权限状态", en: "System Permissions")
+        case .desktopPermissionsSubtitle:
+            return BilingualText(
+                zhHans: "仅在开启桌面工具时使用；默认关闭不会弹窗请求权限，会话同步与 ⌃⌥H 不受影响。",
+                en: "Used only when desktop tools are enabled. Default off never prompts, and session sync with ⌃⌥H keeps working."
+            )
+        case .desktopPermissionsRecheck:
+            return BilingualText(zhHans: "重新检测", en: "Re-check")
+        case .desktopPermissionsPausedWarning:
+            return BilingualText(
+                zhHans: "窗口调整已开启但缺少所需权限，当前处于安全暂停状态（所有按键与鼠标事件透传）。请授予权限后点击“重新检测”。",
+                en: "Window Resize is enabled but missing required permissions. Input passes through safely until permissions are granted."
+            )
+        case .desktopPermissionAccessibilityTitle:
+            return BilingualText(zhHans: "辅助功能（Accessibility）", en: "Accessibility")
+        case .desktopPermissionInputMonitoringTitle:
+            return BilingualText(zhHans: "输入监控（Input Monitoring）", en: "Input Monitoring")
+        case .desktopPermissionsRequest:
+            return BilingualText(zhHans: "请求权限", en: "Request")
+        case .desktopPermissionsOpenSettings:
+            return BilingualText(zhHans: "打开系统设置", en: "Open Settings")
+        case .desktopPermissionGrantedBadge:
+            return BilingualText(zhHans: "已授权", en: "Granted")
+        case .desktopPermissionMissingBadge:
+            return BilingualText(zhHans: "未授权", en: "Not Granted")
+
+        case .windowResizeCardTitle:
+            return BilingualText(zhHans: "窗口调整（Window Resize）", en: "Window Resize")
+        case .windowResizeCardSubtitle:
+            return BilingualText(
+                zhHans: "无需点击激活即可移动/缩放指针下窗口，并通过系统原生菜单调用平铺、全屏与 Split View。",
+                en: "Move or resize the window under the pointer without focusing it, and trigger native macOS tiling, full screen, and Split View."
+            )
+        case .windowResizeEnableAX:
+            return BilingualText(zhHans: "启用窗口调整", en: "Enable Window Resize")
+        case .windowResizeNearestCornerTitle:
+            return BilingualText(zhHans: "从最近角调整尺寸（Nearest Corner）", en: "Resize from Nearest Corner")
+        case .windowResizeNearestCornerSubtitle:
+            return BilingualText(
+                zhHans: "开启后按指针所在象限锁定最近窗口角缩放；关闭时固定以右下角缩放。",
+                en: "Locks the nearest window quadrant when resizing; when off, resizes from the bottom-right corner."
+            )
+        case .windowResizeGesturesHeader:
+            return BilingualText(zhHans: "快捷键与手势说明", en: "Shortcuts & Gestures")
+        case .windowResizeGestureMoveDesc:
+            return BilingualText(zhHans: "移动指针下窗口（无需先点击激活）", en: "Move window under pointer without clicking to focus")
+        case .windowResizeGestureResizeDesc:
+            return BilingualText(zhHans: "调整指针下窗口尺寸（可拖动中按/松 Option 切换）", en: "Resize window under pointer (toggle Option live mid-drag)")
+        case .windowResizeGestureTilingDesc:
+            return BilingualText(zhHans: "对当前活跃窗口调用系统原生平铺 / 填充 / 居中 / 还原", en: "Native macOS Tile / Fill / Center / Restore on active window")
+        case .windowResizeGestureSplitDesc:
+            return BilingualText(zhHans: "松手应用：左/右 Split View，上全屏，下退出全屏/分屏，Esc 取消", en: "Apply on release: Left/Right Split View, Up Full Screen, Down Exit, Esc cancels")
+        case .windowResizeConflictsTitle:
+            return BilingualText(zhHans: "检测到快捷键冲突", en: "Detected Shortcut Conflicts")
+        case .windowResizeNativeTilingOverlapNote:
+            return BilingualText(
+                zhHans: "说明：fn + ctrl + 方向键 / F / C / R 与 macOS 15+ 原生“窗口 -> 移动并调整大小”键位一致，本功能会直接触发原生菜单动作。",
+                en: "Note: fn + ctrl + Arrows / F / C / R matches macOS 15+ native Window -> Move & Resize shortcuts and invokes those native menu actions directly."
+            )
+        case .windowResizeConflictLimitationNote:
+            return BilingualText(
+                zhHans: "提示：macOS 公开 API 无法自动检测第三方窗口/快捷键工具（如 Rectangle、Magnet、Raycast）或外接键盘固件 Fn 键占用；如遇按键无响应请检查上述冲突来源。",
+                en: "Note: macOS public APIs cannot detect third-party tools (such as Rectangle, Magnet, or Raycast) or external keyboards whose firmware does not report Fn."
+            )
+        case .windowResizeClearDiagnostic:
+            return BilingualText(zhHans: "清除", en: "Dismiss")
+        case .windowResizeDiagnosticPermissionDenied:
+            return BilingualText(
+                zhHans: "上次原生窗口操作未执行：缺少辅助功能权限。",
+                en: "Last native window action was skipped: Accessibility permission is missing."
+            )
+
+        case .windowResizeHUDSplitLeft:
+            return BilingualText(zhHans: "左侧 Split View（松手应用）", en: "Split View Left (Release to Apply)")
+        case .windowResizeHUDSplitRight:
+            return BilingualText(zhHans: "右侧 Split View（松手应用）", en: "Split View Right (Release to Apply)")
+        case .windowResizeHUDEnterFullScreen:
+            return BilingualText(zhHans: "进入全屏（松手应用）", en: "Enter Full Screen (Release to Apply)")
+        case .windowResizeHUDExitFullScreen:
+            return BilingualText(zhHans: "退出全屏 / 分屏（松手应用）", en: "Exit Full Screen / Split (Release to Apply)")
+        case .windowResizeHUDNeutralPrompt:
+            return BilingualText(zhHans: "向四方向拖动选择分屏或全屏", en: "Drag in a direction for Split View or Full Screen")
+        case .windowResizeHUDCancelHint:
+            return BilingualText(zhHans: "退回中心或按 Esc 取消", en: "Return to center or press Esc to cancel")
+
+        case .excludedAppsTitle:
+            return BilingualText(zhHans: "排除应用", en: "Excluded Apps")
+        case .excludedAppsSubtitle:
+            return BilingualText(
+                zhHans: "列表中的应用将完整透传所有窗口调整按键与鼠标手势。",
+                en: "Apps in this list receive all keys and pointer gestures untouched."
+            )
+        case .excludedAppsAddRunning:
+            return BilingualText(zhHans: "从运行中应用添加", en: "Add Running App")
+        case .excludedAppsNoRunningCandidates:
+            return BilingualText(zhHans: "没有可添加的运行中应用", en: "No additional running apps")
+        case .excludedAppsChooseApp:
+            return BilingualText(zhHans: "选择应用…", en: "Choose App…")
+        case .excludedAppsChoosePanelTitle:
+            return BilingualText(zhHans: "选择要排除的应用程序", en: "Choose Application to Exclude")
+        case .excludedAppsEmpty:
+            return BilingualText(zhHans: "暂未排除任何应用", en: "No excluded apps")
+        case .excludedAppsRemove:
+            return BilingualText(zhHans: "移除", en: "Remove")
+
+        case .automationIntroTitle:
+            return BilingualText(
+                zhHans: "让 AI Agent 直接使用 CodexAgySync",
+                en: "Let AI agents use CodexAgySync"
+            )
+        case .automationIntroSubtitle:
+            return BilingualText(
+                zhHans: "安装命令行软链与 Agent Skill，让终端脚本与 AI 编程助手安全检查、配对并同步会话。",
+                en: "Install the CLI symlink and Agent Skill so scripts and AI coding agents can inspect, pair, and sync sessions safely."
+            )
+        case .automationValueAgentTitle:
+            return BilingualText(zhHans: "为 AI Agent 打造", en: "Built for AI agents")
+        case .automationValueAgentDesc:
+            return BilingualText(
+                zhHans: "内置干净室技能文档与排错手册，支持在支持的客户端中使用 /codex-agy-sync。",
+                en: "Includes clean-room skill docs and troubleshooting guides ready for /codex-agy-sync."
+            )
+        case .automationValueScriptTitle:
+            return BilingualText(zhHans: "全流程可脚本化的会话同步", en: "Fully scriptable session sync")
+        case .automationValueScriptDesc:
+            return BilingualText(
+                zhHans: "软链直连应用内置引擎，应用更新时 CLI 自动保持一致，无需拷贝二进制。",
+                en: "Symlinks directly to the bundled engine so the CLI stays aligned whenever the app updates."
+            )
+        case .automationValueJSONTitle:
+            return BilingualText(zhHans: "为 jq 优化的结构化 JSON 输出", en: "Machine-readable JSON for jq")
+        case .automationValueJSONDesc:
+            return BilingualText(
+                zhHans: "主线命令标准输出恒为纯 JSON，错误码 2 通过标准错误输出结构化诊断。",
+                en: "Mainline commands emit pure JSON on stdout and structured exit-code-2 diagnostics on stderr."
+            )
+        case .automationInstallBothCTA:
+            return BilingualText(zhHans: "安装 CLI 与 Agent Skill", en: "Install CLI & Agent Skill")
+        case .automationInstallPathsFootnote:
+            return BilingualText(zhHans: "安装位置", en: "Install locations")
+        case .automationManageTitle:
+            return BilingualText(zhHans: "CLI 与 Agent Skill 管理", en: "CLI & Agent Skill")
+        case .automationRefresh:
+            return BilingualText(zhHans: "刷新", en: "Refresh")
+        case .automationDismissNotice:
+            return BilingualText(zhHans: "关闭", en: "Dismiss")
+
+        case .automationCLICardTitle:
+            return BilingualText(zhHans: "命令行工具（CLI）", en: "Command-Line Tool (CLI)")
+        case .automationCLICardSubtitle:
+            return BilingualText(
+                zhHans: "通过受管软链暴露应用内置的 codex-agy-sync 可执行文件。",
+                en: "Exposes the bundled codex-agy-sync executable via a managed symlink."
+            )
+        case .automationCLIPathLabel:
+            return BilingualText(zhHans: "安装路径", en: "Install Path")
+        case .automationCopyPath:
+            return BilingualText(zhHans: "复制路径", en: "Copy Path")
+        case .automationCopiedPath:
+            return BilingualText(zhHans: "已复制", en: "Copied")
+        case .automationCLIInstall:
+            return BilingualText(zhHans: "安装", en: "Install")
+        case .automationCLIUpdate:
+            return BilingualText(zhHans: "更新", en: "Update")
+        case .automationCLIUninstall:
+            return BilingualText(zhHans: "卸载", en: "Uninstall")
+        case .automationCLIStatusInstalled:
+            return BilingualText(zhHans: "已安装", en: "Installed")
+        case .automationCLIStatusNotInstalled:
+            return BilingualText(zhHans: "未安装", en: "Not Installed")
+        case .automationCLIStatusOutdated:
+            return BilingualText(zhHans: "软链待更新", en: "Update Available")
+        case .automationCLIStatusBundledMissing:
+            return BilingualText(zhHans: "缺少内置 CLI", en: "Bundled CLI Missing")
+        case .automationCLIStatusConflict:
+            return BilingualText(zhHans: "存在冲突", en: "Conflict")
+        case .automationCLIBundledMissingHint:
+            return BilingualText(
+                zhHans: "当前未从包含 Contents/Helpers/codex-agy-sync 的打包 .app 启动，无法创建受管软链。",
+                en: "Not launched from a packaged .app bundle containing Contents/Helpers/codex-agy-sync."
+            )
+        case .automationCLIPathNotOnPATHHint:
+            return BilingualText(
+                zhHans: "当前环境 PATH 未包含 ~/.local/bin；可直接复制上方绝对路径调用，或在 shell 配置中加入 export PATH=\"$HOME/.local/bin:$PATH\"。",
+                en: "~/.local/bin is not on PATH. Use the copied absolute path directly or add export PATH=\"$HOME/.local/bin:$PATH\" to your shell profile."
+            )
+
+        case .automationSkillCardTitle:
+            return BilingualText(zhHans: "Agent Skill", en: "Agent Skill")
+        case .automationSkillCardSubtitle:
+            return BilingualText(
+                zhHans: "在规范目录写入干净室模板并维护客户端软链。",
+                en: "Installs clean-room skill templates into the canonical folder and links AI clients."
+            )
+        case .automationSkillCanonicalLabel:
+            return BilingualText(zhHans: "规范目录", en: "Canonical Directory")
+        case .automationSkillLinkedLabel:
+            return BilingualText(zhHans: "客户端软链", en: "Client Symlink")
+        case .automationSkillSlashHint:
+            return BilingualText(
+                zhHans: "在支持的 AI Agent 中输入 /codex-agy-sync 即可调用。",
+                en: "Invoke /codex-agy-sync inside supported AI agents."
+            )
+        case .automationSkillInstall:
+            return BilingualText(zhHans: "安装", en: "Install")
+        case .automationSkillReviewChanges:
+            return BilingualText(zhHans: "审阅更新", en: "Review Changes")
+        case .automationSkillRepairLinks:
+            return BilingualText(zhHans: "修复链接", en: "Repair Links")
+        case .automationSkillUninstall:
+            return BilingualText(zhHans: "卸载", en: "Uninstall")
+        case .automationSkillStatusUpToDate:
+            return BilingualText(zhHans: "最新版本", en: "Up to Date")
+        case .automationSkillStatusNotInstalled:
+            return BilingualText(zhHans: "未安装", en: "Not Installed")
+        case .automationSkillStatusUpdateAvailable:
+            return BilingualText(zhHans: "发现更新", en: "Update Available")
+        case .automationSkillStatusBrokenLinks:
+            return BilingualText(zhHans: "链接损坏", en: "Links Broken")
+        case .automationSkillStatusExternal:
+            return BilingualText(zhHans: "外部托管", en: "Externally Managed")
+        case .automationSkillStatusConflict:
+            return BilingualText(zhHans: "存在冲突", en: "Conflict")
+
+        case .automationDiffTitle:
+            return BilingualText(zhHans: "审阅 Agent Skill 变更", en: "Review Agent Skill Changes")
+        case .automationDiffSubtitle:
+            return BilingualText(
+                zhHans: "检测到目标技能文件与当前内置模板存在差异，确认以下变更后才会写入。",
+                en: "Target skill files differ from the bundled templates. Confirm these changes before writing."
+            )
+        case .automationDiffCancel:
+            return BilingualText(zhHans: "取消", en: "Cancel")
+        case .automationDiffApply:
+            return BilingualText(zhHans: "应用更新", en: "Apply Changes")
+        case .automationDiffNewFileBadge:
+            return BilingualText(zhHans: "新增", en: "New")
+
+        case .automationNoticeCLIInstalled:
+            return BilingualText(zhHans: "已安装并更新 CLI 软链。", en: "CLI symlink installed.")
+        case .automationNoticeCLIUninstalled:
+            return BilingualText(zhHans: "已卸载受管 CLI 软链。", en: "Managed CLI symlink removed.")
+        case .automationNoticeSkillInstalled:
+            return BilingualText(zhHans: "已安装 Agent Skill 与客户端软链。", en: "Agent Skill and client symlink installed.")
+        case .automationNoticeSkillUpdated:
+            return BilingualText(zhHans: "已应用 Agent Skill 模板更新。", en: "Agent Skill changes applied.")
+        case .automationNoticeSkillLinksRepaired:
+            return BilingualText(zhHans: "已修复 Agent Skill 客户端软链。", en: "Agent Skill client symlink repaired.")
+        case .automationNoticeSkillUninstalled:
+            return BilingualText(zhHans: "已卸载受管 Agent Skill 文件与软链。", en: "Managed Agent Skill files and symlink removed.")
+        case .automationNoticeBothInstalled:
+            return BilingualText(zhHans: "CLI 与 Agent Skill 均已就绪。", en: "CLI and Agent Skill are ready.")
+        case .automationNoticeReviewPending:
+            return BilingualText(
+                zhHans: "检测到已有技能文件存在差异，请先审阅变更再决定是否应用。",
+                en: "Existing skill files differ from bundled templates. Review changes before applying."
+            )
         }
     }
 
@@ -1195,6 +1564,140 @@ public enum AppCopy {
             return "远端检查不可用（\(detail)）；可直接从本地源码仓 v\(repoVersion) 同步构建。"
         case .en:
             return "Remote check unavailable (\(detail)); sync directly from local repo v\(repoVersion)."
+        }
+    }
+
+    public static func windowResizeDiagnosticUnsupportedApp(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "目标应用不支持该系统原生窗口动作（\(detail)）。"
+        case .en:
+            return "Target app does not support this native window action (\(detail))."
+        }
+    }
+
+    public static func windowResizeDiagnosticUnsupportedSystem(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "当前系统状态不支持该原生窗口动作（\(detail)）。"
+        case .en:
+            return "Current system state does not support this native window action (\(detail))."
+        }
+    }
+
+    public static func windowResizeConflictInternal(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "应用内部快捷键冲突：\(detail)"
+        case .en:
+            return "Internal shortcut conflict: \(detail)"
+        }
+    }
+
+    public static func windowResizeConflictSymbolic(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "与系统符号快捷键冲突：\(detail)"
+        case .en:
+            return "Conflicts with a macOS system shortcut: \(detail)"
+        }
+    }
+
+    public static func automationCLIOutdatedDetail(
+        currentTarget: String,
+        expectedTarget: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "当前指向 \(currentTarget)，建议更新至 \(expectedTarget)。"
+        case .en:
+            return "Currently points to \(currentTarget). Update to \(expectedTarget)."
+        }
+    }
+
+    public static func automationCLIConflictDetail(
+        path: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "路径 \(path) 已存在非本应用托管的文件或软链，已拒绝覆盖与删除。"
+        case .en:
+            return "\(path) is not managed by CodexAgySync. Refusing to overwrite or remove."
+        }
+    }
+
+    public static func automationSkillExternalDetail(
+        path: String,
+        destination: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "路径 \(path) 已由外部软链托管（指向 \(destination)），已保持只读，不会覆盖或删除。"
+        case .en:
+            return "\(path) is externally symlinked to \(destination). Left untouched."
+        }
+    }
+
+    public static func automationSkillConflictDetail(
+        path: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "路径 \(path) 存在非受管文件或目录冲突，已拒绝自动覆写。"
+        case .en:
+            return "\(path) has a non-managed file or directory conflict. Refusing to overwrite."
+        }
+    }
+
+    public static func automationSkillBrokenLinksDetail(
+        count: Int,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "有 \(count) 处客户端软链缺失或失效，点击“修复链接”即可恢复。"
+        case .en:
+            return "\(count) client symlink(s) are missing or broken. Click Repair Links to restore."
+        }
+    }
+
+    public static func automationSkillUpdateDetail(
+        fileCount: Int,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "有 \(fileCount) 个技能文件与当前内置模板存在差异，可审阅 diff 后应用。"
+        case .en:
+            return "\(fileCount) skill file(s) differ from the bundled templates. Review the diff before applying."
+        }
+    }
+
+    public static func automationNoticeFilesystemError(
+        _ detail: String,
+        in language: ResolvedLanguage
+    ) -> String {
+        switch language {
+        case .zhHans:
+            return "文件操作失败：\(detail)"
+        case .en:
+            return "Filesystem error: \(detail)"
         }
     }
 }

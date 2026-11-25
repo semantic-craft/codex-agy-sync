@@ -40,13 +40,18 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     private let store: SessionSyncStore
     private let updateViewModel: UpdateViewModel
+    private let automationViewModel: AutomationViewModel
     private let environment: [String: String]
     private let statusItem: NSStatusItem
     private let panel: SyncPalettePanel
     private let hostingController: NSHostingController<PopoverView>
     private let router = PopoverRouter()
     private var settingsController: SettingsWindowController?
-    private var hotKey: GlobalHotKey?
+    private let inputHub: DesktopInputHub
+    private let windowResizeConsumer: WindowResizeConsumer
+    private let windowResizeStatusStore = WindowResizeStatusStore()
+    private let gestureHUDController = GestureHUDController()
+    private var hasStarted: Bool = false
     private var keyMonitor: Any?
     private var lastShowAttentionDot: Bool?
     private var lastLanguage: ResolvedLanguage?
@@ -71,7 +76,19 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             }
         )
         self.updateViewModel = resolvedUpdateVM
+        let resolvedAppVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+            ?? resolvedUpdateVM.appVersion
+        self.automationViewModel = AutomationViewModel(
+            preferencesStore: store.preferencesStore,
+            appVersion: resolvedAppVersion,
+            bundleURL: Bundle.main.bundleURL,
+            environment: environment
+        )
         self.environment = environment
+        self.inputHub = DesktopInputHub(environment: environment)
+        self.windowResizeConsumer = WindowResizeConsumer(
+            preferences: store.preferencesStore.preferences.windowResize
+        )
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         let router = self.router
@@ -115,11 +132,29 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         self.router.openSettings = { [weak self] tab in
             self?.openSettings(initialTab: tab)
         }
+        self.windowResizeConsumer.setHandlers(
+            onHUDStateChange: { [weak self] hudState in
+                guard let self else { return }
+                self.gestureHUDController.update(
+                    state: hudState,
+                    language: self.store.preferencesStore.effectiveLanguage
+                )
+            },
+            onDiagnosticResult: { [weak self] result in
+                self?.windowResizeStatusStore.record(result)
+            }
+        )
         self.updateViewModel.onPrepareForRelaunch = { [weak self] in
-            self?.hotKey?.unregister()
+            self?.gestureHUDController.hide()
+            self?.windowResizeConsumer.handleTapReset()
+            self?.inputHub.suspendForRelaunch()
         }
         self.updateViewModel.onRelaunchFailed = { [weak self] in
-            self?.applyHotKeyPreferences()
+            guard let self else { return }
+            self.inputHub.resumeAfterFailedRelaunch()
+            self.store.preferencesStore.setHotKeyRegistrationFailed(
+                self.inputHub.failedCarbonSlots.contains(.syncPanel)
+            )
         }
         if store.canMutateEnvironment == nil {
             store.canMutateEnvironment = { [weak resolvedUpdateVM] in
@@ -172,6 +207,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.updateStatusButtonAppearance()
             self.applyHotKeyPreferences()
+            self.applyDesktopToolsPreferences()
             if self.panel.isVisible {
                 self.positionPanel()
             }
@@ -181,37 +217,55 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     private func applyHotKeyPreferences() {
-        guard environment["MENUBAR_DISABLE_GLOBAL_HOTKEY"] != "1", let hk = hotKey else {
+        guard hasStarted else { return }
+        if store.preferencesStore.isRecordingShortcut {
+            inputHub.setShortcutRecording(true)
             return
         }
-        if store.preferencesStore.isRecordingShortcut {
-            hk.suspend()
-        } else {
-            let ok = hk.reconfigure(store.preferencesStore.preferences.hotKey)
-            store.preferencesStore.setHotKeyRegistrationFailed(!ok)
+        registerSyncPanelHotKey()
+        if inputHub.isRecordingShortcut {
+            inputHub.setShortcutRecording(false)
+        }
+        store.preferencesStore.setHotKeyRegistrationFailed(
+            inputHub.failedCarbonSlots.contains(.syncPanel)
+        )
+    }
+
+    private func applyDesktopToolsPreferences() {
+        guard hasStarted else { return }
+        let windowResizePrefs = store.preferencesStore.preferences.windowResize
+        windowResizeConsumer.updatePreferences(windowResizePrefs)
+        if !windowResizePrefs.isEnabled {
+            gestureHUDController.hide()
+        }
+        _ = inputHub.syncTapState()
+    }
+
+    private func registerSyncPanelHotKey() {
+        inputHub.registerCarbonHotKey(
+            slot: .syncPanel,
+            featureSlot: .syncPanel,
+            shortcut: store.preferencesStore.preferences.hotKey
+        ) { [weak self] in
+            guard let self else { return }
+            switch self.store.preferencesStore.preferences.hotKeyBehavior {
+            case .togglePanelOnly:
+                self.togglePanel(nil)
+            case .instantPrimaryRescue:
+                self.showPanel(refreshIfNeeded: false)
+                Task { @MainActor in
+                    await self.store.refreshAndPerformPrimaryAction()
+                }
+            }
         }
     }
 
     func start() {
         installKeyMonitorIfNeeded()
-
-        if environment["MENUBAR_DISABLE_GLOBAL_HOTKEY"] != "1" {
-            let hk = GlobalHotKey { [weak self] in
-                guard let self else { return }
-                switch self.store.preferencesStore.preferences.hotKeyBehavior {
-                case .togglePanelOnly:
-                    self.togglePanel(nil)
-                case .instantPrimaryRescue:
-                    self.showPanel(refreshIfNeeded: false)
-                    Task { @MainActor in
-                        await self.store.refreshAndPerformPrimaryAction()
-                    }
-                }
-            }
-            let ok = hk.register(shortcut: store.preferencesStore.preferences.hotKey)
-            store.preferencesStore.setHotKeyRegistrationFailed(!ok)
-            self.hotKey = hk
-        }
+        inputHub.registerConsumer(windowResizeConsumer)
+        hasStarted = true
+        applyHotKeyPreferences()
+        applyDesktopToolsPreferences()
 
         if environment["MENUBAR_AUTO_OPEN_PANEL"] == "1" {
             Task { @MainActor [weak self] in
@@ -237,8 +291,11 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     func stop() {
-        hotKey?.unregister()
-        hotKey = nil
+        hasStarted = false
+        gestureHUDController.hide()
+        windowResizeConsumer.handleTapReset()
+        inputHub.unregisterConsumer(windowResizeConsumer)
+        inputHub.stopAll()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
             self.keyMonitor = nil
@@ -258,6 +315,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             settingsController = SettingsWindowController(
                 preferencesStore: store.preferencesStore,
                 updateViewModel: updateViewModel,
+                automationViewModel: automationViewModel,
+                inputHub: inputHub,
+                windowResizeStatusStore: windowResizeStatusStore,
                 onDidChangeCLI: { [weak self] in
                     Task { @MainActor in
                         await self?.store.refresh()
